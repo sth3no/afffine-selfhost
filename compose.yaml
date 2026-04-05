@@ -32,6 +32,7 @@ services:
     restart: unless-stopped
     networks:
       - affine_net
+      - shared_net
 
   affine_migration:
     image: ghcr.io/toeverything/affine:${AFFINE_REVISION:-stable}
@@ -106,6 +107,14 @@ services:
 networks:
   affine_net:
     driver: bridge
+  # External network shared with other stacks (e.g. n8n). Must be created
+  # once on the host BEFORE deploying this stack:
+  #   docker network create shared_net
+  # Any other stack that also joins `shared_net` (as external) can reach
+  # this AFFiNE instance at http://affine:3010
+  shared_net:
+    external: true
+    name: ${SHARED_NETWORK:-shared_net}
 
 volumes:
   postgres_data:

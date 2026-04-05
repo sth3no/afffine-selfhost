@@ -110,6 +110,61 @@ Named volumes (managed by Portainer):
 
 Back these up before upgrading `AFFINE_REVISION`.
 
+## Connecting from another stack (n8n, etc.)
+
+AFFiNE joins two Docker networks:
+
+- `affine_net` — private, internal to this stack (postgres, redis, mcp_agent).
+- `shared_net` — **external**, for reaching AFFiNE from other Portainer stacks.
+
+### One-time setup on the Docker host
+
+Before deploying this stack, create the shared network once:
+
+```bash
+docker network create shared_net
+```
+
+(If you prefer a different name, set `SHARED_NETWORK=my_name` in the stack env.
+The network must already exist on the host — Portainer will not create it.)
+
+### In your n8n stack's compose file
+
+Add the same external network to the n8n service:
+
+```yaml
+services:
+  n8n:
+    # ...your existing n8n config...
+    networks:
+      - default       # keep whatever n8n had
+      - shared_net
+
+networks:
+  shared_net:
+    external: true
+```
+
+Redeploy the n8n stack. From any n8n workflow, AFFiNE is now reachable at:
+
+```
+http://affine:3010
+```
+
+Use that as the base URL in the HTTP Request node. Auth is the same `ut_…`
+token the MCP agent uses — generate it in AFFiNE's Workspace Settings →
+Integration → MCP Server and pass it as a bearer header.
+
+### Quick sanity check
+
+From the Portainer host:
+
+```bash
+docker network inspect shared_net --format '{{range .Containers}}{{.Name}} {{end}}'
+```
+
+You should see both `affine_server` and your n8n container listed.
+
 ## Reverse proxy
 
 `compose.yaml` only exposes the AFFiNE port on the host. For public
