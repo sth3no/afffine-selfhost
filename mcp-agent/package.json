@@ -1,0 +1,22 @@
+{
+  "name": "affine-mcp-agent",
+  "version": "1.0.0",
+  "description": "Automation agent that connects to AFFiNE's MCP server for scheduled workspace operations",
+  "type": "module",
+  "scripts": {
+    "start": "tsx src/agent.ts",
+    "daily-digest": "tsx src/automations/daily-digest.ts",
+    "stale-docs": "tsx src/automations/stale-docs.ts",
+    "comment-summary": "tsx src/automations/comment-summary.ts",
+    "scheduler": "tsx src/scheduler.ts"
+  },
+  "dependencies": {
+    "node-cron": "^3.0.3"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.0",
+    "@types/node": "^22.0.0",
+    "@types/node-cron": "^3.0.11",
+    "typescript": "^5.6.0"
+  }
+}

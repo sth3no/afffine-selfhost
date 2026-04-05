@@ -1,0 +1,114 @@
+name: affine-stack
+
+# AFFiNE self-host + MCP automation agent
+# Deploy via Portainer → Stacks → Add stack (Git repository or Web editor)
+
+services:
+  affine:
+    image: ghcr.io/toeverything/affine:${AFFINE_REVISION:-stable}
+    container_name: affine_server
+    ports:
+      - '${PORT:-3010}:3010'
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      affine_migration:
+        condition: service_completed_successfully
+    volumes:
+      - affine_storage:/root/.affine/storage
+      - affine_config:/root/.affine/config
+    environment:
+      - REDIS_SERVER_HOST=redis
+      - DATABASE_URL=postgresql://${DB_USERNAME}:${DB_PASSWORD}@postgres:5432/${DB_DATABASE:-affine}
+      - AFFINE_INDEXER_ENABLED=false
+      - AFFINE_SERVER_EXTERNAL_URL=${AFFINE_SERVER_EXTERNAL_URL:-http://localhost:3010}
+      - MAILER_HOST=${MAILER_HOST:-}
+      - MAILER_PORT=${MAILER_PORT:-}
+      - MAILER_USER=${MAILER_USER:-}
+      - MAILER_PASSWORD=${MAILER_PASSWORD:-}
+      - MAILER_SENDER=${MAILER_SENDER:-}
+    restart: unless-stopped
+    networks:
+      - affine_net
+
+  affine_migration:
+    image: ghcr.io/toeverything/affine:${AFFINE_REVISION:-stable}
+    container_name: affine_migration_job
+    volumes:
+      - affine_storage:/root/.affine/storage
+      - affine_config:/root/.affine/config
+    command: ['sh', '-c', 'node ./scripts/self-host-predeploy.js']
+    environment:
+      - REDIS_SERVER_HOST=redis
+      - DATABASE_URL=postgresql://${DB_USERNAME}:${DB_PASSWORD}@postgres:5432/${DB_DATABASE:-affine}
+      - AFFINE_INDEXER_ENABLED=false
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - affine_net
+
+  redis:
+    image: redis:7-alpine
+    container_name: affine_redis
+    healthcheck:
+      test: ['CMD', 'redis-cli', '--raw', 'incr', 'ping']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    volumes:
+      - redis_data:/data
+    networks:
+      - affine_net
+
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: affine_postgres
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    environment:
+      POSTGRES_USER: ${DB_USERNAME}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_DB: ${DB_DATABASE:-affine}
+      POSTGRES_INITDB_ARGS: '--data-checksums'
+    healthcheck:
+      test: ['CMD', 'pg_isready', '-U', '${DB_USERNAME}', '-d', '${DB_DATABASE:-affine}']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - affine_net
+
+  mcp_agent:
+    build:
+      context: ./mcp-agent
+      dockerfile: Dockerfile
+    image: affine-mcp-agent:local
+    container_name: affine_mcp_agent
+    depends_on:
+      affine:
+        condition: service_started
+    environment:
+      - AFFINE_BASE_URL=http://affine:3010
+      - AFFINE_WORKSPACE_ID=${AFFINE_WORKSPACE_ID:-}
+      - AFFINE_ACCESS_TOKEN=${AFFINE_ACCESS_TOKEN:-}
+      - TZ=${TZ:-UTC}
+    restart: unless-stopped
+    networks:
+      - affine_net
+
+networks:
+  affine_net:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  redis_data:
+  affine_storage:
+  affine_config:
