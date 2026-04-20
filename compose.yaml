@@ -15,7 +15,7 @@ services:
       postgres:
         condition: service_healthy
       manticoresearch:
-        condition: service_healthy
+        condition: service_started
       affine_migration:
         condition: service_completed_successfully
     # Wait for the HTTP server to actually be listening on :3010 before
@@ -130,12 +130,11 @@ services:
         hard: -1
     volumes:
       - manticore_data:/var/lib/manticore
-    healthcheck:
-      test: ['CMD-SHELL', 'searchd --status > /dev/null 2>&1 || exit 1']
-      interval: 15s
-      timeout: 5s
-      retries: 10
-      start_period: 20s
+    # Intentionally no healthcheck — the manticore image doesn't ship with
+    # curl/wget and `searchd --status` can timeout on boot even when the
+    # daemon is listening, which then blocks the whole stack from starting.
+    # AFFiNE's own dev compose omits the healthcheck too; the server side
+    # retries on connection failure.
     restart: unless-stopped
     networks:
       - affine_net
