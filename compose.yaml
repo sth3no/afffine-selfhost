@@ -119,6 +119,12 @@ services:
     depends_on:
       affine:
         condition: service_healthy
+    # Publishing this port makes the extended MCP reachable from outside
+    # the Docker host — needed for Claude Desktop, Cursor, or any other
+    # MCP-capable client running on your laptop. To restrict to localhost
+    # only, set MCP_EXT_BIND=127.0.0.1 in the stack env.
+    ports:
+      - '${MCP_EXT_BIND:-0.0.0.0}:${MCP_EXT_PORT:-3100}:3100'
     environment:
       - AFFINE_BASE_URL=http://affine:3010
       - AFFINE_WORKSPACE_ID=${AFFINE_WORKSPACE_ID:-}

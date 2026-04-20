@@ -411,9 +411,12 @@ function forwardAlias(
   };
 }
 
+// AFFiNE exposes these natively under the same underscore names we use
+// here. The proxy forwards the tools/call through unchanged so we benefit
+// automatically when AFFiNE improves doc reading / search behaviour.
 const readDocument = forwardAlias(
   'read_document',
-  'doc-read',
+  'read_document',
   'Read the full content of a document by its ID (forwarded to AFFiNE native MCP).',
   {
     type: 'object',
@@ -424,8 +427,8 @@ const readDocument = forwardAlias(
 
 const keywordSearch = forwardAlias(
   'keyword_search',
-  'doc-keyword-search',
-  'Fuzzy keyword search across workspace documents (forwarded to AFFiNE native MCP).',
+  'keyword_search',
+  'Fuzzy keyword search across workspace documents (forwarded to AFFiNE native MCP). Requires AFFINE_INDEXER_ENABLED=true on the AFFiNE server.',
   {
     type: 'object',
     properties: { query: { type: 'string', description: 'Search query' } },
@@ -435,8 +438,8 @@ const keywordSearch = forwardAlias(
 
 const semanticSearch = forwardAlias(
   'semantic_search',
-  'doc-semantic-search',
-  'Vector semantic similarity search across documents (forwarded to AFFiNE native MCP).',
+  'semantic_search',
+  'Vector semantic similarity search across documents (forwarded to AFFiNE native MCP). Requires AFFINE_INDEXER_ENABLED=true.',
   {
     type: 'object',
     properties: { query: { type: 'string', description: 'Search query' } },
