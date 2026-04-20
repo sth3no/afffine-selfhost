@@ -130,7 +130,20 @@ const getWorkspaceInfo: ToolDefinition = {
       }`,
       { id: wsId() }
     );
-    return JSON.stringify(data.workspace, null, 2);
+    // AFFiNE stores the workspace display name inside the Yjs doc, not on
+    // the server — GraphQL has no `name` field. Use the id as a stable
+    // display fallback so `workspace.name` in callers isn't undefined.
+    return JSON.stringify(
+      {
+        id: data.workspace.id,
+        name: data.workspace.id,
+        team: data.workspace.team,
+        memberCount: data.workspace.memberCount,
+        owner: data.workspace.owner,
+      },
+      null,
+      2
+    );
   },
 };
 
@@ -160,7 +173,18 @@ const listMembers: ToolDefinition = {
       }`,
       { id: wsId(), take }
     );
-    return JSON.stringify(data.workspace.members, null, 2);
+    // Wrap in { total, members } so callers that read .total don't see
+    // undefined. This uses the returned length; for exact count across
+    // pagination, AFFiNE exposes workspace.memberCount separately
+    // (see get_workspace_info).
+    return JSON.stringify(
+      {
+        total: data.workspace.members.length,
+        members: data.workspace.members,
+      },
+      null,
+      2
+    );
   },
 };
 
@@ -208,15 +232,17 @@ const listComments: ToolDefinition = {
       }`,
       { id: wsId(), docId, first: limit }
     );
+    const comments = data.workspace.comments.edges.map(e => ({
+      id: e.node.id,
+      content: e.node.content,
+      resolved: e.node.resolved,
+      author: e.node.user?.name ?? null,
+      createdAt: e.node.createdAt,
+    }));
     return JSON.stringify(
       {
-        comments: data.workspace.comments.edges.map(e => ({
-          id: e.node.id,
-          content: e.node.content,
-          resolved: e.node.resolved,
-          author: e.node.user?.name ?? null,
-          createdAt: e.node.createdAt,
-        })),
+        total: comments.length, // in-page count; for exact count add totalCount to the query if AFFiNE exposes it
+        comments,
         hasMore: data.workspace.comments.pageInfo.hasNextPage,
       },
       null,
@@ -329,23 +355,31 @@ const getDocumentInfo: ToolDefinition = {
 const listNotifications: ToolDefinition = {
   name: 'list_notifications',
   description:
-    'List user notifications. Not yet implemented in the proxy — returns an empty list so callers do not crash.',
+    'List user notifications. Stubbed — returns an empty list in the shape callers expect.',
   inputSchema: {
     type: 'object',
     properties: { limit: { type: 'number' } },
   },
   async handler() {
-    return JSON.stringify({ notifications: [], note: 'Not implemented in proxy yet' }, null, 2);
+    return JSON.stringify(
+      { total: 0, notifications: [], note: 'Not implemented in proxy yet' },
+      null,
+      2
+    );
   },
 };
 
 const listBlobs: ToolDefinition = {
   name: 'list_blobs',
   description:
-    'List blobs (attachments) in the workspace. Not yet implemented in the proxy — returns an empty list.',
+    'List blobs (attachments) in the workspace. Stubbed — returns an empty list in the shape callers expect.',
   inputSchema: { type: 'object', properties: {} },
   async handler() {
-    return JSON.stringify({ blobs: [], note: 'Not implemented in proxy yet' }, null, 2);
+    return JSON.stringify(
+      { total: 0, blobs: [], note: 'Not implemented in proxy yet' },
+      null,
+      2
+    );
   },
 };
 
