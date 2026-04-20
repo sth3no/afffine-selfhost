@@ -101,6 +101,41 @@ services:
     networks:
       - affine_net
 
+  # MCP extension proxy. Serves as the SINGLE MCP endpoint clients use
+  # (mcp_agent, n8n, Claude Desktop, etc.). Internally:
+  #   - For tools AFFiNE already has (doc-read, doc-*-search), forwards to
+  #     AFFiNE's built-in MCP at /api/workspaces/<id>/mcp.
+  #   - For missing tools (list_documents, get_workspace_info, list_comments,
+  #     list_workspace_members, list_document_history, get_document_info),
+  #     implements them via AFFiNE's GraphQL API.
+  # See ./mcp-ext/src/tools.ts for the full list.
+  mcp_ext:
+    build:
+      context: ./mcp-ext
+      dockerfile: Dockerfile
+    image: affine-mcp-ext:local
+    pull_policy: build
+    container_name: affine_mcp_ext
+    depends_on:
+      affine:
+        condition: service_healthy
+    environment:
+      - AFFINE_BASE_URL=http://affine:3010
+      - AFFINE_WORKSPACE_ID=${AFFINE_WORKSPACE_ID:-}
+      - AFFINE_ACCESS_TOKEN=${AFFINE_ACCESS_TOKEN:-}
+      - PORT=3100
+      - TZ=${TZ:-UTC}
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:3100/health', r => process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    networks:
+      - affine_net
+      - shared_net  # so n8n (and other stacks) can reach the proxy too
+
   mcp_agent:
     build:
       context: ./mcp-agent
@@ -112,10 +147,13 @@ services:
     pull_policy: build
     container_name: affine_mcp_agent
     depends_on:
-      affine:
+      mcp_ext:
         condition: service_healthy
     environment:
-      - AFFINE_BASE_URL=http://affine:3010
+      # Agent now talks to the extension proxy, not AFFiNE directly.
+      # AFFINE_MCP_ENDPOINT overrides the URL built from base+workspace.
+      - AFFINE_BASE_URL=http://mcp_ext:3100
+      - AFFINE_MCP_ENDPOINT=http://mcp_ext:3100/
       - AFFINE_WORKSPACE_ID=${AFFINE_WORKSPACE_ID:-}
       - AFFINE_ACCESS_TOKEN=${AFFINE_ACCESS_TOKEN:-}
       - TZ=${TZ:-UTC}

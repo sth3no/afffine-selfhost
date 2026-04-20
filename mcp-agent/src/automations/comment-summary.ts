@@ -15,7 +15,8 @@ export async function runCommentSummary() {
   const client = new AffineMcpClient(
     config.baseUrl,
     config.workspaceId,
-    config.accessToken
+    config.accessToken,
+    config.mcpEndpoint
   );
   await client.initialize();
 

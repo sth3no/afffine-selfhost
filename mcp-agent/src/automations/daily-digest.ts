@@ -18,7 +18,8 @@ export async function runDailyDigest() {
   const client = new AffineMcpClient(
     config.baseUrl,
     config.workspaceId,
-    config.accessToken
+    config.accessToken,
+    config.mcpEndpoint
   );
   await client.initialize();
 

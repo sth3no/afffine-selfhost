@@ -30,7 +30,8 @@ async function logAvailableTools() {
     const client = new AffineMcpClient(
       config.baseUrl,
       config.workspaceId,
-      config.accessToken
+      config.accessToken,
+      config.mcpEndpoint
     );
     await client.initialize();
     const tools = await client.listTools();

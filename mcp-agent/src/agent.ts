@@ -13,7 +13,8 @@ async function main() {
   const client = new AffineMcpClient(
     config.baseUrl,
     config.workspaceId,
-    config.accessToken
+    config.accessToken,
+    config.mcpEndpoint
   );
 
   console.log('Connecting to AFFiNE MCP server...');

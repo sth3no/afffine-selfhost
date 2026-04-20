@@ -24,10 +24,17 @@ export class AffineMcpClient {
   constructor(
     private baseUrl: string,
     private workspaceId: string,
-    private accessToken: string
+    private accessToken: string,
+    /**
+     * Optional explicit endpoint URL. When set, overrides the default
+     * `${baseUrl}/api/workspaces/${workspaceId}/mcp` path — used when
+     * talking to the mcp_ext proxy (which serves at http://mcp_ext:3100/).
+     */
+    private endpointOverride: string = ''
   ) {}
 
   get endpoint(): string {
+    if (this.endpointOverride) return this.endpointOverride;
     return `${this.baseUrl}/api/workspaces/${this.workspaceId}/mcp`;
   }
 
