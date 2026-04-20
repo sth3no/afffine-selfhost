@@ -46,10 +46,10 @@ async function parseSse(res: Response): Promise<JsonRpcResponse> {
   return JSON.parse(dataLines.join('\n')) as JsonRpcResponse;
 }
 
-async function rpcToNative(
+async function postToNative(
   token: string,
   body: Record<string, unknown>
-): Promise<{ response: JsonRpcResponse; sessionId: string | null }> {
+): Promise<Response> {
   const s = session(token);
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
@@ -72,12 +72,27 @@ async function rpcToNative(
   const newSession = res.headers.get('mcp-session-id');
   if (newSession) s.sessionId = newSession;
 
-  const ct = res.headers.get('content-type') ?? '';
-  const response = ct.includes('text/event-stream')
-    ? await parseSse(res)
-    : ((await res.json()) as JsonRpcResponse);
+  return res;
+}
 
-  return { response, sessionId: s.sessionId };
+/** Send a request (expects a response body) and parse JSON-RPC reply. */
+async function rpcToNative(
+  token: string,
+  body: Record<string, unknown>
+): Promise<JsonRpcResponse> {
+  const res = await postToNative(token, body);
+  const ct = res.headers.get('content-type') ?? '';
+  if (ct.includes('text/event-stream')) return parseSse(res);
+  return (await res.json()) as JsonRpcResponse;
+}
+
+/** Send a JSON-RPC notification (server returns 202 with no body). */
+async function notifyNative(token: string, body: Record<string, unknown>): Promise<void> {
+  const res = await postToNative(token, body);
+  // Drain the (likely empty) body to free the socket. Don't parse —
+  // notifications return 202 Accepted without a JSON body, and calling
+  // res.json() on an empty string throws "Unexpected end of JSON input".
+  await res.text().catch(() => undefined);
 }
 
 /** Ensure native MCP session is initialized before forwarding tool calls. */
@@ -95,7 +110,7 @@ async function ensureInitialized(token: string): Promise<void> {
       clientInfo: { name: 'affine-mcp-ext', version: '1.0.0' },
     },
   });
-  await rpcToNative(token, {
+  await notifyNative(token, {
     jsonrpc: '2.0',
     method: 'notifications/initialized',
   });
@@ -108,7 +123,7 @@ export async function listNativeTools(token: string): Promise<
   Array<{ name: string; description: string; inputSchema: unknown }>
 > {
   await ensureInitialized(token);
-  const { response } = await rpcToNative(token, {
+  const response = await rpcToNative(token, {
     jsonrpc: '2.0',
     id: 'list',
     method: 'tools/list',
@@ -127,7 +142,7 @@ export async function callNativeTool(
   args: Record<string, unknown>
 ): Promise<unknown> {
   await ensureInitialized(token);
-  const { response } = await rpcToNative(token, {
+  const response = await rpcToNative(token, {
     jsonrpc: '2.0',
     id: Date.now(),
     method: 'tools/call',
