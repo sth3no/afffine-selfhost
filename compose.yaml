@@ -96,6 +96,10 @@ services:
       context: ./mcp-agent
       dockerfile: Dockerfile
     image: affine-mcp-agent:local
+    # Never try to pull this image from a registry — it's built locally.
+    # Without this, Portainer's "Pull and redeploy" fails because
+    # affine-mcp-agent:local doesn't exist in any registry.
+    pull_policy: build
     container_name: affine_mcp_agent
     depends_on:
       affine:
