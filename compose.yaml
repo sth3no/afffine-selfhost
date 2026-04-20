@@ -14,6 +14,8 @@ services:
         condition: service_healthy
       postgres:
         condition: service_healthy
+      manticoresearch:
+        condition: service_healthy
       affine_migration:
         condition: service_completed_successfully
     # Wait for the HTTP server to actually be listening on :3010 before
@@ -32,7 +34,10 @@ services:
     environment:
       - REDIS_SERVER_HOST=redis
       - DATABASE_URL=postgresql://${DB_USERNAME}:${DB_PASSWORD}@postgres:5432/${DB_DATABASE:-affine}
-      - AFFINE_INDEXER_ENABLED=false
+      # Full-text + semantic search via Manticore (see manticoresearch service below).
+      - AFFINE_INDEXER_ENABLED=${AFFINE_INDEXER_ENABLED:-true}
+      - AFFINE_INDEXER_SEARCH_PROVIDER=manticoresearch
+      - AFFINE_INDEXER_SEARCH_ENDPOINT=http://manticoresearch:9308
       # Public URL config — pick ONE of these approaches:
       #   (a) AFFINE_SERVER_EXTERNAL_URL=https://affine.example.com  (single URL)
       #   (b) AFFINE_SERVER_HOST=affine.example.com + AFFINE_SERVER_HTTPS=true
@@ -59,7 +64,11 @@ services:
     environment:
       - REDIS_SERVER_HOST=redis
       - DATABASE_URL=postgresql://${DB_USERNAME}:${DB_PASSWORD}@postgres:5432/${DB_DATABASE:-affine}
-      - AFFINE_INDEXER_ENABLED=false
+      # Match the main server so pre-deploy script doesn't complain about
+      # missing indexer config when features are cross-referenced.
+      - AFFINE_INDEXER_ENABLED=${AFFINE_INDEXER_ENABLED:-true}
+      - AFFINE_INDEXER_SEARCH_PROVIDER=manticoresearch
+      - AFFINE_INDEXER_SEARCH_ENDPOINT=http://manticoresearch:9308
     depends_on:
       postgres:
         condition: service_healthy
@@ -97,6 +106,36 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+    restart: unless-stopped
+    networks:
+      - affine_net
+
+  # Manticore search engine — powers AFFiNE's keyword_search and
+  # semantic_search MCP tools. Without this (or with AFFINE_INDEXER_ENABLED=false),
+  # those two tools return "Search provider not found".
+  #
+  # Manticore is light (~100MB), supports both full-text and vector search,
+  # and is what AFFiNE's own dev compose uses. AFFiNE auto-indexes existing
+  # workspaces in the background (batchSize=10 per tick) once enabled.
+  manticoresearch:
+    image: manticoresearch/manticore:${MANTICORE_VERSION:-10.1.0}
+    container_name: affine_manticore
+    ulimits:
+      nproc: 65535
+      nofile:
+        soft: 65535
+        hard: 65535
+      memlock:
+        soft: -1
+        hard: -1
+    volumes:
+      - manticore_data:/var/lib/manticore
+    healthcheck:
+      test: ['CMD-SHELL', 'searchd --status > /dev/null 2>&1 || exit 1']
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
     restart: unless-stopped
     networks:
       - affine_net
@@ -184,3 +223,4 @@ volumes:
   redis_data:
   affine_storage:
   affine_config:
+  manticore_data:
