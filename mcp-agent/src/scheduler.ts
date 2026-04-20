@@ -16,6 +16,32 @@ import cron from 'node-cron';
 import { runDailyDigest } from './automations/daily-digest.js';
 import { runCommentSummary } from './automations/comment-summary.js';
 import { runStaleDocs } from './automations/stale-docs.js';
+import { AffineMcpClient } from './mcp-client.js';
+import { config } from './config.js';
+
+/**
+ * Query AFFiNE once at startup to log which MCP tools are actually exposed.
+ * Different AFFiNE versions (stable / beta / canary) expose different tool
+ * sets — this diagnostic makes mismatches obvious in the container logs
+ * instead of showing up later as cryptic "tool not found" errors.
+ */
+async function logAvailableTools() {
+  try {
+    const client = new AffineMcpClient(
+      config.baseUrl,
+      config.workspaceId,
+      config.accessToken
+    );
+    await client.initialize();
+    const tools = await client.listTools();
+    console.log(`[Scheduler] AFFiNE exposes ${tools.length} MCP tools:`);
+    for (const t of tools) {
+      console.log(`  - ${t.name}${t.title ? ` (${t.title})` : ''}`);
+    }
+  } catch (err) {
+    console.error('[Scheduler] Could not enumerate MCP tools:', err);
+  }
+}
 
 function wrap(name: string, fn: () => Promise<void>) {
   return async () => {
@@ -48,4 +74,8 @@ console.log('[Scheduler] Registered jobs:');
 console.log('  - Comment Summary:  daily at 08:00');
 console.log('  - Daily Digest:     daily at 09:00');
 console.log('  - Stale Docs:       Mondays at 10:00');
-console.log('[Scheduler] Waiting for next scheduled run...\n');
+
+// Fire-and-forget diagnostic — doesn't block scheduler startup
+logAvailableTools().then(() =>
+  console.log('[Scheduler] Waiting for next scheduled run...\n')
+);

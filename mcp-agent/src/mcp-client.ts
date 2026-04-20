@@ -144,6 +144,14 @@ export class AffineMcpClient {
   /** Call a tool by name with arguments */
   async callTool(name: string, args: Record<string, unknown> = {}): Promise<McpToolResult> {
     const result = (await this.rpc('tools/call', { name, arguments: args })) as McpToolResult;
+    // MCP tools report failures via isError + a human-readable text in
+    // content[0].text (NOT via JSON-RPC error). Without this check, callers
+    // like JSON.parse(result.content[0].text) crash with a confusing
+    // SyntaxError when the server's message happens to start with "MCP".
+    if (result?.isError) {
+      const msg = result.content?.[0]?.text ?? 'unknown error';
+      throw new Error(`MCP tool "${name}" failed: ${msg}`);
+    }
     return result;
   }
 
