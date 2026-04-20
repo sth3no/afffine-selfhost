@@ -19,6 +19,7 @@ interface JsonRpcResponse {
 
 export class AffineMcpClient {
   private requestId = 0;
+  private sessionId: string | null = null;
 
   constructor(
     private baseUrl: string,
@@ -28,6 +29,36 @@ export class AffineMcpClient {
 
   get endpoint(): string {
     return `${this.baseUrl}/api/workspaces/${this.workspaceId}/mcp`;
+  }
+
+  /** Build headers for a request, including session id + streamable-http Accept */
+  private headers(): Record<string, string> {
+    const h: Record<string, string> = {
+      'Content-Type': 'application/json',
+      // Streamable HTTP transport (MCP spec 2025-03-26) requires the client
+      // to accept BOTH application/json (single response) and
+      // text/event-stream (streamed response). Omitting this yields 406.
+      Accept: 'application/json, text/event-stream',
+      Authorization: `Bearer ${this.accessToken}`,
+    };
+    if (this.sessionId) h['Mcp-Session-Id'] = this.sessionId;
+    return h;
+  }
+
+  /** Parse an SSE body and return the first JSON-RPC `data:` frame */
+  private async parseSseResponse(res: Response): Promise<JsonRpcResponse> {
+    const text = await res.text();
+    // SSE frames are separated by blank lines. Each frame has one or more
+    // "data: <line>" lines. For our RPC use-case we expect exactly one frame
+    // containing a single JSON-RPC response.
+    const lines = text.split(/\r?\n/);
+    const dataLines = lines
+      .filter(l => l.startsWith('data:'))
+      .map(l => l.slice(5).trimStart());
+    if (dataLines.length === 0) {
+      throw new Error(`SSE response contained no data frames: ${text.slice(0, 200)}`);
+    }
+    return JSON.parse(dataLines.join('\n')) as JsonRpcResponse;
   }
 
   /** Send a raw JSON-RPC request */
@@ -42,24 +73,54 @@ export class AffineMcpClient {
 
     const res = await fetch(this.endpoint, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${this.accessToken}`,
-      },
+      headers: this.headers(),
       body: JSON.stringify(body),
     });
 
     if (!res.ok) {
-      throw new Error(`MCP request failed: ${res.status} ${res.statusText}`);
+      const errText = await res.text().catch(() => '');
+      throw new Error(
+        `MCP request failed: ${res.status} ${res.statusText}${errText ? ` — ${errText.slice(0, 300)}` : ''}`
+      );
     }
 
-    const json = (await res.json()) as JsonRpcResponse;
+    // Capture session id from the initialize response for subsequent calls
+    const newSession = res.headers.get('mcp-session-id');
+    if (newSession) this.sessionId = newSession;
+
+    const contentType = res.headers.get('content-type') ?? '';
+    let json: JsonRpcResponse;
+    if (contentType.includes('text/event-stream')) {
+      json = await this.parseSseResponse(res);
+    } else {
+      json = (await res.json()) as JsonRpcResponse;
+    }
 
     if (json.error) {
       throw new Error(`MCP error [${json.error.code}]: ${json.error.message}`);
     }
-
     return json.result;
+  }
+
+  /** Send a JSON-RPC notification (no id, no response expected) */
+  private async notify(method: string, params?: Record<string, unknown>): Promise<void> {
+    const res = await fetch(this.endpoint, {
+      method: 'POST',
+      headers: this.headers(),
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        method,
+        ...(params ? { params } : {}),
+      }),
+    });
+    // Spec says servers SHOULD return 202 Accepted for notifications.
+    // Anything in the 2xx range is fine; we don't read the body.
+    if (!res.ok) {
+      const errText = await res.text().catch(() => '');
+      throw new Error(
+        `MCP notification failed: ${res.status} ${res.statusText}${errText ? ` — ${errText.slice(0, 300)}` : ''}`
+      );
+    }
   }
 
   /** Initialize the MCP session (required before first use) */
@@ -69,18 +130,7 @@ export class AffineMcpClient {
       capabilities: {},
       clientInfo: { name: 'affine-mcp-agent', version: '1.0.0' },
     });
-    // Send initialized notification (no id = notification)
-    await fetch(this.endpoint, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${this.accessToken}`,
-      },
-      body: JSON.stringify({
-        jsonrpc: '2.0',
-        method: 'notifications/initialized',
-      }),
-    });
+    await this.notify('notifications/initialized');
   }
 
   /** List all available tools */
