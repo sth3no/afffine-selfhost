@@ -18,7 +18,7 @@ import http, { type IncomingMessage, type ServerResponse } from 'node:http';
 import { config } from './config.js';
 import { tools, toolByName } from './tools.js';
 
-const SERVER_INFO = { name: 'affine-mcp-ext', version: '1.0.0' };
+const SERVER_INFO = { name: 'affine-mcp-ext', version: '1.1.0' };
 const PROTOCOL_VERSION = '2025-03-26';
 
 interface JsonRpcRequest {
