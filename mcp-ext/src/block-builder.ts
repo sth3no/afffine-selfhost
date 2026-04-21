@@ -351,11 +351,24 @@ export interface BlockInfo {
   flavour: string;
   style?: string;
   text: string;
+  /** Indentation depth in the block tree (0 = page block). */
+  depth?: number;
 }
 
 export function listBlocks(doc: Y.Doc): BlockInfo[] {
+  // Tree walk from the page block via sys:children, so agents see the
+  // actual document order (not the internal Y.Map insertion order, which
+  // is stable but not semantically meaningful).
+  const blocks = getBlocksMap(doc);
+  const pageId = findPageBlockId(doc);
   const out: BlockInfo[] = [];
-  for (const [id, block] of getBlocksMap(doc)) {
+  const visited = new Set<string>();
+
+  function visit(id: string, depth: number): void {
+    if (visited.has(id)) return;
+    visited.add(id);
+    const block = blocks.get(id);
+    if (!block) return;
     const flavour = String(block.get(SYS_FLAVOUR) ?? '');
     const style = block.get('prop:type');
     out.push({
@@ -363,8 +376,17 @@ export function listBlocks(doc: Y.Doc): BlockInfo[] {
       flavour,
       style: typeof style === 'string' ? style : undefined,
       text: blockTextPreview(block),
-    });
+      depth,
+    } as BlockInfo & { depth: number });
+    const children = block.get(SYS_CHILDREN);
+    if (children instanceof Y.Array) {
+      for (const cid of (children as Y.Array<string>).toArray()) visit(cid, depth + 1);
+    }
   }
+
+  if (pageId) visit(pageId, 0);
+  // Append any orphan blocks not reachable from the page (defensive).
+  for (const [id] of blocks) if (!visited.has(id)) visit(id, 0);
   return out;
 }
 
