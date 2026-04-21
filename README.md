@@ -165,6 +165,106 @@ docker network inspect shared_net --format '{{range .Containers}}{{.Name}} {{end
 
 You should see both `affine_server` and your n8n container listed.
 
+## MCP Extension Proxy (`mcp-ext`)
+
+The stack ships with a second MCP server at port `3100` — `affine-mcp-ext` —
+that both **fills gaps in AFFiNE's built-in MCP** (listing docs, comments,
+members, history) and provides **write tools** for creating and editing
+content. All clients (the scheduler, n8n, Claude Desktop, Cursor) should
+connect here, not to AFFiNE's native MCP directly.
+
+### Tools
+
+**Reads** (GraphQL-backed):
+`list_documents`, `get_workspace_info`, `list_workspace_members`,
+`list_comments`, `list_document_history`, `get_document_info`,
+`list_notifications`, `list_blobs` · **Native forwards:** `read_document`,
+`keyword_search`, `semantic_search`.
+
+**Writes** (Yjs CRDT + GraphQL):
+
+| Tool | Purpose |
+|---|---|
+| `create_doc` | Create a new document, optionally with initial blocks. |
+| `append_blocks` | Append blocks to a doc. Supports `afterHeading:"AI summary"` to anchor under a template section. |
+| `update_block_text` | Replace the text/style of an existing block. |
+| `delete_block` | Remove a block (and descendants) from a doc. |
+| `set_doc_title` | Rename a doc. |
+| `delete_doc` | Soft-delete (trash) a doc. Recoverable from UI. |
+| `list_doc_blocks` | Inspect a doc's block tree (ids, flavours, text previews). |
+| `find_doc_by_title` | Resolve a title to a docId. |
+| `create_comment` / `resolve_comment` / `delete_comment` | Comment CRUD. |
+| `create_reply` / `delete_reply` | Reply CRUD. |
+
+### Writing rich content
+
+Block `text` can be a plain string or an array of inline ops with formatting
+and inline doc references (the `@DocName` pill):
+
+```json
+{
+  "type": "paragraph",
+  "text": [
+    { "text": "Today I finished " },
+    { "text": " ", "refDocId": "3fa85f64-5717-4562-b3fc-2c963f66afa6" },
+    { "text": " and linked it to " },
+    { "text": "planning", "bold": true }
+  ]
+}
+```
+
+### Example: AI daily summary
+
+```jsonc
+// 1. Find the target journal doc
+find_doc_by_title({ "title": "Journal 2026-04-21" })
+// → { matches: [{ id: "<docId>", title: "Journal 2026-04-21" }] }
+
+// 2. Append the generated summary under the static heading
+append_blocks({
+  "docId": "<docId>",
+  "afterHeading": "AI summary",
+  "blocks": [
+    { "type": "paragraph", "text": "Dneska hlavně..." },
+    { "type": "list", "style": "bulleted", "text": [
+        { "text": "Dodělal jsem write tools v " },
+        { "text": " ", "refDocId": "<mcp-ext-docId>" }
+    ]}
+  ]
+})
+```
+
+### Safety boundary
+
+Write tools are scoped strictly to **content inside** the workspace.
+The following are intentionally **not** exposed — AI clients cannot:
+
+- modify workspace settings (`updateWorkspace`, `deleteWorkspace`)
+- invite, remove, or change permissions of members
+- manage invite links
+- change per-doc roles or sharing
+- permanently delete docs or blobs (only soft-trash)
+- publish private docs to the web
+
+Rotate `AFFINE_ACCESS_TOKEN` in AFFiNE → Settings → Integration → MCP Server
+whenever you suspect leakage — tokens carry the creating user's full scope.
+
+### How writes work
+
+`mcp-ext` uses Yjs directly (no `@blocksuite/*` dependency, so it's not
+coupled to a particular AFFiNE image version):
+
+1. `GET /api/workspaces/:wsId/docs/:guid` returns the current Yjs binary.
+2. The proxy loads it into an in-memory `Y.Doc`, mutates the block tree
+   using AFFiNE's on-disk schema (`sys:flavour`, `sys:children`, `prop:text`
+   as `Y.Text` deltas with `reference` attributes for doc links, …).
+3. The diff vs. the pre-mutation state vector is pushed via the GraphQL
+   `applyDocUpdates` mutation.
+
+For `create_doc`, a fresh `Y.Doc` (`page` → `surface` + `note`) is
+constructed and the new doc id is also registered in the workspace root
+doc's `meta.pages` array.
+
 ## Reverse proxy
 
 `compose.yaml` only exposes the AFFiNE port on the host. For public

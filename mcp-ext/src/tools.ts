@@ -22,17 +22,10 @@
 import { gql } from './graphql.js';
 import { config } from './config.js';
 import { callNativeTool } from './forward.js';
+import type { ToolDefinition } from './tools-shared.js';
+import { writeTools } from './write-tools.js';
 
-export interface ToolDefinition {
-  name: string;
-  description: string;
-  inputSchema: {
-    type: 'object';
-    properties: Record<string, { type: string; description?: string }>;
-    required?: string[];
-  };
-  handler: (token: string, args: Record<string, unknown>) => Promise<string>;
-}
+export type { ToolDefinition } from './tools-shared.js';
 
 const wsId = () => config.workspaceId;
 
@@ -461,6 +454,8 @@ export const tools: ToolDefinition[] = [
   readDocument,
   keywordSearch,
   semanticSearch,
+  // Write-capable tools (content only — no workspace config / membership).
+  ...writeTools,
 ];
 
 export const toolByName = new Map(tools.map(t => [t.name, t] as const));
