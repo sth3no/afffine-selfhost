@@ -61,6 +61,38 @@ function send(res: ServerResponse, status: number, body: unknown, extraHeaders: 
   res.end(payload);
 }
 
+/**
+ * Respond in `text/event-stream` form — required by clients that register
+ * the MCP proxy with `type: "sse"` (Claude Code, some older Cursor builds).
+ * We emit the full JSON-RPC response as one `message` event, then terminate
+ * the stream. Streamable-HTTP spec 2025-03-26 allows a single-event stream
+ * per request.
+ */
+function sendSse(res: ServerResponse, body: unknown) {
+  const json = typeof body === 'string' ? body : JSON.stringify(body);
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream; charset=utf-8',
+    'Cache-Control': 'no-cache, no-transform',
+    Connection: 'keep-alive',
+    'X-Accel-Buffering': 'no',
+  });
+  res.write(`event: message\ndata: ${json}\n\n`);
+  res.end();
+}
+
+function prefersSse(req: IncomingMessage): boolean {
+  const accept = req.headers['accept'];
+  if (!accept) return false;
+  const v = Array.isArray(accept) ? accept.join(',') : accept;
+  // If client lists both application/json AND text/event-stream, prefer JSON
+  // (simpler, lower overhead). Only use SSE when the client explicitly asks
+  // for event-stream and NOT for json — which is how Claude Code / registered
+  // `type:"sse"` clients signal they want SSE framing.
+  const wantsSse = /text\/event-stream/i.test(v);
+  const wantsJson = /application\/json/i.test(v);
+  return wantsSse && !wantsJson;
+}
+
 async function dispatch(req: JsonRpcRequest, token: string): Promise<JsonRpcResult | null> {
   const id = req.id ?? null;
 
@@ -216,7 +248,11 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  send(res, 200, response);
+  if (prefersSse(req)) {
+    sendSse(res, response);
+  } else {
+    send(res, 200, response);
+  }
 });
 
 server.listen(config.port, () => {

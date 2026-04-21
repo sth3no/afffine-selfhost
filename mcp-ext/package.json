@@ -9,6 +9,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "socket.io-client": "^4.8.1",
     "yjs": "^13.6.20"
   },
   "devDependencies": {
