@@ -1,6 +1,6 @@
 {
   "name": "affine-mcp-ext",
-  "version": "1.1.0",
+  "version": "1.3.0",
   "description": "MCP proxy that extends AFFiNE's built-in MCP server with additional tools sourced from the GraphQL API and write tools built on Yjs CRDT",
   "type": "module",
   "scripts": {
@@ -9,6 +9,8 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "fractional-indexing": "^3.2.0",
+    "nanoid": "^5.0.7",
     "socket.io-client": "^4.8.1",
     "yjs": "^13.6.20"
   },
