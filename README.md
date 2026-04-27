@@ -196,6 +196,19 @@ connect here, not to AFFiNE's native MCP directly.
 | `create_comment` / `resolve_comment` / `delete_comment` | Comment CRUD. |
 | `create_reply` / `delete_reply` | Reply CRUD. |
 
+**Organize sidebar — folder tree** (Yjs CRDT, table `db$folders`):
+
+| Tool | Purpose |
+|---|---|
+| `list_folder_tree` | Read the entire Organize sidebar as nested JSON. Doc-link names are resolved to current doc titles. Use this BEFORE any structural change. |
+| `create_folder` | Create a new folder (top-level or nested under `parentFolderId`). Returns the new `folderId`. |
+| `rename_folder` | Rename an existing folder. Doc/tag/collection links can't be renamed (they inherit from the target). |
+| `delete_folder` | Soft-delete a folder. Refuses if non-empty unless `cascade:true`. **Never deletes the underlying docs** — they remain in the workspace, just unfiled. |
+| `move_folder` | Move a folder + entire subtree under a different parent. Refuses cycles. |
+| `move_document` | File a doc into a folder. Consolidates duplicate links if the doc was previously linked elsewhere. Pass empty `folderId` to unfile. |
+
+These mutate the `db$folders` Yjs sub-doc that backs AFFiNE's "Organize" sidebar. Same Socket.IO transport as the doc tools — see [folder-store.ts](mcp-ext/src/folder-store.ts) for the row schema.
+
 ### Writing rich content
 
 Block `text` can be a plain string or an array of inline ops with formatting

@@ -24,6 +24,7 @@ import { config } from './config.js';
 import { callNativeTool } from './forward.js';
 import type { ToolDefinition } from './tools-shared.js';
 import { writeTools } from './write-tools.js';
+import { folderTools } from './folder-tools.js';
 
 export type { ToolDefinition } from './tools-shared.js';
 
@@ -456,6 +457,8 @@ export const tools: ToolDefinition[] = [
   semanticSearch,
   // Write-capable tools (content only — no workspace config / membership).
   ...writeTools,
+  // Organize sidebar folder tree (list / create / rename / delete / move).
+  ...folderTools,
 ];
 
 export const toolByName = new Map(tools.map(t => [t.name, t] as const));
