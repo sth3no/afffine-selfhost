@@ -34,8 +34,19 @@
 
 import * as Y from 'yjs';
 
-/** Y.Doc guid that holds the organize folder tree. */
-export const FOLDERS_GUID = 'db$folders';
+import { config } from './config.js';
+
+/**
+ * Y.Doc guid for the organize folder tree, on the wire.
+ *
+ * AFFiNE FE stores the table internally as `db$folders`, but rewrites it to
+ * `db$<workspaceId>$folders` before sending to the sync gateway (see
+ * packages/common/nbstore/src/utils/id-converter.ts on the FE side). The
+ * server only knows the workspace-prefixed form. Every load/push from this
+ * module MUST use the prefixed guid or it will hit a different snapshot
+ * (an empty shadow doc) and silently fail.
+ */
+export const FOLDERS_GUID = `db$${config.workspaceId}$folders`;
 
 /** Soft-delete tombstone key set by YjsTableAdapter on row deletion. */
 const DELETE_FLAG = '$$DELETED';
@@ -91,12 +102,29 @@ function decodeRow(id: string, row: Y.Map<unknown>): FolderRow | null {
   };
 }
 
+/**
+ * After Y.applyUpdate, top-level types in `doc.share` come back as raw
+ * `AbstractType` placeholders (the integration step doesn't auto-cast them
+ * to YMap). Calling `doc.getMap(name)` on each share key materializes the
+ * placeholder into a real Y.Map view backed by the same items, so reads
+ * see the row's fields. Without this, `instanceof Y.Map` returns false for
+ * every loaded row and the whole tree silently appears empty.
+ */
+function asMap(doc: Y.Doc, id: string): Y.Map<unknown> | null {
+  const raw = shareOf(doc).get(id);
+  if (!raw) return null;
+  // `getMap` is idempotent — returns the existing top-level type, casting it
+  // to YMap if it was an AbstractType placeholder.
+  return doc.getMap(id) as Y.Map<unknown>;
+}
+
 /** All live rows in the folders doc. Soft-deleted rows are filtered out. */
 export function listAllRows(doc: Y.Doc): FolderRow[] {
   const out: FolderRow[] = [];
-  for (const [id, val] of shareOf(doc)) {
-    if (!(val instanceof Y.Map)) continue;
-    const r = decodeRow(id, val as Y.Map<unknown>);
+  for (const [id] of shareOf(doc)) {
+    const m = asMap(doc, id);
+    if (!m) continue;
+    const r = decodeRow(id, m);
     if (r) out.push(r);
   }
   return out;
@@ -104,9 +132,9 @@ export function listAllRows(doc: Y.Doc): FolderRow[] {
 
 /** Look up one live row by id. Returns null if absent or soft-deleted. */
 export function getRow(doc: Y.Doc, id: string): FolderRow | null {
-  const m = shareOf(doc).get(id);
-  if (!(m instanceof Y.Map)) return null;
-  return decodeRow(id, m as Y.Map<unknown>);
+  const m = asMap(doc, id);
+  if (!m) return null;
+  return decodeRow(id, m);
 }
 
 /**
