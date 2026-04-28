@@ -39,6 +39,7 @@ import {
 } from './folder-store.js';
 import { indexAfterAll } from './index-utils.js';
 import type { ToolDefinition } from './tools-shared.js';
+import * as Y from 'yjs';
 import { openDoc, readDoc } from './yjs-writer.js';
 
 const wsId = () => config.workspaceId;
@@ -417,6 +418,78 @@ const moveDocument: ToolDefinition = {
   },
 };
 
+// ── Debug ────────────────────────────────────────────────────────────
+
+const debugFoldersDoc: ToolDefinition = {
+  name: 'debug_folders_doc',
+  description:
+    'Diagnostic tool: dump the raw structure of the folders Y.Doc as the MCP server sees it. ' +
+    'Reports the GUID, whether the load returned a populated doc, and the top-level share map ' +
+    'keys with their Y type + (for Y.Maps) field keys. Use to debug why list_folder_tree may ' +
+    'return empty when folders exist in the AFFiNE UI.',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      docGuid: {
+        type: 'string',
+        description:
+          'Optional alternative Y.Doc guid to inspect. Defaults to "db$folders" — the workspace folders DB.',
+      },
+    },
+  },
+  async handler(token, args) {
+    const guid = args.docGuid ? String(args.docGuid) : FOLDERS_GUID;
+    const { doc, existed } = await readDoc(token, guid);
+
+    const stateUpdate = Y.encodeStateAsUpdate(doc);
+    const stateVector = Y.encodeStateVector(doc);
+
+    const share = (doc as Y.Doc & { share: Map<string, Y.AbstractType<unknown>> }).share;
+    const shareEntries: Array<{
+      key: string;
+      yType: string;
+      mapKeys?: string[];
+      arrayLen?: number;
+      previewFields?: Record<string, unknown>;
+    }> = [];
+
+    for (const [key, val] of share) {
+      const entry: (typeof shareEntries)[number] = {
+        key,
+        yType: val.constructor?.name ?? 'unknown',
+      };
+      if (val instanceof Y.Map) {
+        const m = val as Y.Map<unknown>;
+        entry.mapKeys = Array.from(m.keys());
+        // peek at the first 6 fields for type-of-content sanity
+        const preview: Record<string, unknown> = {};
+        let i = 0;
+        for (const [k, v] of m.entries()) {
+          if (i++ >= 6) break;
+          preview[k] = typeof v === 'string' && v.length > 40 ? v.slice(0, 40) + '…' : v;
+        }
+        entry.previewFields = preview;
+      } else if (val instanceof Y.Array) {
+        entry.arrayLen = (val as Y.Array<unknown>).length;
+      }
+      shareEntries.push(entry);
+    }
+
+    return JSON.stringify(
+      {
+        guid,
+        existedOnServer: existed,
+        stateUpdateBytes: stateUpdate.length,
+        stateVectorBytes: stateVector.length,
+        shareEntryCount: shareEntries.length,
+        shareEntries: shareEntries.slice(0, 50), // cap to keep response sane
+      },
+      null,
+      2,
+    );
+  },
+};
+
 export const folderTools: ToolDefinition[] = [
   listFolderTree,
   createFolder,
@@ -424,4 +497,5 @@ export const folderTools: ToolDefinition[] = [
   deleteFolder,
   moveFolder,
   moveDocument,
+  debugFoldersDoc,
 ];
