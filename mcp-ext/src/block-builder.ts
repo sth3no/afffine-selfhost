@@ -50,8 +50,15 @@ const BLOCK_VERSIONS: Record<string, number> = {
   'affine:image': 1,
   'affine:bookmark': 1,
   'affine:embed-youtube': 1,
+  'affine:embed-github': 1,
+  'affine:embed-figma': 1,
+  'affine:embed-loom': 1,
+  'affine:embed-html': 1,
   'affine:embed-iframe': 1,
+  'affine:embed-linked-doc': 1,
+  'affine:embed-synced-doc': 1,
   'affine:callout': 1,
+  'affine:latex': 1,
 };
 
 export const SYS_ID = 'sys:id';
@@ -114,7 +121,77 @@ export type BlockSpec =
       language?: string;
       text: string;
     }
-  | { type: 'divider' };
+  | { type: 'divider' }
+  | {
+      /** External URL preview card (any web link). */
+      type: 'bookmark';
+      url: string;
+      caption?: string;
+      /** Card layout — defaults to "horizontal". */
+      style?: 'vertical' | 'horizontal' | 'list' | 'cube' | 'citation';
+    }
+  | {
+      /** Generic iframe embed (figma, miro, etc. — anything embeddable). */
+      type: 'embed-iframe';
+      url: string;
+      caption?: string;
+      title?: string;
+      description?: string;
+    }
+  | {
+      /** YouTube video embed. AFFiNE auto-fetches metadata from the URL. */
+      type: 'embed-youtube';
+      url: string;
+      caption?: string;
+    }
+  | {
+      /** GitHub issue / PR card. */
+      type: 'embed-github';
+      url: string;
+      caption?: string;
+    }
+  | {
+      /** Figma file embed. */
+      type: 'embed-figma';
+      url: string;
+      caption?: string;
+    }
+  | {
+      /** Loom video embed. */
+      type: 'embed-loom';
+      url: string;
+      caption?: string;
+    }
+  | {
+      /** Raw HTML embed (sandbox iframe with the given markup). */
+      type: 'embed-html';
+      html: string;
+      caption?: string;
+    }
+  | {
+      /** Card-style link to another doc in this workspace. */
+      type: 'embed-linked-doc';
+      docId: string;
+      style?: 'vertical' | 'horizontal' | 'list' | 'cube' | 'horizontalThin' | 'citation';
+      caption?: string;
+    }
+  | {
+      /** Inline-rendered embed of another doc (full content shown). */
+      type: 'embed-synced-doc';
+      docId: string;
+      caption?: string;
+    }
+  | {
+      /** Highlighted callout box with an emoji icon and rich text body. */
+      type: 'callout';
+      emoji?: string;
+      text: string | InlineOp[];
+    }
+  | {
+      /** LaTeX equation block (renders as math). */
+      type: 'latex';
+      latex: string;
+    };
 
 interface Delta {
   insert: string;
@@ -235,6 +312,228 @@ export function addDividerBlock(doc: Y.Doc): string {
   return id;
 }
 
+// ── Embeds & rich blocks ─────────────────────────────────────────────
+
+/**
+ * Insert a bookmark (URL preview card). AFFiNE's link-preview pipeline
+ * fetches og:title / og:description / favicon asynchronously after the
+ * block lands; we only need to set the URL and let the FE enrich it.
+ */
+export function addBookmarkBlock(
+  doc: Y.Doc,
+  url: string,
+  opts: { caption?: string; style?: 'vertical' | 'horizontal' | 'list' | 'cube' | 'citation' } = {}
+): string {
+  const id = newBlockId();
+  const block = insertBlockMap(doc, id, 'affine:bookmark');
+  block.set('prop:url', url);
+  block.set('prop:style', opts.style ?? 'horizontal');
+  block.set('prop:caption', opts.caption ?? null);
+  block.set('prop:title', null);
+  block.set('prop:description', null);
+  block.set('prop:icon', null);
+  block.set('prop:image', null);
+  block.set('prop:footnoteIdentifier', null);
+  // GfxCommonBlockProps defaults — required by the schema even when the
+  // block lives inside a note (not on the edgeless surface).
+  block.set('prop:index', 'a0');
+  block.set('prop:xywh', '[0,0,0,0]');
+  block.set('prop:lockedBySelf', false);
+  block.set('prop:rotate', 0);
+  return id;
+}
+
+/**
+ * Insert a generic iframe-style embed. The URL the user pasted goes in
+ * `prop:url`; AFFiNE's iframe-resolver pipeline derives `prop:iframeUrl`
+ * (the actual iframe src) from it asynchronously.
+ */
+export function addEmbedIframeBlock(
+  doc: Y.Doc,
+  url: string,
+  opts: { caption?: string; title?: string; description?: string } = {}
+): string {
+  const id = newBlockId();
+  const block = insertBlockMap(doc, id, 'affine:embed-iframe');
+  block.set('prop:url', url);
+  block.set('prop:iframeUrl', '');
+  block.set('prop:caption', opts.caption ?? null);
+  block.set('prop:title', opts.title ?? null);
+  block.set('prop:description', opts.description ?? null);
+  block.set('prop:index', 'a0');
+  block.set('prop:xywh', '[0,0,0,0]');
+  block.set('prop:lockedBySelf', false);
+  block.set('prop:scale', 1);
+  return id;
+}
+
+/**
+ * Generic embed-card constructor — used by the URL-preview blocks
+ * (youtube/github/figma/loom). Each has flavour-specific URL-data fields
+ * (videoId, owner, etc.) that AFFiNE fills in after parsing the URL.
+ */
+function addEmbedCardBlock(
+  doc: Y.Doc,
+  flavour: string,
+  url: string,
+  caption: string | undefined,
+  defaultStyle: string,
+  extraNullProps: string[]
+): string {
+  const id = newBlockId();
+  const block = insertBlockMap(doc, id, flavour);
+  block.set('prop:url', url);
+  block.set('prop:style', defaultStyle);
+  block.set('prop:caption', caption ?? null);
+  for (const k of extraNullProps) block.set(`prop:${k}`, null);
+  block.set('prop:index', 'a0');
+  block.set('prop:xywh', '[0,0,0,0]');
+  block.set('prop:lockedBySelf', false);
+  block.set('prop:rotate', 0);
+  return id;
+}
+
+export function addEmbedYoutubeBlock(doc: Y.Doc, url: string, caption?: string): string {
+  return addEmbedCardBlock(doc, 'affine:embed-youtube', url, caption, 'video', [
+    'videoId',
+    'image',
+    'title',
+    'description',
+    'creator',
+    'creatorUrl',
+    'creatorImage',
+  ]);
+}
+
+export function addEmbedGithubBlock(doc: Y.Doc, url: string, caption?: string): string {
+  // owner/repo/githubType/githubId are filled in by AFFiNE's GitHub-link
+  // resolver after the block is created — we just need the URL and the
+  // structural fields the schema requires.
+  const id = newBlockId();
+  const block = insertBlockMap(doc, id, 'affine:embed-github');
+  block.set('prop:url', url);
+  block.set('prop:style', 'horizontal');
+  block.set('prop:caption', caption ?? null);
+  block.set('prop:owner', '');
+  block.set('prop:repo', '');
+  block.set('prop:githubType', 'issue');
+  block.set('prop:githubId', '');
+  block.set('prop:image', null);
+  block.set('prop:title', null);
+  block.set('prop:description', null);
+  block.set('prop:status', null);
+  block.set('prop:statusReason', null);
+  block.set('prop:index', 'a0');
+  block.set('prop:xywh', '[0,0,0,0]');
+  block.set('prop:lockedBySelf', false);
+  block.set('prop:rotate', 0);
+  return id;
+}
+
+export function addEmbedFigmaBlock(doc: Y.Doc, url: string, caption?: string): string {
+  return addEmbedCardBlock(doc, 'affine:embed-figma', url, caption, 'horizontal', [
+    'image',
+    'title',
+    'description',
+  ]);
+}
+
+export function addEmbedLoomBlock(doc: Y.Doc, url: string, caption?: string): string {
+  return addEmbedCardBlock(doc, 'affine:embed-loom', url, caption, 'video', [
+    'videoId',
+    'image',
+    'title',
+    'description',
+  ]);
+}
+
+/** Raw HTML iframe embed — runs the markup in a sandboxed iframe. */
+export function addEmbedHtmlBlock(doc: Y.Doc, html: string, caption?: string): string {
+  const id = newBlockId();
+  const block = insertBlockMap(doc, id, 'affine:embed-html');
+  block.set('prop:html', html);
+  block.set('prop:style', 'html');
+  block.set('prop:caption', caption ?? null);
+  block.set('prop:design', '');
+  block.set('prop:index', 'a0');
+  block.set('prop:xywh', '[0,0,0,0]');
+  block.set('prop:lockedBySelf', false);
+  block.set('prop:rotate', 0);
+  return id;
+}
+
+/** Card-style link to another workspace doc — renders as a preview pill. */
+export function addEmbedLinkedDocBlock(
+  doc: Y.Doc,
+  pageId: string,
+  opts: {
+    style?: 'vertical' | 'horizontal' | 'list' | 'cube' | 'horizontalThin' | 'citation';
+    caption?: string;
+  } = {}
+): string {
+  const id = newBlockId();
+  const block = insertBlockMap(doc, id, 'affine:embed-linked-doc');
+  block.set('prop:pageId', pageId);
+  // ReferenceInfo: optional `params` describes which mode/blocks to deep-link
+  // into. For a plain card link an empty {mode:'page'} is enough.
+  const params = new Y.Map<unknown>();
+  params.set('mode', 'page');
+  block.set('prop:params', params);
+  block.set('prop:style', opts.style ?? 'horizontal');
+  block.set('prop:caption', opts.caption ?? null);
+  block.set('prop:footnoteIdentifier', null);
+  block.set('prop:index', 'a0');
+  block.set('prop:xywh', '[0,0,0,0]');
+  block.set('prop:lockedBySelf', false);
+  block.set('prop:rotate', 0);
+  return id;
+}
+
+/** Embed-mode reference to another doc — full inline render of its content. */
+export function addEmbedSyncedDocBlock(doc: Y.Doc, pageId: string, caption?: string): string {
+  const id = newBlockId();
+  const block = insertBlockMap(doc, id, 'affine:embed-synced-doc');
+  block.set('prop:pageId', pageId);
+  const params = new Y.Map<unknown>();
+  params.set('mode', 'page');
+  block.set('prop:params', params);
+  block.set('prop:style', 'syncedDoc');
+  block.set('prop:caption', caption ?? null);
+  block.set('prop:scale', 1);
+  block.set('prop:index', 'a0');
+  block.set('prop:xywh', '[0,0,0,0]');
+  block.set('prop:lockedBySelf', false);
+  block.set('prop:rotate', 0);
+  return id;
+}
+
+/** Callout box with an emoji + rich text body. Children may be added later. */
+export function addCalloutBlock(
+  doc: Y.Doc,
+  text: string | InlineOp[],
+  emoji = '😀'
+): string {
+  const id = newBlockId();
+  const block = insertBlockMap(doc, id, 'affine:callout');
+  block.set('prop:emoji', emoji);
+  block.set('prop:text', createText(toDelta(text)));
+  return id;
+}
+
+/** LaTeX equation block — renders mathematical notation. */
+export function addLatexBlock(doc: Y.Doc, latex: string): string {
+  const id = newBlockId();
+  const block = insertBlockMap(doc, id, 'affine:latex');
+  block.set('prop:latex', latex);
+  // GfxCommonBlockProps — required even for note-embedded latex.
+  block.set('prop:xywh', '[0,0,16,16]');
+  block.set('prop:index', 'a0');
+  block.set('prop:lockedBySelf', false);
+  block.set('prop:scale', 1);
+  block.set('prop:rotate', 0);
+  return id;
+}
+
 /**
  * Create a block from a BlockSpec and return its new id. Doesn't attach it
  * to any parent — caller is responsible for pushing the id into a
@@ -250,6 +549,32 @@ export function addBlockFromSpec(doc: Y.Doc, spec: BlockSpec): string {
       return addCodeBlock(doc, spec.text, spec.language);
     case 'divider':
       return addDividerBlock(doc);
+    case 'bookmark':
+      return addBookmarkBlock(doc, spec.url, { caption: spec.caption, style: spec.style });
+    case 'embed-iframe':
+      return addEmbedIframeBlock(doc, spec.url, {
+        caption: spec.caption,
+        title: spec.title,
+        description: spec.description,
+      });
+    case 'embed-youtube':
+      return addEmbedYoutubeBlock(doc, spec.url, spec.caption);
+    case 'embed-github':
+      return addEmbedGithubBlock(doc, spec.url, spec.caption);
+    case 'embed-figma':
+      return addEmbedFigmaBlock(doc, spec.url, spec.caption);
+    case 'embed-loom':
+      return addEmbedLoomBlock(doc, spec.url, spec.caption);
+    case 'embed-html':
+      return addEmbedHtmlBlock(doc, spec.html, spec.caption);
+    case 'embed-linked-doc':
+      return addEmbedLinkedDocBlock(doc, spec.docId, { style: spec.style, caption: spec.caption });
+    case 'embed-synced-doc':
+      return addEmbedSyncedDocBlock(doc, spec.docId, spec.caption);
+    case 'callout':
+      return addCalloutBlock(doc, spec.text, spec.emoji);
+    case 'latex':
+      return addLatexBlock(doc, spec.latex);
   }
 }
 

@@ -102,7 +102,102 @@ function parseBlockSpec(raw: unknown, i: number): BlockSpec {
     };
   }
 
-  throw new Error(`blocks[${i}]: unknown type "${String(type)}". Expected paragraph|list|code|divider.`);
+  // ── URL-based embeds ──────────────────────────────────────────────
+  // bookmark + the embed-card family all need a URL. AFFiNE's link
+  // resolver pipeline fetches og: metadata after the block lands.
+  const URL_EMBEDS = ['bookmark', 'embed-iframe', 'embed-youtube', 'embed-github', 'embed-figma', 'embed-loom'] as const;
+  if ((URL_EMBEDS as readonly string[]).includes(type as string)) {
+    const url = b.url;
+    if (typeof url !== 'string' || !url) {
+      throw new Error(`blocks[${i}]: ${type} needs string "url"`);
+    }
+    const caption = typeof b.caption === 'string' ? b.caption : undefined;
+    if (type === 'bookmark') {
+      const style = b.style;
+      if (
+        style !== undefined &&
+        style !== 'vertical' && style !== 'horizontal' &&
+        style !== 'list' && style !== 'cube' && style !== 'citation'
+      ) {
+        throw new Error(`blocks[${i}]: bookmark "style" must be vertical|horizontal|list|cube|citation`);
+      }
+      return { type: 'bookmark', url, caption, style: style as never };
+    }
+    if (type === 'embed-iframe') {
+      return {
+        type: 'embed-iframe',
+        url,
+        caption,
+        title: typeof b.title === 'string' ? b.title : undefined,
+        description: typeof b.description === 'string' ? b.description : undefined,
+      };
+    }
+    return { type, url, caption } as BlockSpec;
+  }
+
+  if (type === 'embed-html') {
+    const html = b.html;
+    if (typeof html !== 'string') {
+      throw new Error(`blocks[${i}]: embed-html needs string "html"`);
+    }
+    return {
+      type: 'embed-html',
+      html,
+      caption: typeof b.caption === 'string' ? b.caption : undefined,
+    };
+  }
+
+  if (type === 'embed-linked-doc' || type === 'embed-synced-doc') {
+    const docId = b.docId;
+    if (typeof docId !== 'string' || !docId) {
+      throw new Error(`blocks[${i}]: ${type} needs string "docId"`);
+    }
+    if (type === 'embed-linked-doc') {
+      const style = b.style;
+      if (
+        style !== undefined &&
+        style !== 'vertical' && style !== 'horizontal' && style !== 'list' &&
+        style !== 'cube' && style !== 'horizontalThin' && style !== 'citation'
+      ) {
+        throw new Error(`blocks[${i}]: embed-linked-doc "style" must be vertical|horizontal|list|cube|horizontalThin|citation`);
+      }
+      return {
+        type: 'embed-linked-doc',
+        docId,
+        style: style as never,
+        caption: typeof b.caption === 'string' ? b.caption : undefined,
+      };
+    }
+    return {
+      type: 'embed-synced-doc',
+      docId,
+      caption: typeof b.caption === 'string' ? b.caption : undefined,
+    };
+  }
+
+  if (type === 'callout') {
+    if (typeof text !== 'string' && !Array.isArray(text)) {
+      throw new Error(`blocks[${i}]: callout needs string or InlineOp[] "text"`);
+    }
+    return {
+      type: 'callout',
+      text: text as string | InlineOp[],
+      emoji: typeof b.emoji === 'string' ? b.emoji : undefined,
+    };
+  }
+
+  if (type === 'latex') {
+    if (typeof b.latex !== 'string') {
+      throw new Error(`blocks[${i}]: latex needs string "latex"`);
+    }
+    return { type: 'latex', latex: b.latex };
+  }
+
+  throw new Error(
+    `blocks[${i}]: unknown type "${String(type)}". Expected paragraph|list|code|divider|bookmark|` +
+    `embed-iframe|embed-youtube|embed-github|embed-figma|embed-loom|embed-html|embed-linked-doc|` +
+    `embed-synced-doc|callout|latex.`
+  );
 }
 
 function parseBlocks(raw: unknown): BlockSpec[] {
@@ -113,9 +208,23 @@ function parseBlocks(raw: unknown): BlockSpec[] {
 const BLOCK_SPEC_SCHEMA = {
   type: 'array',
   description:
-    'Array of block specs. Each: { type: "paragraph"|"list"|"code"|"divider", text?, style?, language?, checked? }. ' +
-    'text can be a plain string OR an array of inline ops: [{text:"hello",bold:true}, {text:" see ",refDocId:"<docId>"}] — ' +
-    'refDocId renders as an @DocName pill linking to that doc.',
+    'Array of block specs. Supported types:\n' +
+    '  • paragraph — { type:"paragraph", style?:"text"|"h1".."h6"|"quote", text }\n' +
+    '  • list — { type:"list", style:"bulleted"|"numbered"|"todo"|"toggle", text, checked? }\n' +
+    '  • code — { type:"code", language?, text }\n' +
+    '  • divider — { type:"divider" }\n' +
+    '  • bookmark — { type:"bookmark", url, style?, caption? }  (URL preview card)\n' +
+    '  • embed-youtube / embed-github / embed-figma / embed-loom — { type, url, caption? }\n' +
+    '  • embed-iframe — { type:"embed-iframe", url, caption?, title?, description? }  (generic iframe)\n' +
+    '  • embed-html — { type:"embed-html", html, caption? }  (raw HTML in sandboxed iframe)\n' +
+    '  • embed-linked-doc — { type:"embed-linked-doc", docId, style?, caption? }  (card link to another doc)\n' +
+    '  • embed-synced-doc — { type:"embed-synced-doc", docId, caption? }  (full inline render of another doc)\n' +
+    '  • callout — { type:"callout", emoji?, text }\n' +
+    '  • latex — { type:"latex", latex }  (LaTeX equation block)\n' +
+    'text can be a plain string OR an array of inline ops: ' +
+    '[{text:"hello",bold:true}, {text:" see ",refDocId:"<docId>"}] — ' +
+    'refDocId renders as an @DocName pill linking to that doc. Other inline marks: ' +
+    'bold, italic, underline, strike, code, link.',
   items: { type: 'object' },
 };
 
