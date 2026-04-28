@@ -22,9 +22,11 @@
 import { gql } from './graphql.js';
 import { config } from './config.js';
 import { callNativeTool } from './forward.js';
+import { listPages } from './doc-store.js';
 import type { ToolDefinition } from './tools-shared.js';
 import { writeTools } from './write-tools.js';
 import { folderTools } from './folder-tools.js';
+import { readDoc } from './yjs-writer.js';
 
 export type { ToolDefinition } from './tools-shared.js';
 
@@ -81,9 +83,24 @@ const listDocuments: ToolDefinition = {
       }`,
       { id: wsId(), first: limit, offset }
     );
+    // GraphQL's docs.edges.node.title is always null for self-hosted AFFiNE —
+    // titles live inside the workspace root Y.Doc's meta.pages, not in
+    // Postgres. Pull them from there so callers don't have to issue N reads.
+    let titleByDocId = new Map<string, string>();
+    try {
+      const root = await readDoc(token, wsId());
+      for (const p of listPages(root.doc)) {
+        if (p.title) titleByDocId.set(p.id, p.title);
+      }
+    } catch {
+      // Non-fatal: if the root doc can't be loaded we still return the list,
+      // just without the augmented titles.
+      titleByDocId = new Map();
+    }
+
     const documents = data.workspace.docs.edges.map(e => ({
       docId: e.node.id,
-      title: e.node.title,
+      title: e.node.title ?? titleByDocId.get(e.node.id) ?? null,
       createdAt: e.node.createdAt,
       updatedAt: e.node.updatedAt,
       createdBy: e.node.createdBy?.name ?? null,
@@ -330,10 +347,21 @@ const getDocumentInfo: ToolDefinition = {
     if (!hit) {
       throw new Error(`Document ${docId} not found in workspace ${wsId()}`);
     }
+    // GraphQL title is always null for self-hosted; fall back to the workspace
+    // root Y.Doc's meta.pages registry where the title actually lives.
+    let title: string | null = hit.node.title;
+    if (!title) {
+      try {
+        const root = await readDoc(token, wsId());
+        title = listPages(root.doc).find(p => p.id === docId)?.title ?? null;
+      } catch {
+        title = null;
+      }
+    }
     return JSON.stringify(
       {
         docId: hit.node.id,
-        title: hit.node.title,
+        title,
         createdAt: hit.node.createdAt,
         updatedAt: hit.node.updatedAt,
         createdBy: hit.node.createdBy?.name ?? null,
