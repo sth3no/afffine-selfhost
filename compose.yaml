@@ -205,6 +205,27 @@ services:
     networks:
       - affine_net
 
+  # One-shot job: ensures `affine_ingest` database exists, enables
+  # pgvector, and applies migrations. Mirrors the affine_migration pattern.
+  # Idempotent — safe to run on every stack update.
+  ingest_migration:
+    build:
+      context: ./ingest
+      dockerfile: Dockerfile
+    image: affine-ingest:local
+    pull_policy: build
+    container_name: affine_ingest_migration
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: ["python", "-m", "src.migrate"]
+    environment:
+      - DATABASE_URL=postgresql://${DB_USERNAME}:${DB_PASSWORD}@postgres:5432/affine_ingest
+      - DB_ADMIN_URL=postgresql://${DB_USERNAME}:${DB_PASSWORD}@postgres:5432/postgres
+    restart: 'no'
+    networks:
+      - affine_net
+
 networks:
   affine_net:
     driver: bridge
