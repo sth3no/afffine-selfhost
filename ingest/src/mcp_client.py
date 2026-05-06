@@ -151,7 +151,7 @@ class MCPClient:
 
     async def create_folder(self, name: str, *, parent_folder_id: str | None = None) -> dict:
         args: dict[str, Any] = {"name": name}
-        if parent_folder_id:
+        if parent_folder_id is not None:
             args["parentFolderId"] = parent_folder_id
         return await self.call_tool("create_folder", args)
 
@@ -178,7 +178,7 @@ class MCPClient:
 
     async def move_document(self, doc_id: str, *, folder_id: str | None = None) -> dict:
         args: dict[str, Any] = {"docId": doc_id}
-        if folder_id:
+        if folder_id is not None:
             args["folderId"] = folder_id
         return await self.call_tool("move_document", args)
 

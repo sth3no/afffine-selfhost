@@ -129,6 +129,24 @@ async def test_authorization_header_sent():
 
 
 @pytest.mark.asyncio
+async def test_http_5xx_propagates_as_httpx_error():
+    """Locking in the contract: server-side 5xx surfaces as httpx.HTTPStatusError,
+    NOT as MCPError or MCPToolError. Phase 4+ Filer callers will need to catch
+    httpx.HTTPError if they want to handle transient server outages."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(503, json={"error": "upstream unavailable"})
+
+    async with MCPClient(
+        base_url="http://mcp_ext:3100",
+        token="t",
+        _transport=httpx.MockTransport(handler),
+    ) as client:
+        with pytest.raises(httpx.HTTPStatusError):
+            await client.initialize()
+
+
+@pytest.mark.asyncio
 async def test_string_text_passes_through_when_not_json():
     """Some tools return plain prose strings (errors, notes), not JSON."""
     transport = _FakeTransport(
