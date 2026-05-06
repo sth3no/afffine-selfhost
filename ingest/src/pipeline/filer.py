@@ -58,6 +58,32 @@ class Filer:
         assert parent_id is not None
         return parent_id
 
+    async def file_doc(
+        self,
+        *,
+        folder_path: list[str],
+        title: str,
+        body_md: str,
+        meta: dict[str, Any],
+    ) -> dict[str, Any]:
+        """End-to-end: resolve folder, create doc, move it, append body.
+
+        `meta` is reserved for Phase 5 (will become a metadata block:
+        URL, source_app, captured_at, classifier reasoning, ...). Phase 2
+        accepts the dict but doesn't yet emit a metadata block.
+        """
+        folder_id = await self.resolve_or_create_folder(folder_path)
+        created = await self._mcp.create_doc(title)
+        doc_id = str(created["docId"])
+        await self._mcp.move_document(doc_id, folder_id=folder_id)
+        if body_md.strip():
+            await self._mcp.append_blocks(doc_id, [{"type": "paragraph", "text": body_md}])
+        return {
+            "doc_id": doc_id,
+            "folder_id": folder_id,
+            "folder_path": list(folder_path),
+        }
+
     async def _ensure_tree(self) -> None:
         now = self._clock()
         if self._tree_snapshot is None or (now - self._tree_fetched_at) > CACHE_TTL_SECONDS:
