@@ -1,0 +1,78 @@
+# Platform routing for the ingest service.
+#
+# Each entry maps URL hosts to a (group, platform_id, folder_name) triple.
+# The first matching entry by `hosts` wins; the catch-all `id: article` at the
+# bottom matches any URL not covered by a specific platform.
+#
+# `extractor` names match strategies registered in src/pipeline/extractors/
+# (Phase 4). Phase 3 doesn't dispatch to extractors yet.
+
+platforms:
+  - id: youtube
+    group: Socials
+    folder_name: Youtube
+    hosts: [youtube.com, www.youtube.com, m.youtube.com, youtu.be, music.youtube.com]
+    extractor: ytdlp
+
+  - id: instagram
+    group: Socials
+    folder_name: Instagram
+    hosts: [instagram.com, www.instagram.com]
+    extractor: ytdlp
+
+  - id: tiktok
+    group: Socials
+    folder_name: TikTok
+    hosts: [tiktok.com, www.tiktok.com, vm.tiktok.com, m.tiktok.com]
+    extractor: ytdlp
+
+  - id: x
+    group: Socials
+    folder_name: X
+    hosts: [x.com, www.x.com, twitter.com, www.twitter.com, mobile.twitter.com]
+    extractor: oembed_ytdlp
+
+  - id: reddit
+    group: Socials
+    folder_name: Reddit
+    hosts: [reddit.com, www.reddit.com, old.reddit.com, np.reddit.com]
+    extractor: reddit_json
+
+  - id: vimeo
+    group: Socials
+    folder_name: Vimeo
+    hosts: [vimeo.com, www.vimeo.com]
+    extractor: ytdlp
+
+  - id: arxiv
+    group: Research papers
+    folder_name: arXiv
+    hosts: [arxiv.org, www.arxiv.org]
+    extractor: markitdown
+
+  - id: podcast_apple
+    group: Podcasts
+    folder_name: Apple Podcasts
+    hosts: [podcasts.apple.com]
+    extractor: markitdown
+
+  - id: spotify_episode
+    group: Podcasts
+    folder_name: Spotify
+    hosts: [open.spotify.com]
+    extractor: markitdown
+
+  # Catch-all for everything else. `*` matches any host.
+  - id: article
+    group: Articles
+    folder_name: Web
+    hosts: ["*"]
+    extractor: markitdown
+
+# Phase 5 will populate topic_hints used by the classifier.
+topic_hints: {}
+
+# Phase 8 reorganizer threshold.
+reorg:
+  default_threshold: 15
+  overrides: {}

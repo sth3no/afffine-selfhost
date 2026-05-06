@@ -18,3 +18,48 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+
+
+from pathlib import Path
+
+import yaml
+from pydantic import BaseModel, Field
+
+
+# ── Topics config (loaded from topics.yaml) ───────────────────────────
+
+
+class Platform(BaseModel):
+    id: str
+    group: str
+    folder_name: str
+    hosts: list[str]
+    extractor: str
+
+
+class ReorgConfig(BaseModel):
+    default_threshold: int = 15
+    overrides: dict[str, int] = Field(default_factory=dict)
+
+
+class TopicsConfig(BaseModel):
+    platforms: list[Platform]
+    topic_hints: dict[str, list[str]] = Field(default_factory=dict)
+    reorg: ReorgConfig = Field(default_factory=ReorgConfig)
+
+
+_DEFAULT_TOPICS_PATH = Path(__file__).resolve().parent.parent / "topics.yaml"
+
+
+def load_topics(path: Path | None = None) -> TopicsConfig:
+    """Read topics.yaml. Validates platforms list is non-empty.
+
+    Optional sections (topic_hints, reorg) default to empty/sentinels so the
+    file can grow over phases without breaking older code.
+    """
+    p = path or _DEFAULT_TOPICS_PATH
+    raw = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
+    config = TopicsConfig.model_validate(raw)
+    if not config.platforms:
+        raise ValueError("topics.yaml must declare at least one platform")
+    return config
