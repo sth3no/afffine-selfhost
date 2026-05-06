@@ -130,3 +130,57 @@ class MCPClient:
             raise MCPError(int(err.get("code", -1)), str(err.get("message", "")))
         return body.get("result", {})
 
+    # ── Typed tool methods ────────────────────────────────────────────
+
+    async def list_folder_tree(self) -> dict:
+        return await self.call_tool("list_folder_tree", {})
+
+    async def find_doc_by_title(
+        self,
+        title: str,
+        *,
+        fuzzy: bool = False,
+        include_trash: bool = False,
+    ) -> dict:
+        args: dict[str, Any] = {"title": title}
+        if fuzzy:
+            args["fuzzy"] = True
+        if include_trash:
+            args["includeTrash"] = True
+        return await self.call_tool("find_doc_by_title", args)
+
+    async def create_folder(self, name: str, *, parent_folder_id: str | None = None) -> dict:
+        args: dict[str, Any] = {"name": name}
+        if parent_folder_id:
+            args["parentFolderId"] = parent_folder_id
+        return await self.call_tool("create_folder", args)
+
+    async def create_doc(self, title: str, *, initial_blocks: list[dict] | None = None) -> dict:
+        args: dict[str, Any] = {"title": title}
+        if initial_blocks:
+            args["initialBlocks"] = initial_blocks
+        return await self.call_tool("create_doc", args)
+
+    async def append_blocks(
+        self,
+        doc_id: str,
+        blocks: list[dict],
+        *,
+        after_heading: str | None = None,
+        after_block_id: str | None = None,
+    ) -> dict:
+        args: dict[str, Any] = {"docId": doc_id, "blocks": blocks}
+        if after_heading is not None:
+            args["afterHeading"] = after_heading
+        if after_block_id is not None:
+            args["afterBlockId"] = after_block_id
+        return await self.call_tool("append_blocks", args)
+
+    async def move_document(self, doc_id: str, *, folder_id: str | None = None) -> dict:
+        args: dict[str, Any] = {"docId": doc_id}
+        if folder_id:
+            args["folderId"] = folder_id
+        return await self.call_tool("move_document", args)
+
+    async def delete_doc(self, doc_id: str) -> dict:
+        return await self.call_tool("delete_doc", {"docId": doc_id})
