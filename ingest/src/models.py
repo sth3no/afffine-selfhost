@@ -7,7 +7,7 @@ import hashlib
 from datetime import datetime
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
-from pydantic import BaseModel, ConfigDict, Field, HttpUrl, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, HttpUrl, field_validator
 
 
 # ── Enums & helpers ──────────────────────────────────────────────────
@@ -83,9 +83,11 @@ class CaptureRequest(BaseModel):
 
 
 class CaptureResponse(BaseModel):
-    """202 Accepted response from POST /capture."""
+    """202 Accepted response from POST /capture.
 
-    model_config = ConfigDict(json_encoders={datetime: lambda dt: dt.strftime("%Y-%m-%dT%H:%M:%SZ")})
+    Pydantic v2 serializes UTC-aware datetime as ISO-8601 with Z suffix
+    natively when the value is timezone-aware — no encoder needed.
+    """
 
     capture_id: str
     doc_id: str

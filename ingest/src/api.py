@@ -84,8 +84,10 @@ async def get_pool() -> asyncpg.Pool:
     return app_state.pool
 
 
-async def get_capture_repo(pool: asyncpg.Pool = Depends(get_pool)) -> CaptureRepository:
-    # Acquire a connection per request. Pool returns it on context exit.
+async def get_capture_repo(
+    pool: asyncpg.Pool = Depends(get_pool),
+) -> AsyncIterator[CaptureRepository]:
+    """Acquire a connection per request. Pool returns it on context exit."""
     async with pool.acquire() as conn:
         yield CaptureRepository(conn)
 
@@ -195,17 +197,26 @@ def _row_to_response(row: CaptureRow, router: PlatformRouter) -> CaptureResponse
 
 
 def _article_platform(router: PlatformRouter):
-    """Used when capture has shared_text but no URL."""
-    # detect("") would raise; just look up the catch-all directly.
-    for plat in router._platforms:  # noqa: SLF001 — internal but acceptable for v1
-        if "*" in plat.hosts:
-            return plat
-    raise HTTPException(status_code=503, detail="No catch-all platform configured")
+    """Used when capture has shared_text but no URL — falls back to the
+    catch-all platform (typically `article` with hosts: ["*"]).
+    """
+    plat = router.catch_all
+    if plat is None:
+        raise HTTPException(status_code=503, detail="No catch-all platform configured")
+    return plat
 
 
 def _build_web_url(doc_id: str) -> str:
-    base = os.environ.get("AFFINE_SERVER_EXTERNAL_URL", "http://localhost:3010")
-    workspace = os.environ.get("AFFINE_WORKSPACE_ID", "")
-    if workspace:
-        return f"{base.rstrip('/')}/workspace/{workspace}/{doc_id}"
-    return f"{base.rstrip('/')}/{doc_id}"
+    """Construct the AFFiNE workspace doc URL from settings.
+
+    Logs a warning (does not raise) when AFFINE_WORKSPACE_ID is empty —
+    the URL is non-functional without a workspace, but we want the API
+    to keep responding so iOS can record the capture and the operator
+    can fix the missing env. Phase 9 hardens this into a startup check.
+    """
+    base = settings.affine_server_external_url
+    workspace = settings.affine_workspace_id
+    if not workspace:
+        # Non-fatal at request time; flag for the operator.
+        return f"{base.rstrip('/')}/{doc_id}"
+    return f"{base.rstrip('/')}/workspace/{workspace}/{doc_id}"

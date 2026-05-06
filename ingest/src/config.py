@@ -1,10 +1,16 @@
+from pathlib import Path
+
+import yaml
+from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
     """Runtime configuration loaded from environment.
 
-    Phase 1 only needs PORT, DATABASE_URL, DB_ADMIN_URL, INGEST_API_TOKEN.
+    Phase 1: PORT, DATABASE_URL, DB_ADMIN_URL, INGEST_API_TOKEN.
+    Phase 3: affine_server_external_url, affine_workspace_id (used by api.py
+    to build web_url for the iOS app).
     Later phases extend this — never delete fields, only add.
     """
 
@@ -12,18 +18,14 @@ class Settings(BaseSettings):
     database_url: str = "postgresql://placeholder@localhost/affine_ingest"
     db_admin_url: str | None = None
     ingest_api_token: str = "dev-token"
+    affine_server_external_url: str = "http://localhost:3010"
+    affine_workspace_id: str = ""
     version: str = "0.1.0"
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore", case_sensitive=False)
 
 
 settings = Settings()
-
-
-from pathlib import Path
-
-import yaml
-from pydantic import BaseModel, Field
 
 
 # ── Topics config (loaded from topics.yaml) ───────────────────────────

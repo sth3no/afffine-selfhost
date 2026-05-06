@@ -43,6 +43,11 @@ class PlatformRouter:
             )
         return self._catch_all
 
+    @property
+    def catch_all(self) -> Platform | None:
+        """The catch-all platform (hosts: ["*"]) or None if none configured."""
+        return self._catch_all
+
     @staticmethod
     def initial_path(platform: Platform) -> list[str]:
         return ["Sources", platform.group, platform.folder_name]
