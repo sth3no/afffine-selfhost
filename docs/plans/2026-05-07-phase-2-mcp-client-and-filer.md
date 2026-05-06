@@ -998,7 +998,7 @@ Compose the full filing flow. Given a folder path, doc title, markdown body, and
 2. creates a new doc with the title
 3. moves the doc into the folder
 4. appends a single paragraph block containing the body markdown (Phase 2 keeps body as one block; richer block construction lands in Phase 5)
-5. returns `{doc_id, folder_id, web_url_path: "Sources/.../<title>"}`
+5. returns `{doc_id, folder_id, folder_path: list[str]}` — the structured path the worker can render or pass through to its DB row. (Earlier draft used `web_url_path` string; switched to the list because callers can always join, and Phase 3+ needs the structure.)
 
 **Files:**
 - Modify: `ingest/src/pipeline/filer.py`

@@ -11,6 +11,7 @@ flow: resolve the folder, create the doc, move it, append the body.
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
 from typing import Any
 
 from src.mcp_client import MCPClient
@@ -25,7 +26,7 @@ class Filer:
     Newly-created folders are patched into the snapshot to avoid a refetch.
     """
 
-    def __init__(self, mcp: MCPClient, *, clock: callable = time.monotonic) -> None:
+    def __init__(self, mcp: MCPClient, *, clock: Callable[[], float] = time.monotonic) -> None:
         self._mcp = mcp
         self._clock = clock
         self._tree_snapshot: list[dict] | None = None

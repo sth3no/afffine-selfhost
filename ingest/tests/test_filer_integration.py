@@ -13,12 +13,12 @@ after itself by soft-trashing the docs it created.
 from __future__ import annotations
 
 import os
-import time
 import uuid
 
+import httpx
 import pytest
 
-from src.mcp_client import MCPClient
+from src.mcp_client import MCPClient, MCPError, MCPToolError
 from src.pipeline.filer import Filer
 
 pytestmark = [
@@ -76,9 +76,10 @@ async def test_file_doc_round_trip_against_live_stack(mcp_url: str, access_token
         first_lookup = await mcp.find_doc_by_title(f"{unique}-first")
         assert any(m["id"] == first["doc_id"] for m in first_lookup.get("matches", []))
 
-        # 4. Cleanup — soft-trash both. Don't fail the test on cleanup errors.
+        # 4. Cleanup — soft-trash both. Don't fail the test on transient
+        # network/server errors during cleanup; programming errors still surface.
         try:
             await mcp.delete_doc(first["doc_id"])
             await mcp.delete_doc(second["doc_id"])
-        except Exception as e:
+        except (httpx.HTTPError, MCPError, MCPToolError) as e:
             print(f"cleanup warning: {e}")
