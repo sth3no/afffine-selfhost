@@ -226,6 +226,48 @@ services:
     networks:
       - affine_net
 
+  # Python ingest service. Single container runs FastAPI + asyncio worker
+  # in one process. All AFFiNE writes route through mcp_ext:3100. All
+  # GPU-bound inference (LLM, transcription) hits hosted APIs.
+  ingest:
+    build:
+      context: ./ingest
+      dockerfile: Dockerfile
+    image: affine-ingest:local
+    pull_policy: build
+    container_name: affine_ingest
+    depends_on:
+      ingest_migration:
+        condition: service_completed_successfully
+      mcp_ext:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    ports:
+      - '${INGEST_BIND:-0.0.0.0}:${INGEST_PORT:-3200}:3200'
+    environment:
+      - PORT=3200
+      - INGEST_API_TOKEN=${INGEST_API_TOKEN:-}
+      - DATABASE_URL=postgresql://${DB_USERNAME}:${DB_PASSWORD}@postgres:5432/affine_ingest
+      - MCP_EXT_URL=http://mcp_ext:3100
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - MAX_TRANSCRIPT_MIN=${MAX_TRANSCRIPT_MIN:-30}
+      - REORG_THRESHOLD_DEFAULT=${REORG_THRESHOLD_DEFAULT:-15}
+      - TZ=${TZ:-UTC}
+    tmpfs:
+      - /tmp/ingest:size=2g
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:3200/health').status==200 else 1)"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    networks:
+      - affine_net
+      - shared_net
+
 networks:
   affine_net:
     driver: bridge
