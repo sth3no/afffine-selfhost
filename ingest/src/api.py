@@ -22,8 +22,11 @@ from src.config import load_topics, settings
 from src.db import CaptureRepository, CaptureRow, create_pool
 from src.mcp_client import MCPClient
 from src.models import (
+    CaptureDetail,
+    CaptureItem,
     CaptureRequest,
     CaptureResponse,
+    CapturesPage,
     CaptureStatus,
     normalized_url,
     url_hash,
@@ -239,6 +242,91 @@ async def capture(
     return _row_to_response(row, router)
 
 
+# ── Constants ─────────────────────────────────────────────────────────
+
+MAX_LIST_LIMIT = 200
+DEFAULT_LIST_LIMIT = 50
+
+
+# ── Routes ── Phase 7: read + manage ─────────────────────────────────
+
+
+@app.get("/captures", response_model=CapturesPage)
+async def list_captures(
+    limit: int = DEFAULT_LIST_LIMIT,
+    status: str | None = None,
+    platform: str | None = None,
+    repo: CaptureRepository = Depends(get_capture_repo),
+    _: str = require_token,
+) -> CapturesPage:
+    limit = max(1, min(limit, MAX_LIST_LIMIT))
+    rows = await repo.list_captures(limit=limit, status=status, platform=platform)
+    items = [_row_to_item(r) for r in rows]
+    return CapturesPage(items=items, next_cursor=None)
+
+
+@app.get("/captures/{capture_id}", response_model=CaptureDetail)
+async def get_capture(
+    capture_id: str,
+    repo: CaptureRepository = Depends(get_capture_repo),
+    _: str = require_token,
+) -> CaptureDetail:
+    row = await repo.get_by_id(capture_id)
+    if row is None or row.status == "deleted":
+        raise HTTPException(status_code=404, detail="Capture not found")
+    return _row_to_detail(row)
+
+
+_IN_FLIGHT_STATUSES = {"queued", "extracting", "classifying", "filing"}
+
+
+@app.post(
+    "/captures/{capture_id}/retry",
+    response_model=CaptureResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def retry_capture(
+    capture_id: str,
+    repo: CaptureRepository = Depends(get_capture_repo),
+    _: str = require_token,
+) -> CaptureResponse:
+    existing = await repo.get_by_id(capture_id)
+    if existing is None or existing.status == "deleted":
+        raise HTTPException(status_code=404, detail="Capture not found")
+    if existing.status in _IN_FLIGHT_STATUSES:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Capture is already in flight (status={existing.status})",
+        )
+    row = await repo.mark_for_retry(capture_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Capture not found")
+    return _row_to_response(row, None)  # type: ignore[arg-type]  # router unused in helper
+
+
+@app.delete("/captures/{capture_id}")
+async def delete_capture(
+    capture_id: str,
+    repo: CaptureRepository = Depends(get_capture_repo),
+    filer: Filer = Depends(get_filer),
+    _: str = require_token,
+) -> dict:
+    row = await repo.mark_deleted(capture_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Capture not found")
+    if row.doc_id:
+        try:
+            await filer._mcp.delete_doc(row.doc_id)
+        except Exception as e:
+            # Doc may already be trashed in AFFiNE; log + continue. The row is
+            # marked deleted regardless.
+            log.warning(
+                "delete_doc failed for capture %s doc %s: %s",
+                capture_id, row.doc_id, e,
+            )
+    return {"ok": True}
+
+
 # ── Helpers ───────────────────────────────────────────────────────────
 
 
@@ -262,6 +350,37 @@ def _article_platform(router: PlatformRouter):
     if plat is None:
         raise HTTPException(status_code=503, detail="No catch-all platform configured")
     return plat
+
+
+def _row_to_item(row: CaptureRow, *, completed_at: "datetime | None" = None) -> CaptureItem:
+    return CaptureItem(
+        capture_id=row.id,
+        url=row.url,
+        platform=row.platform,
+        status=CaptureStatus(row.status),
+        doc_id=row.doc_id,
+        web_url=row.web_url,
+        topic_path=row.topic_path,
+        created_at=row.created_at,
+        completed_at=completed_at,
+    )
+
+
+def _row_to_detail(row: CaptureRow) -> CaptureDetail:
+    return CaptureDetail(
+        capture_id=row.id,
+        url=row.url,
+        platform=row.platform,
+        status=CaptureStatus(row.status),
+        doc_id=row.doc_id,
+        web_url=row.web_url,
+        topic_path=row.topic_path,
+        created_at=row.created_at,
+        completed_at=None,  # Phase 6 schema has completed_at; fetch later
+        error=None,         # error column read in mark_failed but not exposed in CaptureRow yet
+        retry_count=row.retry_count,
+        classifier_reasoning=row.classifier_reasoning,
+    )
 
 
 def _build_web_url(doc_id: str) -> str:
