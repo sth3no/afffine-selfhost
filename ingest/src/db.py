@@ -26,6 +26,7 @@ class CaptureRow:
     classifier_topic: str | None = None
     classifier_conf: float | None = None
     classifier_reasoning: str | None = None
+    retry_count: int = 0
 
 
 _INSERT_SQL = """
@@ -40,7 +41,7 @@ _BASE_SELECT = """
     SELECT id, url, url_hash, source_app, shared_title, shared_text,
            platform, status, doc_id, web_url, topic_path,
            classifier_topic, classifier_conf, classifier_reasoning,
-           created_at
+           retry_count, created_at
     FROM captures
 """
 
@@ -99,7 +100,7 @@ class CaptureRepository:
             RETURNING id, url, url_hash, source_app, shared_title, shared_text,
                       platform, status, doc_id, web_url, topic_path,
                       classifier_topic, classifier_conf, classifier_reasoning,
-                      created_at
+                      retry_count, created_at
         """
         rec = await self._conn.fetchrow(sql)
         return None if rec is None else CaptureRow(**dict(rec))
@@ -118,7 +119,7 @@ class CaptureRepository:
             RETURNING id, url, url_hash, source_app, shared_title, shared_text,
                       platform, status, doc_id, web_url, topic_path,
                       classifier_topic, classifier_conf, classifier_reasoning,
-                      created_at
+                      retry_count, created_at
         """
         rec = await self._conn.fetchrow(sql)
         return None if rec is None else CaptureRow(**dict(rec))
