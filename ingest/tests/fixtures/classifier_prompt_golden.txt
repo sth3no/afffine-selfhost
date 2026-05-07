@@ -1,0 +1,17 @@
+Platform: instagram (Socials/Instagram)
+
+Existing topic folders under Sources/Socials/Instagram/:
+- Recipes
+- Workouts
+
+Suggested topics for this platform (you may propose others):
+Recipes, Workouts, Travel
+
+Captured content:
+- Title: Honey-glazed salmon
+- Author: @cookingchannel
+- Media kind: image
+
+Body (truncated to first 8000 chars):
+
+Recipe with ingredients and steps.
