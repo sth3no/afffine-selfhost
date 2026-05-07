@@ -19,13 +19,5 @@ def test_get_extractor_raises_on_unknown_name():
 
 
 def test_builtin_extractors_registered():
-    """Importing the package must register the four built-in extractors.
-    Skipped while built-ins are still being added in Tasks 3-6."""
-    pending = []
     for name in ("markitdown", "ytdlp", "oembed_ytdlp", "reddit_json"):
-        try:
-            get_extractor(name)
-        except KeyError:
-            pending.append(name)
-    if pending:
-        pytest.skip(f"built-ins not yet registered: {pending}")
+        assert get_extractor(name) is not None

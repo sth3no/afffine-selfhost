@@ -34,13 +34,10 @@ def get_extractor(name: str) -> ExtractFunc:
     return _REGISTRY[name]
 
 
-# Built-ins register themselves on import. Tasks 3-6 add them.
-# During development, missing modules are tolerated so partially-
-# implemented states still pass tests.
-import importlib
-
-for _mod in ("markitdown_ext", "ytdlp_ext", "oembed_ytdlp_ext", "reddit_json_ext"):
-    try:
-        importlib.import_module(f"src.pipeline.extractors.{_mod}")
-    except ImportError:
-        pass  # built-in not yet implemented; later tasks will add it.
+# Side-effect imports register the four built-ins.
+from src.pipeline.extractors import (  # noqa: E402, F401
+    markitdown_ext,
+    ytdlp_ext,
+    oembed_ytdlp_ext,
+    reddit_json_ext,
+)
