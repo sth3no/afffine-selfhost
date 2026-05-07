@@ -8,15 +8,19 @@
     "daily-digest": "tsx src/automations/daily-digest.ts",
     "stale-docs": "tsx src/automations/stale-docs.ts",
     "comment-summary": "tsx src/automations/comment-summary.ts",
-    "scheduler": "tsx src/scheduler.ts"
+    "sources-reorg": "tsx src/automations/sources-reorg.ts",
+    "scheduler": "tsx src/scheduler.ts",
+    "test": "vitest run"
   },
   "dependencies": {
-    "node-cron": "^3.0.3"
+    "node-cron": "^3.0.3",
+    "@anthropic-ai/sdk": "^0.40.0"
   },
   "devDependencies": {
     "tsx": "^4.19.0",
     "@types/node": "^22.0.0",
     "@types/node-cron": "^3.0.11",
-    "typescript": "^5.6.0"
+    "typescript": "^5.6.0",
+    "vitest": "^2.1.0"
   }
 }
