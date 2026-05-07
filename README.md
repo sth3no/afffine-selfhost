@@ -278,6 +278,113 @@ For `create_doc`, a fresh `Y.Doc` (`page` → `surface` + `note`) is
 constructed and the new doc id is also registered in the workspace root
 doc's `meta.pages` array.
 
+## Ingest Service
+
+Python/FastAPI sidecar that captures URLs from the iOS share extension
+and files them into AFFiNE under `Sources/`. Runs alongside `mcp_ext` +
+`mcp_agent` in the same stack. Ports `${INGEST_PORT:-3200}` on the host.
+
+### What it does
+
+1. iOS share sheet POSTs a URL to `/capture`.
+2. Service creates a stub doc in `Sources/<group>/<platform>/` (always within 500ms) and returns 202 with the doc URL — iOS shows it immediately.
+3. Background asyncio worker picks the row up:
+   - Extracts content (yt-dlp / markitdown / oEmbed / reddit JSON depending on URL host).
+   - Classifies into a topic via Claude Haiku 4.5 with prompt caching.
+   - Uses cosine-similarity on folder-name embeddings (OpenAI text-embedding-3-small) to dedup near-duplicate folders ("Cooking" → existing "Recipes").
+   - Moves the doc into the topic folder + appends the extracted body via `mcp_ext`.
+4. Weekly Sunday 03:00 UTC cron in `mcp_agent` (`sources-reorg`) sweeps `Sources/*` for over-15-doc leaf folders and proposes 2–5 sub-clusters via Claude Sonnet 4.6.
+
+### Required environment variables
+
+| Variable | Purpose |
+|---|---|
+| `INGEST_API_TOKEN` | Bearer token iOS sends. Generate: `openssl rand -hex 32`. |
+| `ANTHROPIC_API_KEY` | Classifier (Haiku 4.5) + reorganizer (Sonnet 4.6). |
+| `OPENAI_API_KEY` | Whisper API (audio transcription) + embeddings. |
+| `INGEST_PORT` | Host port (default 3200). |
+| `INGEST_BIND` | Bind interface (default 0.0.0.0; set 127.0.0.1 to restrict). |
+| `MAX_TRANSCRIPT_MIN` | Whisper cost guard (default 30 min/video). |
+| `REORG_THRESHOLD_DEFAULT` | Reorganizer threshold per leaf folder (default 15 docs). |
+
+### Bring-up
+
+```bash
+# 1. Make sure your .env has the keys above (copy from .env.example).
+# 2. Build + deploy the stack via Portainer (Stacks → Update).
+# 3. Verify the service comes up healthy:
+docker compose ps                       # affine_ingest = healthy
+curl http://localhost:3200/health       # {"ok": true, ...}
+
+# 4. End-to-end smoke (sends 3 URLs, checks they land in AFFiNE):
+INGEST_BASE=http://localhost:3200 \
+INGEST_API_TOKEN=$INGEST_API_TOKEN \
+bash ingest/scripts/smoke.sh
+```
+
+### Inspecting captures
+
+```bash
+# Recent captures (any status)
+curl -H "Authorization: Bearer $INGEST_API_TOKEN" \
+  http://localhost:3200/captures?limit=20 | jq
+
+# Single capture detail
+curl -H "Authorization: Bearer $INGEST_API_TOKEN" \
+  http://localhost:3200/captures/<id> | jq
+
+# Retry a failed capture
+curl -X POST -H "Authorization: Bearer $INGEST_API_TOKEN" \
+  http://localhost:3200/captures/<id>/retry
+
+# In Postgres directly
+docker exec -it affine_postgres psql -U affine -d affine_ingest \
+  -c "SELECT id, platform, status, topic_path, retry_count FROM captures ORDER BY created_at DESC LIMIT 20;"
+```
+
+### Logs
+
+Structured JSON, one line per record. Pipe through jq:
+
+```bash
+docker logs affine_ingest --since 10m -f | jq -c '. | {ts, level, msg, capture_id, step, topic}'
+```
+
+Lines emitted while a capture is being processed include `capture_id` so you can grep a single flow:
+
+```bash
+docker logs affine_ingest --since 1h | jq -c 'select(.capture_id == "01J-X")'
+```
+
+### Troubleshooting
+
+**Capture stuck at `queued`**
+- Worker not running. Check `/health` — `worker_alive` should be `true`. If false, restart `affine_ingest`.
+- `mcp_ext` unhealthy. Check `docker compose ps mcp_ext`.
+
+**Capture stuck at `failed`**
+- Look at `error` field in the capture detail. Common causes:
+  - `OPENAI_API_KEY` missing → Whisper or embedding call failed. Fix env, re-deploy.
+  - `ANTHROPIC_API_KEY` missing → classifier failed.
+  - URL behind login → extractor returned empty body. Manual workaround: capture as `shared_text` instead of URL, or skip.
+- After 3 retries (60s, 5min, 30min backoff) the row stays at `failed` until you `POST /captures/{id}/retry` manually.
+
+**Doc landed in `Sources/<platform>/` root instead of a topic folder**
+- Classifier returned `confidence < 0.6`. Check `classifier_reasoning` in the detail. The weekly reorganizer (Sunday 03:00 UTC) revisits these.
+
+**Reorganizer didn't run**
+- Check `mcp_agent` logs for the `Sources Reorg` cron entry on Sunday. Manual trigger:
+  ```bash
+  docker exec -it affine_mcp_agent npx tsx src/automations/sources-reorg.ts
+  ```
+
+**Same URL captured twice**
+- Should not happen — `url_hash` is UNIQUE. The second POST returns the existing capture. If you see duplicates, check that URL normalization (`utm_*` strip, lowercase host) is working: `python -c "from src.models import normalized_url; print(normalized_url('https://...'))"` inside the container.
+
+**Cost spike on Whisper**
+- Set `MAX_TRANSCRIPT_MIN` lower (default 30). Long videos auto-skip transcription.
+- Or rotate `OPENAI_API_KEY` to one with budget alerts.
+
 ## Reverse proxy
 
 `compose.yaml` only exposes the AFFiNE port on the host. For public
