@@ -11,6 +11,7 @@ itself — separation of concerns.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
 from typing import Any
@@ -21,6 +22,7 @@ from src.pipeline.classification import ClassificationResult
 from src.pipeline.extracted import Extracted
 from src.pipeline.filer import Filer
 
+log = logging.getLogger(__name__)
 
 ExtractFunc = Callable[[str, Platform], Awaitable[Extracted]]
 ClassifyFunc = Callable[..., Awaitable[ClassificationResult]]  # kwargs-style
@@ -57,6 +59,8 @@ async def process_capture(
     else:
         extracted = await extract_fn(row.url, platform)
 
+    log.info("transition", extra={"step": "extracted", "platform": platform.id})
+
     # ── Classify (or reuse cached classifier output on retry) ────────
     if row.classifier_topic is not None or row.classifier_conf is not None:
         result = ClassificationResult(
@@ -80,6 +84,8 @@ async def process_capture(
             reasoning=result.reasoning,
         )
 
+    log.info("transition", extra={"step": "classified", "topic": result.topic, "confidence": result.confidence})
+
     # ── File (move + append body) ────────────────────────────────────
     platform_path = ["Sources", platform.group, platform.folder_name]
     folder_id = await filer.move_to_topic_folder(platform_path=platform_path, result=result)
@@ -90,6 +96,8 @@ async def process_capture(
         topic_path = "/".join(platform_path)
 
     await repo.mark_filing(capture_id=row.id, topic_path=topic_path)
+
+    log.info("transition", extra={"step": "filed", "topic_path": topic_path})
 
     if folder_id is not None:
         await filer._mcp.move_document(row.doc_id, folder_id=folder_id)
@@ -102,6 +110,7 @@ async def process_capture(
 
     # ── Done ─────────────────────────────────────────────────────────
     await repo.mark_done(row.id)
+    log.info("transition", extra={"step": "done"})
 
 
 async def _list_existing_siblings(filer: Filer, platform: Platform) -> list[str]:

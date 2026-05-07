@@ -58,6 +58,9 @@ app_state = AppState()
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     """Startup: load topics, open DB pool, prepare MCP client + filer.
     Shutdown: close everything."""
+    from src.logging_setup import setup_logging
+    setup_logging(level=os.environ.get("LOG_LEVEL", "INFO"))
+
     # Topics & router (load once; hot-reload deferred to a future phase).
     topics = load_topics()
     app_state.router = PlatformRouter(topics)

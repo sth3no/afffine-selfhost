@@ -110,18 +110,20 @@ class Worker:
                 # same connection context. Note: the claim UPDATE was its own
                 # transaction; the orchestrator's mark_* calls are separate
                 # transactions (one per step) for per-step idempotency.
-                try:
-                    platform = self._platform_for(row)
-                    async with self._pool.acquire() as conn:
-                        repo = self._repo_factory(conn)
-                        await self._process(
-                            row,
-                            platform=platform,
-                            topics=self._topics,
-                            repo=repo,
-                        )
-                except Exception as exc:
-                    await self._handle_failure(row, exc)
+                from src.logging_setup import set_capture_id
+                with set_capture_id(row.id):
+                    try:
+                        platform = self._platform_for(row)
+                        async with self._pool.acquire() as conn:
+                            repo = self._repo_factory(conn)
+                            await self._process(
+                                row,
+                                platform=platform,
+                                topics=self._topics,
+                                repo=repo,
+                            )
+                    except Exception as exc:
+                        await self._handle_failure(row, exc)
         finally:
             self._alive = False
 
