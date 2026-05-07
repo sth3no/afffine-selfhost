@@ -69,8 +69,69 @@ platforms:
     hosts: ["*"]
     extractor: markitdown
 
-# Phase 5 will populate topic_hints used by the classifier.
-topic_hints: {}
+# Per-platform topic vocabulary hint. The classifier MAY propose any topic
+# but is biased toward this list when content matches. Add new topics here
+# as you see them cluster at the platform root.
+topic_hints:
+  youtube:
+    - Tutorials
+    - Talks
+    - Productivity
+    - Programming
+    - Music
+    - Documentary
+  instagram:
+    - Recipes
+    - Workouts
+    - Travel
+    - Architecture
+    - Memes
+    - Fashion
+    - Tech
+  tiktok:
+    - Recipes
+    - Memes
+    - Workouts
+    - Tutorials
+    - Fashion
+  x:
+    - AI
+    - Programming
+    - Politics
+    - Funny
+    - Threads
+    - Science
+  reddit:
+    - Programming
+    - Tech
+    - Cooking
+    - Gaming
+    - News
+  arxiv:
+    - Machine learning
+    - Computer vision
+    - NLP
+    - Systems
+    - Theory
+  podcast_apple:
+    - Tech
+    - Business
+    - Science
+    - Comedy
+    - News
+  spotify_episode:
+    - Tech
+    - Business
+    - Science
+    - Comedy
+    - News
+  article:
+    - Tech
+    - Science
+    - Business
+    - Culture
+    - Health
+    - Politics
 
 # Phase 8 reorganizer threshold.
 reorg:
