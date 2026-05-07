@@ -13,6 +13,7 @@ COPY pyproject.toml ./
 RUN pip install --no-cache-dir .
 
 # Copy application code last.
+COPY topics.yaml ./
 COPY src/ ./src/
 COPY migrations/ ./migrations/
 
