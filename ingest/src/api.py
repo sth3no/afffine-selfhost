@@ -6,6 +6,8 @@ endpoints land in Phase 7. Worker loop in Phase 6.
 
 from __future__ import annotations
 
+import asyncio
+import logging
 import os
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -28,6 +30,9 @@ from src.models import (
 )
 from src.pipeline.filer import Filer
 from src.pipeline.router import PlatformRouter
+from src.worker import Worker
+
+log = logging.getLogger(__name__)
 
 
 # ── Application-scoped state ──────────────────────────────────────────
@@ -39,6 +44,8 @@ class AppState:
     mcp: MCPClient | None = None
     filer: Filer | None = None
     router: PlatformRouter | None = None
+    worker: Worker | None = None
+    worker_task: asyncio.Task | None = None
 
 
 app_state = AppState()
@@ -63,9 +70,56 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     if settings.database_url and "placeholder" not in settings.database_url:
         app_state.pool = await create_pool(settings.database_url)
 
+    # Crash recovery: reset any in-flight rows from a prior process restart.
+    if app_state.pool is not None:
+        async with app_state.pool.acquire() as conn:
+            n = await CaptureRepository(conn).reset_in_flight_to_queued()
+            if n > 0:
+                log.info("crash recovery: reset %d in-flight rows to queued", n)
+
+    # Start the worker (only when pool, filer, and router are available).
+    if app_state.pool is not None and app_state.filer is not None and app_state.router is not None:
+        from src.pipeline.orchestrator import process_capture
+        from src.pipeline.classifier import classify
+        from src.pipeline.extractors import get_extractor
+
+        async def _process_fn(row, **kwargs):
+            extractor = get_extractor(kwargs["platform"].extractor)
+            await process_capture(
+                row,
+                platform=kwargs["platform"],
+                topics=kwargs["topics"],
+                repo=kwargs["repo"],
+                filer=app_state.filer,
+                extract_fn=extractor,
+                classify_fn=classify,
+            )
+
+        def _platform_for(row):
+            for p in app_state.router._platforms:
+                if p.id == row.platform:
+                    return p
+            return app_state.router.catch_all  # fallback
+
+        app_state.worker = Worker(
+            pool=app_state.pool,
+            repo_factory=lambda conn: CaptureRepository(conn),
+            process_fn=_process_fn,
+            platform_for=_platform_for,
+            topics=load_topics(),
+        )
+        app_state.worker_task = asyncio.create_task(app_state.worker._loop())
+
     yield
 
-    # Shutdown
+    # Shutdown: stop worker first, then close pool and MCP.
+    if app_state.worker is not None:
+        app_state.worker.stop()
+    if app_state.worker_task is not None:
+        try:
+            await asyncio.wait_for(app_state.worker_task, timeout=5.0)
+        except asyncio.TimeoutError:
+            app_state.worker_task.cancel()
     if app_state.pool is not None:
         await app_state.pool.close()
     if app_state.mcp is not None:
@@ -109,10 +163,14 @@ def get_platform_router() -> PlatformRouter:
 
 @app.get("/health")
 async def health() -> dict:
+    queue_depth = 0
+    if app_state.pool is not None:
+        async with app_state.pool.acquire() as conn:
+            queue_depth = await CaptureRepository(conn).count_active()
     return {
         "ok": True,
-        "queue_depth": 0,
-        "worker_alive": False,
+        "queue_depth": queue_depth,
+        "worker_alive": bool(app_state.worker and app_state.worker.alive),
         "version": settings.version,
     }
 
