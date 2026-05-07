@@ -16,6 +16,7 @@ import cron from 'node-cron';
 import { runDailyDigest } from './automations/daily-digest.js';
 import { runCommentSummary } from './automations/comment-summary.js';
 import { runStaleDocs } from './automations/stale-docs.js';
+import { runSourcesReorg } from './automations/sources-reorg.js';
 import { AffineMcpClient } from './mcp-client.js';
 import { config } from './config.js';
 
@@ -70,11 +71,17 @@ cron.schedule('0 9 * * *', wrap('Daily Digest', runDailyDigest));
 // Monday at 10:00 AM — Stale Docs Report
 cron.schedule('0 10 * * 1', wrap('Stale Docs', runStaleDocs));
 
+// Sunday at 03:00 UTC — Sources Reorganizer
+cron.schedule('0 3 * * 0', wrap('Sources Reorg', async () => {
+  await runSourcesReorg();
+}));
+
 console.log('[Scheduler] AFFiNE MCP Automation Scheduler started.');
 console.log('[Scheduler] Registered jobs:');
 console.log('  - Comment Summary:  daily at 08:00');
 console.log('  - Daily Digest:     daily at 09:00');
 console.log('  - Stale Docs:       Mondays at 10:00');
+console.log('  - Sources Reorg:    Sundays at 03:00');
 
 // Fire-and-forget diagnostic — doesn't block scheduler startup
 logAvailableTools().then(() =>
