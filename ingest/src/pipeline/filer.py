@@ -6,6 +6,10 @@ folders along the way, returning the leaf folder id.
 
 `Filer.file_doc(folder_path, title, body_md, meta)` (Task 5) composes the full
 flow: resolve the folder, create the doc, move it, append the body.
+
+`Filer.move_to_topic_folder(platform_path, result)` (Phase 5 Task 5) resolves
+or creates the topic subfolder under the platform using embedding-similarity
+dedup to prevent duplicate folders.
 """
 
 from __future__ import annotations
@@ -15,6 +19,8 @@ from collections.abc import Callable
 from typing import Any
 
 from src.mcp_client import MCPClient
+from src.pipeline.classification import ClassificationResult
+from src.pipeline.embeddings import cosine_similarity
 
 CACHE_TTL_SECONDS = 60.0
 
@@ -26,11 +32,24 @@ class Filer:
     Newly-created folders are patched into the snapshot to avoid a refetch.
     """
 
-    def __init__(self, mcp: MCPClient, *, clock: Callable[[], float] = time.monotonic) -> None:
+    def __init__(
+        self,
+        mcp: MCPClient,
+        *,
+        clock: Callable[[], float] = time.monotonic,
+        embeddings_repo: Any = None,
+        aliases_repo: Any = None,
+        embed_fn: Any = None,
+        similarity_threshold: float = 0.85,
+    ) -> None:
         self._mcp = mcp
         self._clock = clock
         self._tree_snapshot: list[dict] | None = None
         self._tree_fetched_at: float = 0.0
+        self._embeddings_repo = embeddings_repo
+        self._aliases_repo = aliases_repo
+        self._embed_fn = embed_fn
+        self._similarity_threshold = similarity_threshold
 
     async def resolve_or_create_folder(self, path: list[str]) -> str:
         """Walk path; create missing folders. Return the leaf folderId."""
@@ -91,3 +110,102 @@ class Filer:
             data = await self._mcp.list_folder_tree()
             self._tree_snapshot = list(data.get("tree", []))
             self._tree_fetched_at = now
+
+    async def move_to_topic_folder(
+        self,
+        *,
+        platform_path: list[str],
+        result: ClassificationResult,
+    ) -> str | None:
+        """Resolve / create the topic subfolder under the given platform.
+
+        Returns the folder_id, or None when result.topic is None
+        (confidence-floor case → caller leaves doc at platform_path root).
+        """
+        if result.topic is None:
+            return None
+        if self._embeddings_repo is None or self._aliases_repo is None or self._embed_fn is None:
+            raise RuntimeError(
+                "move_to_topic_folder requires embeddings_repo, aliases_repo, embed_fn"
+            )
+
+        platform_folder_id = await self.resolve_or_create_folder(platform_path)
+        parent_path = "/".join(platform_path)
+
+        # 1. Pre-recorded alias hit?
+        alias_canonical = await self._aliases_repo.lookup(parent_path=parent_path, alias=result.topic)
+        if alias_canonical is not None:
+            return await self._resolve_existing_topic_folder(platform_folder_id, alias_canonical)
+
+        # 2. Explicit alias_of from classifier?
+        if result.alias_of:
+            folder_id = await self._resolve_existing_topic_folder(platform_folder_id, result.alias_of)
+            await self._aliases_repo.record(
+                parent_path=parent_path, alias=result.topic, canonical=result.alias_of,
+            )
+            return folder_id
+
+        # 3. Embedding-similarity check against existing siblings.
+        proposed_vec = await self._embed_fn(result.topic)
+        siblings = await self._embeddings_repo.list_for_parent(parent_path)
+        best_match: tuple[str, str, float] | None = None  # (folder_id, name, cosine)
+        for sib in siblings:
+            sim = cosine_similarity(proposed_vec, sib.embedding)
+            if sim >= self._similarity_threshold and (best_match is None or sim > best_match[2]):
+                best_match = (sib.folder_id, sib.folder_name, sim)
+        if best_match is not None:
+            await self._aliases_repo.record(
+                parent_path=parent_path, alias=result.topic, canonical=best_match[1],
+            )
+            return best_match[0]
+
+        # 4. Create new folder under platform + persist embedding.
+        from src.db import FolderEmbeddingRow
+
+        created = await self._mcp.create_folder(result.topic, parent_folder_id=platform_folder_id)
+        new_folder_id = str(created["folderId"])
+        await self._embeddings_repo.upsert(FolderEmbeddingRow(
+            folder_id=new_folder_id,
+            folder_name=result.topic,
+            parent_path=parent_path,
+            embedding=list(proposed_vec),
+        ))
+        # Patch in-memory tree so subsequent resolves find the new folder.
+        self._patch_tree(platform_path, result.topic, new_folder_id)
+        return new_folder_id
+
+    async def _resolve_existing_topic_folder(self, platform_folder_id: str, name: str) -> str:
+        """Find a child folder by name under platform_folder_id; raise if missing.
+
+        Used when an alias points us at a name we expect to already exist.
+        """
+        await self._ensure_tree()
+        target = self._find_node_by_id(platform_folder_id)
+        if target is None:
+            raise LookupError(f"platform folder {platform_folder_id!r} not in tree snapshot")
+        for child in target.get("children", []):
+            if child.get("name") == name:
+                return str(child["id"])
+        raise LookupError(f"alias canonical {name!r} not found under {platform_folder_id!r}")
+
+    def _find_node_by_id(self, folder_id: str) -> dict | None:
+        """DFS for a folder node in the cached tree."""
+        if self._tree_snapshot is None:
+            return None
+        stack = list(self._tree_snapshot)
+        while stack:
+            node = stack.pop()
+            if node.get("id") == folder_id:
+                return node
+            stack.extend(node.get("children", []))
+        return None
+
+    def _patch_tree(self, platform_path: list[str], topic: str, new_folder_id: str) -> None:
+        """Append a new child node under the platform parent in the cached tree."""
+        siblings = self._tree_snapshot or []
+        for segment in platform_path:
+            match = next((n for n in siblings if n.get("name") == segment), None)
+            if match is None:
+                return  # tree shape doesn't match; bail without crashing
+            siblings = match.setdefault("children", [])
+        siblings.append({"id": new_folder_id, "type": "folder", "name": topic, "children": []})

@@ -24,6 +24,11 @@ class Settings(BaseSettings):
     max_transcript_min: int = 30
     max_body_chars: int = 50_000
     openai_api_key: str = ""
+    anthropic_api_key: str = ""
+    classifier_model: str = "claude-haiku-4-5-20251001"
+    embedding_model: str = "text-embedding-3-small"
+    confidence_floor: float = 0.6
+    similarity_threshold: float = 0.85
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore", case_sensitive=False)
 
