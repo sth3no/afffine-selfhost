@@ -1,0 +1,10 @@
+{
+    "id": "abc123",
+    "title": "Test Video Title",
+    "channel": "Test Channel",
+    "duration": 600,
+    "upload_date": "20260507",
+    "description": "A test video description.",
+    "subtitles": {"en": [{"ext": "vtt", "url": "..."}]},
+    "automatic_captions": {}
+}

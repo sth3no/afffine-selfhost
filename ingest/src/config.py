@@ -21,6 +21,9 @@ class Settings(BaseSettings):
     affine_server_external_url: str = "http://localhost:3010"
     affine_workspace_id: str = ""
     version: str = "0.1.0"
+    max_transcript_min: int = 30
+    max_body_chars: int = 50_000
+    openai_api_key: str = ""
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore", case_sensitive=False)
 
