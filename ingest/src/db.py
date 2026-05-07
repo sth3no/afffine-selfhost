@@ -23,6 +23,9 @@ class CaptureRow:
     web_url: str | None
     topic_path: str | None
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    classifier_topic: str | None = None
+    classifier_conf: float | None = None
+    classifier_reasoning: str | None = None
 
 
 _INSERT_SQL = """
@@ -35,7 +38,9 @@ _INSERT_SQL = """
 
 _BASE_SELECT = """
     SELECT id, url, url_hash, source_app, shared_title, shared_text,
-           platform, status, doc_id, web_url, topic_path, created_at
+           platform, status, doc_id, web_url, topic_path,
+           classifier_topic, classifier_conf, classifier_reasoning,
+           created_at
     FROM captures
 """
 
@@ -77,6 +82,123 @@ class CaptureRepository:
         if record is None:
             return None
         return CaptureRow(**dict(record))
+
+    # ── Worker lifecycle queries (Phase 6) ───────────────────────────
+
+    async def claim_next_queued(self) -> CaptureRow | None:
+        """Atomically claim the oldest queued row, transitioning to 'extracting'."""
+        sql = """
+            UPDATE captures SET status='extracting', updated_at=NOW()
+            WHERE id = (
+                SELECT id FROM captures
+                WHERE status='queued'
+                ORDER BY created_at
+                LIMIT 1
+                FOR UPDATE SKIP LOCKED
+            )
+            RETURNING id, url, url_hash, source_app, shared_title, shared_text,
+                      platform, status, doc_id, web_url, topic_path,
+                      classifier_topic, classifier_conf, classifier_reasoning,
+                      created_at
+        """
+        rec = await self._conn.fetchrow(sql)
+        return None if rec is None else CaptureRow(**dict(rec))
+
+    async def claim_due_failed(self) -> CaptureRow | None:
+        """Atomically claim the oldest failed row whose retry window has opened."""
+        sql = """
+            UPDATE captures SET status = 'extracting', updated_at = NOW()
+            WHERE id = (
+                SELECT id FROM captures
+                WHERE status = 'failed' AND next_attempt_at <= NOW()
+                ORDER BY next_attempt_at
+                LIMIT 1
+                FOR UPDATE SKIP LOCKED
+            )
+            RETURNING id, url, url_hash, source_app, shared_title, shared_text,
+                      platform, status, doc_id, web_url, topic_path,
+                      classifier_topic, classifier_conf, classifier_reasoning,
+                      created_at
+        """
+        rec = await self._conn.fetchrow(sql)
+        return None if rec is None else CaptureRow(**dict(rec))
+
+    async def mark_classifying(
+        self, *, capture_id: str, topic: str | None, confidence: float, reasoning: str
+    ) -> None:
+        await self._conn.execute(
+            """
+            UPDATE captures
+            SET status = 'classifying',
+                classifier_topic = $2,
+                classifier_conf = $3,
+                classifier_reasoning = $4,
+                updated_at = NOW()
+            WHERE id = $1
+            """,
+            capture_id, topic, confidence, reasoning,
+        )
+
+    async def mark_filing(self, *, capture_id: str, topic_path: str) -> None:
+        await self._conn.execute(
+            """
+            UPDATE captures
+            SET status = 'filing', topic_path = $2, updated_at = NOW()
+            WHERE id = $1
+            """,
+            capture_id, topic_path,
+        )
+
+    async def mark_done(self, capture_id: str) -> None:
+        await self._conn.execute(
+            """
+            UPDATE captures
+            SET status = 'done', completed_at = NOW(), updated_at = NOW()
+            WHERE id = $1
+            """,
+            capture_id,
+        )
+
+    async def mark_failed(
+        self,
+        *,
+        capture_id: str,
+        error: str,
+        retry_count: int,
+        next_attempt_at: datetime | None,
+    ) -> None:
+        await self._conn.execute(
+            """
+            UPDATE captures
+            SET status = 'failed',
+                error = $2,
+                retry_count = $3,
+                next_attempt_at = $4,
+                updated_at = NOW()
+            WHERE id = $1
+            """,
+            capture_id, error, retry_count, next_attempt_at,
+        )
+
+    async def count_active(self) -> int:
+        return int(await self._conn.fetchval(
+            """
+            SELECT count(*) FROM captures
+            WHERE status IN ('queued','extracting','classifying','filing','failed')
+            """
+        ))
+
+    async def reset_in_flight_to_queued(self) -> int:
+        """Crash recovery: rows mid-pipeline at startup go back to 'queued'."""
+        rows = await self._conn.fetch(
+            """
+            UPDATE captures
+            SET status = 'queued', updated_at = NOW()
+            WHERE status IN ('extracting','classifying','filing')
+            RETURNING id
+            """
+        )
+        return len(rows)
 
 
 # ── Pool helpers ──────────────────────────────────────────────────────
