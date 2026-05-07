@@ -90,3 +90,95 @@ def build_pool_kwargs(dsn: str, *, min_size: int = 1, max_size: int = 8) -> dict
 async def create_pool(dsn: str) -> asyncpg.Pool:
     """Create the asyncpg pool. Lifespan-managed by FastAPI in api.py."""
     return await asyncpg.create_pool(**build_pool_kwargs(dsn))
+
+
+# ── Folder embeddings + topic aliases (Phase 5) ───────────────────────
+
+
+@dataclass
+class FolderEmbeddingRow:
+    folder_id: str
+    folder_name: str
+    parent_path: str
+    embedding: list[float]
+
+
+_FOLDER_EMBEDDING_UPSERT_SQL = """
+    INSERT INTO folder_embeddings (folder_id, folder_name, parent_path, embedding, updated_at)
+    VALUES ($1, $2, $3, $4, NOW())
+    ON CONFLICT (folder_id) DO UPDATE
+        SET folder_name = EXCLUDED.folder_name,
+            parent_path = EXCLUDED.parent_path,
+            embedding   = EXCLUDED.embedding,
+            updated_at  = NOW()
+"""
+
+_FOLDER_EMBEDDING_LIST_SQL = """
+    SELECT folder_id, folder_name, parent_path, embedding, updated_at
+    FROM folder_embeddings
+    WHERE parent_path = $1
+"""
+
+
+def _format_pgvector(vec: list[float]) -> str:
+    """pgvector's text representation: '[v1,v2,...]' with no spaces."""
+    return "[" + ",".join(f"{v:.7g}" for v in vec) + "]"
+
+
+def _parse_pgvector(s: "str | list[float]") -> list[float]:
+    """Parse pgvector text or pass through if asyncpg returned a list."""
+    if isinstance(s, list):
+        return [float(v) for v in s]
+    s = s.strip()
+    if s.startswith("[") and s.endswith("]"):
+        s = s[1:-1]
+    return [float(x) for x in s.split(",") if x]
+
+
+class FolderEmbeddingRepository:
+    def __init__(self, conn: Any) -> None:
+        self._conn = conn
+
+    async def upsert(self, row: FolderEmbeddingRow) -> None:
+        await self._conn.execute(
+            _FOLDER_EMBEDDING_UPSERT_SQL,
+            row.folder_id,
+            row.folder_name,
+            row.parent_path,
+            _format_pgvector(row.embedding),
+        )
+
+    async def list_for_parent(self, parent_path: str) -> list[FolderEmbeddingRow]:
+        records = await self._conn.fetch(_FOLDER_EMBEDDING_LIST_SQL, parent_path)
+        return [
+            FolderEmbeddingRow(
+                folder_id=r["folder_id"],
+                folder_name=r["folder_name"],
+                parent_path=r["parent_path"],
+                embedding=_parse_pgvector(r["embedding"]),
+            )
+            for r in records
+        ]
+
+
+_TOPIC_ALIAS_UPSERT_SQL = """
+    INSERT INTO topic_aliases (parent_path, alias, canonical)
+    VALUES ($1, $2, $3)
+    ON CONFLICT (parent_path, alias) DO UPDATE
+        SET canonical = EXCLUDED.canonical
+"""
+
+_TOPIC_ALIAS_LOOKUP_SQL = """
+    SELECT canonical FROM topic_aliases WHERE parent_path = $1 AND alias = $2
+"""
+
+
+class TopicAliasRepository:
+    def __init__(self, conn: Any) -> None:
+        self._conn = conn
+
+    async def record(self, *, parent_path: str, alias: str, canonical: str) -> None:
+        await self._conn.execute(_TOPIC_ALIAS_UPSERT_SQL, parent_path, alias, canonical)
+
+    async def lookup(self, *, parent_path: str, alias: str) -> str | None:
+        return await self._conn.fetchval(_TOPIC_ALIAS_LOOKUP_SQL, parent_path, alias)
