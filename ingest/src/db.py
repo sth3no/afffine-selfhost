@@ -201,6 +201,87 @@ class CaptureRepository:
         )
         return len(rows)
 
+    # ── Read + manage queries (Phase 7) ───────────────────────────────
+
+    async def list_captures(
+        self,
+        *,
+        limit: int,
+        status: str | None = None,
+        platform: str | None = None,
+        before: "datetime | None" = None,
+    ) -> "list[CaptureRow]":
+        """List captures newest-first, optionally filtered by status/platform.
+
+        `before` is a cursor — only rows with `created_at < before` are
+        returned. Combine with limit for pagination.
+        """
+        clauses: list[str] = []
+        args: list[Any] = []
+        if status is not None:
+            args.append(status)
+            clauses.append(f"status = ${len(args)}")
+        if platform is not None:
+            args.append(platform)
+            clauses.append(f"platform = ${len(args)}")
+        if before is not None:
+            args.append(before)
+            clauses.append(f"created_at < ${len(args)}")
+        where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+        args.append(limit)
+        sql = f"""
+            SELECT id, url, url_hash, source_app, shared_title, shared_text,
+                   platform, status, doc_id, web_url, topic_path,
+                   classifier_topic, classifier_conf, classifier_reasoning,
+                   retry_count, created_at
+            FROM captures
+            {where}
+            ORDER BY created_at DESC
+            LIMIT ${len(args)}
+        """
+        records = await self._conn.fetch(sql, *args)
+        return [CaptureRow(**dict(r)) for r in records]
+
+    async def mark_for_retry(self, capture_id: str) -> "CaptureRow | None":
+        """Reset the row for re-processing by the worker.
+
+        Clears classifier output + error + retry_count + next_attempt_at, and
+        sets status back to 'queued'. Soft-deleted rows are NOT retried — the
+        WHERE clause excludes them.
+        """
+        sql = """
+            UPDATE captures
+            SET status = 'queued',
+                retry_count = 0,
+                next_attempt_at = NULL,
+                classifier_topic = NULL,
+                classifier_conf = NULL,
+                classifier_reasoning = NULL,
+                error = NULL,
+                updated_at = NOW()
+            WHERE id = $1 AND status <> 'deleted'
+            RETURNING id, url, url_hash, source_app, shared_title, shared_text,
+                      platform, status, doc_id, web_url, topic_path,
+                      classifier_topic, classifier_conf, classifier_reasoning,
+                      retry_count, created_at
+        """
+        rec = await self._conn.fetchrow(sql, capture_id)
+        return None if rec is None else CaptureRow(**dict(rec))
+
+    async def mark_deleted(self, capture_id: str) -> "CaptureRow | None":
+        """Soft-delete: status='deleted' but the row remains for audit + GET 404."""
+        sql = """
+            UPDATE captures
+            SET status = 'deleted', updated_at = NOW()
+            WHERE id = $1
+            RETURNING id, url, url_hash, source_app, shared_title, shared_text,
+                      platform, status, doc_id, web_url, topic_path,
+                      classifier_topic, classifier_conf, classifier_reasoning,
+                      retry_count, created_at
+        """
+        rec = await self._conn.fetchrow(sql, capture_id)
+        return None if rec is None else CaptureRow(**dict(rec))
+
 
 # ── Pool helpers ──────────────────────────────────────────────────────
 
