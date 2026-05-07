@@ -200,6 +200,8 @@ services:
       - AFFINE_MCP_ENDPOINT=http://mcp_ext:3100/
       - AFFINE_WORKSPACE_ID=${AFFINE_WORKSPACE_ID:-}
       - AFFINE_ACCESS_TOKEN=${AFFINE_ACCESS_TOKEN:-}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - REORG_THRESHOLD=${REORG_THRESHOLD_DEFAULT:-15}
       - TZ=${TZ:-UTC}
     restart: unless-stopped
     networks:
