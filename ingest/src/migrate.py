@@ -14,6 +14,7 @@ all migration SQL uses `IF NOT EXISTS`.
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 from pathlib import Path
 
@@ -21,6 +22,8 @@ import asyncpg
 
 INGEST_DB = "affine_ingest"
 MIGRATIONS_DIR = Path(__file__).resolve().parent.parent / "migrations"
+
+log = logging.getLogger(__name__)
 
 
 async def ensure_database(admin_url: str) -> None:
@@ -31,11 +34,11 @@ async def ensure_database(admin_url: str) -> None:
             "SELECT 1 FROM pg_database WHERE datname = $1", INGEST_DB
         )
         if exists:
-            print(f"Database {INGEST_DB!r} already exists.")
+            log.info("Database %r already exists.", INGEST_DB)
             return
         # CREATE DATABASE cannot run inside a transaction block.
         await conn.execute(f'CREATE DATABASE "{INGEST_DB}"')
-        print(f"Created database {INGEST_DB!r}.")
+        log.info("Created database %r.", INGEST_DB)
     finally:
         await conn.close()
 
@@ -50,9 +53,9 @@ async def apply_migrations(target_url: str) -> None:
     try:
         for path in files:
             sql = path.read_text(encoding="utf-8")
-            print(f"Applying {path.name} ({len(sql)} chars)")
+            log.info("Applying %s (%d chars)", path.name, len(sql))
             await conn.execute(sql)
-        print(f"Applied {len(files)} migration file(s).")
+        log.info("Applied %d migration file(s).", len(files))
     finally:
         await conn.close()
 
@@ -67,8 +70,10 @@ async def main() -> None:
 
     await ensure_database(admin_url)
     await apply_migrations(target_url)
-    print("Migration complete.")
+    log.info("Migration complete.")
 
 
 if __name__ == "__main__":
+    from src.logging_setup import setup_logging
+    setup_logging()
     asyncio.run(main())
