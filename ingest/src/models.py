@@ -96,3 +96,35 @@ class CaptureResponse(BaseModel):
     platform: str
     initial_path: str
     created_at: datetime
+
+
+class CaptureItem(BaseModel):
+    """Single row returned in lists.
+
+    Phase 7 history view in the iOS app consumes this shape.
+    """
+
+    capture_id: str
+    url: str | None = None
+    platform: str
+    status: CaptureStatus
+    doc_id: str | None = None
+    web_url: str | None = None
+    topic_path: str | None = None
+    created_at: datetime
+    completed_at: datetime | None = None
+
+
+class CapturesPage(BaseModel):
+    """Paginated list response."""
+
+    items: list[CaptureItem]
+    next_cursor: str | None = None
+
+
+class CaptureDetail(CaptureItem):
+    """Single capture detail, with diagnostics for the iOS detail screen."""
+
+    error: str | None = None
+    retry_count: int = 0
+    classifier_reasoning: str | None = None
