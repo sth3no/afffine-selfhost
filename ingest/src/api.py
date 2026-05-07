@@ -277,6 +277,56 @@ async def get_capture(
     return _row_to_detail(row)
 
 
+_IN_FLIGHT_STATUSES = {"queued", "extracting", "classifying", "filing"}
+
+
+@app.post(
+    "/captures/{capture_id}/retry",
+    response_model=CaptureResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def retry_capture(
+    capture_id: str,
+    repo: CaptureRepository = Depends(get_capture_repo),
+    _: str = require_token,
+) -> CaptureResponse:
+    existing = await repo.get_by_id(capture_id)
+    if existing is None or existing.status == "deleted":
+        raise HTTPException(status_code=404, detail="Capture not found")
+    if existing.status in _IN_FLIGHT_STATUSES:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Capture is already in flight (status={existing.status})",
+        )
+    row = await repo.mark_for_retry(capture_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Capture not found")
+    return _row_to_response(row, None)  # type: ignore[arg-type]  # router unused in helper
+
+
+@app.delete("/captures/{capture_id}")
+async def delete_capture(
+    capture_id: str,
+    repo: CaptureRepository = Depends(get_capture_repo),
+    filer: Filer = Depends(get_filer),
+    _: str = require_token,
+) -> dict:
+    row = await repo.mark_deleted(capture_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Capture not found")
+    if row.doc_id:
+        try:
+            await filer._mcp.delete_doc(row.doc_id)
+        except Exception as e:
+            # Doc may already be trashed in AFFiNE; log + continue. The row is
+            # marked deleted regardless.
+            log.warning(
+                "delete_doc failed for capture %s doc %s: %s",
+                capture_id, row.doc_id, e,
+            )
+    return {"ok": True}
+
+
 # ── Helpers ───────────────────────────────────────────────────────────
 
 
