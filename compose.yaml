@@ -207,6 +207,32 @@ services:
     networks:
       - affine_net
 
+  # imputnet/cobalt — media downloader API. Replaces direct yt-dlp use
+  # for platforms that aggressively bot-detect (YouTube, Instagram,
+  # TikTok, X). The cobalt project tracks the platform-fight upstream
+  # so we don't have to maintain cookie jars or POT solvers ourselves.
+  # Internal-only by default — accessed by the ingest worker over the
+  # affine_net network.
+  cobalt:
+    image: ghcr.io/imputnet/cobalt:11
+    container_name: affine_cobalt
+    environment:
+      # API_URL is what cobalt advertises in CORS / response URLs. For
+      # internal-only use the docker-network URL is fine; switch to a
+      # public URL only if you also publish the port + put it behind a
+      # reverse proxy.
+      - API_URL=http://cobalt:9000/
+      - DURATION_LIMIT=${COBALT_DURATION_LIMIT:-10800}
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:9000/"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - affine_net
+
   # One-shot job: ensures `affine_ingest` database exists, enables
   # pgvector, and applies migrations. Mirrors the affine_migration pattern.
   # Idempotent — safe to run on every stack update.
@@ -245,6 +271,8 @@ services:
         condition: service_healthy
       postgres:
         condition: service_healthy
+      cobalt:
+        condition: service_healthy
     ports:
       - '${INGEST_BIND:-0.0.0.0}:${INGEST_PORT:-3200}:3200'
     environment:
@@ -252,6 +280,7 @@ services:
       - INGEST_API_TOKEN=${INGEST_API_TOKEN:-}
       - DATABASE_URL=postgresql://${DB_USERNAME}:${DB_PASSWORD}@postgres:5432/affine_ingest
       - MCP_EXT_URL=http://mcp_ext:3100
+      - COBALT_API_URL=${COBALT_API_URL:-http://cobalt:9000}
       # MCP client to mcp_ext authenticates with the AFFiNE workspace token.
       # Without this every synchronous /capture call fails with
       # `httpx.LocalProtocolError: Illegal header value b'Bearer '`. The
