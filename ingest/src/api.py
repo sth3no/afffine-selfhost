@@ -469,9 +469,9 @@ async def upload_youtube_cookies(
     """Upload a Netscape-format cookies.txt for YouTube extractors.
 
     The browser extension POSTs this with the user's current YT session
-    cookies. We write atomically to a tmpfs file (chmod 600), and yt-dlp
-    + youtube-transcript-api + cobalt all read from there on every
-    request.
+    cookies. We write TWO files atomically to a tmpfs (chmod 600):
+      - youtube.txt (Netscape) — for yt-dlp `--cookies` and transcript-api
+      - cobalt.json (cobalt v11 format) — cobalt does NOT read Netscape
 
     NEVER logs the body. Only logs `byte_count` for ops visibility.
     """
@@ -479,6 +479,7 @@ async def upload_youtube_cookies(
 
     from src.youtube_cookies import (
         InvalidCookieFile,  # noqa: F401 — kept available for tests
+        netscape_to_cobalt_json,
         validate_netscape,
         write_cookies_atomic,
     )
@@ -491,10 +492,21 @@ async def upload_youtube_cookies(
             detail=f"invalid cookies.txt: {err}",
         )
 
-    write_cookies_atomic(raw, Path(settings.youtube_cookies_path))
+    netscape_path = Path(settings.youtube_cookies_path)
+    write_cookies_atomic(raw, netscape_path)
+
+    # Cobalt v11 needs JSON. Write the converted file alongside the Netscape one.
+    cobalt_path = netscape_path.parent / "cobalt.json"
+    cobalt_body = netscape_to_cobalt_json(raw)
+    write_cookies_atomic(cobalt_body, cobalt_path)
+
     log.info(
         "youtube cookies uploaded",
-        extra={"byte_count": len(raw), "path": settings.youtube_cookies_path},
+        extra={
+            "byte_count": len(raw),
+            "cobalt_byte_count": len(cobalt_body),
+            "path": settings.youtube_cookies_path,
+        },
     )
 
 

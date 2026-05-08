@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import stat
 import sys
@@ -11,9 +12,54 @@ import pytest
 
 from src.youtube_cookies import (
     cookie_file_exists,
+    netscape_to_cobalt_json,
     validate_netscape,
     write_cookies_atomic,
 )
+
+
+# ── netscape_to_cobalt_json ────────────────────────────────────────
+
+
+def test_netscape_to_cobalt_json_basic():
+    body = (
+        "# Netscape HTTP Cookie File\n"
+        ".youtube.com\tTRUE\t/\tTRUE\t0\tSID\tabc\n"
+        ".youtube.com\tTRUE\t/\tTRUE\t0\tHSID\txyz\n"
+    )
+    out = json.loads(netscape_to_cobalt_json(body))
+    assert "youtube" in out
+    assert len(out["youtube"]) == 1  # one bundled entry, not one per cookie
+    assert "SID=abc" in out["youtube"][0]
+    assert "HSID=xyz" in out["youtube"][0]
+    # Format is "k=v; k=v"
+    assert "; " in out["youtube"][0]
+
+
+def test_netscape_to_cobalt_json_empty_returns_empty_object():
+    assert json.loads(netscape_to_cobalt_json("# header only\n")) == {}
+    assert json.loads(netscape_to_cobalt_json("")) == {}
+
+
+def test_netscape_to_cobalt_json_skips_malformed_rows():
+    """A row with the wrong number of tabs must NOT crash the converter."""
+    body = (
+        "# header\n"
+        ".youtube.com\tTRUE\t/\tTRUE\t0\tGOOD\tvalid\n"
+        "totally malformed line\n"
+        ".youtube.com\tTRUE\t/\tTRUE\t0\tONLY_FIVE_TABS\n"
+    )
+    out = json.loads(netscape_to_cobalt_json(body))
+    assert "youtube" in out
+    assert "GOOD=valid" in out["youtube"][0]
+    assert "ONLY_FIVE_TABS" not in out["youtube"][0]
+
+
+def test_netscape_to_cobalt_json_is_real_json():
+    """Output must be parseable JSON — cobalt v11 fails to start otherwise."""
+    body = "# h\n.y.z\tTRUE\t/\tTRUE\t0\tA\tB\n"
+    out = netscape_to_cobalt_json(body)
+    json.loads(out)  # raises if invalid
 
 
 # ── validate_netscape ──────────────────────────────────────────────
@@ -147,6 +193,30 @@ def test_post_youtube_cookies_writes_file(app_with_token):
     )
     assert resp.status_code == 204
     assert dest.read_text(encoding="utf-8") == body
+
+
+def test_post_youtube_cookies_also_writes_cobalt_json(app_with_token):
+    """Hotfix: cobalt v11 needs its own JSON format. The endpoint writes
+    cobalt.json alongside the Netscape youtube.txt on every upload."""
+    client, dest = app_with_token
+    body = (
+        "# Netscape HTTP Cookie File\n"
+        ".youtube.com\tTRUE\t/\tTRUE\t0\tSID\tabc\n"
+        ".youtube.com\tTRUE\t/\tTRUE\t0\tHSID\txyz\n"
+    )
+    resp = client.post(
+        "/youtube/cookies",
+        content=body,
+        headers={"Authorization": "Bearer test-token"},
+    )
+    assert resp.status_code == 204
+
+    cobalt_path = dest.parent / "cobalt.json"
+    assert cobalt_path.exists()
+    parsed = json.loads(cobalt_path.read_text(encoding="utf-8"))
+    assert "youtube" in parsed
+    assert "SID=abc" in parsed["youtube"][0]
+    assert "HSID=xyz" in parsed["youtube"][0]
 
 
 def test_post_youtube_cookies_rejects_missing_auth(app_with_token):

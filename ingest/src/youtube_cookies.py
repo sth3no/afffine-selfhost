@@ -75,6 +75,42 @@ def cookie_file_exists(path: str | Path) -> bool:
         return False
 
 
+def netscape_to_cobalt_json(content: str) -> str:
+    """Convert a Netscape cookies.txt body to cobalt v11's JSON format.
+
+    Cobalt v11 expects:
+        {"youtube": ["k1=v1; k2=v2", "k1=v1; k2=v2"], ...}
+    where each array entry is one serialized cookie set. yt-dlp + the
+    transcript-api consume the Netscape file directly; cobalt does not.
+
+    We emit a single entry containing every YouTube + Google cookie row
+    joined `name=value; name=value`. One entry is correct for cobalt's
+    rotation logic — multiple entries are only useful when you have
+    multiple accounts to round-robin between.
+
+    Reference: https://github.com/imputnet/cobalt/blob/main/docs/examples/cookies.example.json
+    """
+    import json
+
+    pairs: list[str] = []
+    for line in content.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        fields = line.split("\t")
+        if len(fields) != 7:
+            continue
+        # Netscape row: domain include_subdomains path secure expires name value
+        name, value = fields[5], fields[6]
+        if name and value:
+            pairs.append(f"{name}={value}")
+
+    if not pairs:
+        return json.dumps({})
+
+    return json.dumps({"youtube": ["; ".join(pairs)]})
+
+
 def cookie_file_status(path: str | Path) -> dict:
     """Return JSON-serializable freshness metadata. Never returns cookie content.
 
