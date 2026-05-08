@@ -54,7 +54,13 @@ async def fetch_youtube_transcript(
 
 
 def _fetch_sync(video_id: str, languages: tuple[str, ...]) -> str | None:
-    """Synchronous fetch + format. Errors → None."""
+    """Synchronous fetch + format. Errors → None.
+
+    Phase 12: when a YouTube cookies file is present, pass it to
+    YouTubeTranscriptApi so authenticated requests bypass the
+    cloud-IP block. Without cookies, cloud-provider IPs typically
+    get RequestBlocked.
+    """
     try:
         from youtube_transcript_api import (
             YouTubeTranscriptApi,
@@ -67,8 +73,19 @@ def _fetch_sync(video_id: str, languages: tuple[str, ...]) -> str | None:
         log.warning("youtube_transcript_api not installed: %s", e)
         return None
 
+    # Lazy import (config has its own deps that may not be available
+    # in tests that mock the surrounding context).
+    from src.config import settings
+    from src.youtube_cookies import cookie_file_exists
+
+    api_kwargs: dict = {}
+    if cookie_file_exists(settings.youtube_cookies_path):
+        # youtube-transcript-api 1.x accepts cookie_path in __init__.
+        api_kwargs["cookie_path"] = settings.youtube_cookies_path
+
     try:
-        transcript = YouTubeTranscriptApi().fetch(video_id, languages=list(languages))
+        ytt_api = YouTubeTranscriptApi(**api_kwargs)
+        transcript = ytt_api.fetch(video_id, languages=list(languages))
     except (TranscriptsDisabled, NoTranscriptFound, VideoUnavailable):
         # Common, non-actionable failures — caller falls back to oEmbed-only.
         return None

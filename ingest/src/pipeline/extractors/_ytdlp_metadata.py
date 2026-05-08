@@ -3,6 +3,12 @@
 Best-effort: returns the parsed info.json dict, or None on any failure.
 Used by extractors that fetch audio/video via a different transport (e.g.
 cobalt) but still want yt-dlp's metadata (title, description, uploader).
+
+Phase 12: when a YouTube cookies file is present at
+`settings.youtube_cookies_path` (uploaded by the browser extension), we
+pass `--cookies` to yt-dlp so authenticated YT requests bypass the bot
+detection. The flag is omitted when the file is missing — yt-dlp errors
+on a missing cookies path.
 """
 
 from __future__ import annotations
@@ -14,6 +20,9 @@ import os
 import shutil
 import tempfile
 from pathlib import Path
+
+from src.config import settings
+from src.youtube_cookies import cookie_file_exists
 
 log = logging.getLogger(__name__)
 
@@ -29,14 +38,24 @@ async def fetch_metadata(url: str) -> dict | None:
     os.makedirs(_TMP_PARENT, exist_ok=True)
     workdir = Path(tempfile.mkdtemp(prefix="ingest-meta-", dir=_TMP_PARENT))
     try:
-        proc = await asyncio.create_subprocess_exec(
+        ytdlp_args = [
             "yt-dlp",
             "--skip-download",
             "--write-info-json",
             "--no-warnings",
             "--quiet",
+        ]
+        # Inject auth cookies when available — bypasses YT's "sign in to
+        # confirm you're not a bot" page on cloud IPs.
+        if cookie_file_exists(settings.youtube_cookies_path):
+            ytdlp_args += ["--cookies", settings.youtube_cookies_path]
+
+        ytdlp_args += [
             "-o", str(workdir / "video.%(ext)s"),
             url,
+        ]
+        proc = await asyncio.create_subprocess_exec(
+            *ytdlp_args,
             cwd=str(workdir),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,

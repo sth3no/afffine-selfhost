@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Affine YT Cookie Sync — Settings</title>
+  <style>
+    body {
+      font-family: -apple-system, system-ui, "Segoe UI", sans-serif;
+      max-width: 480px;
+      margin: 16px auto;
+      padding: 0 16px;
+      color: #1d1d1f;
+      background: #fafafa;
+    }
+    h1 { font-size: 18px; margin: 0 0 8px; }
+    p.hint { font-size: 13px; color: #555; margin: 0 0 16px; }
+    label { display: block; margin-top: 12px; font-size: 13px; font-weight: 600; }
+    input[type=text], input[type=password] {
+      width: 100%;
+      box-sizing: border-box;
+      padding: 8px 10px;
+      border: 1px solid #ccc;
+      border-radius: 6px;
+      font-size: 13px;
+    }
+    .row { display: flex; gap: 8px; align-items: center; margin-top: 16px; }
+    button {
+      padding: 8px 16px;
+      font-size: 13px;
+      border: 1px solid #0070f3;
+      background: #0070f3;
+      color: #fff;
+      border-radius: 6px;
+      cursor: pointer;
+    }
+    button.secondary { background: #fff; color: #0070f3; }
+    button:disabled { opacity: 0.5; cursor: default; }
+    .status {
+      margin-top: 16px;
+      padding: 10px 12px;
+      border-radius: 6px;
+      font-size: 13px;
+      background: #f0f0f0;
+      color: #444;
+    }
+    .status.ok { background: #e7f5e7; color: #1a6e1a; }
+    .status.err { background: #fde7e7; color: #a02020; }
+  </style>
+</head>
+<body>
+  <h1>Affine YT Cookie Sync</h1>
+  <p class="hint">Send your YouTube cookies to a self-hosted Affine ingest endpoint so cobalt + yt-dlp can fetch authenticated content. Cookies are written atomically to a tmpfs volume; never logged.</p>
+
+  <label for="ingestUrl">Ingest base URL</label>
+  <input type="text" id="ingestUrl" placeholder="https://ingest.example.com:3200" autocomplete="url">
+
+  <label for="ingestToken">Bearer token</label>
+  <input type="password" id="ingestToken" placeholder="ut_… (from your stack's INGEST_API_TOKEN)" autocomplete="off">
+
+  <div class="row">
+    <button id="save">Save</button>
+    <button id="syncNow" class="secondary">Sync now</button>
+  </div>
+
+  <div id="status" class="status">Last sync: never.</div>
+
+  <script src="options.js"></script>
+</body>
+</html>

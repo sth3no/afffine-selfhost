@@ -223,6 +223,13 @@ services:
       # reverse proxy.
       - API_URL=http://cobalt:9000/
       - DURATION_LIMIT=${COBALT_DURATION_LIMIT:-10800}
+      # Phase 12: cookies file uploaded by the browser extension.
+      # Cobalt v11 reads YouTube auth cookies from this Netscape file.
+      # Mounted read-only from the shared yt_cookies volume populated
+      # by the ingest service (POST /youtube/cookies endpoint).
+      - COOKIE_PATH=/cookies/youtube.txt
+    volumes:
+      - yt_cookies:/cookies:ro
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:9000/"]
@@ -296,6 +303,11 @@ services:
       - TZ=${TZ:-UTC}
     tmpfs:
       - /tmp/ingest:size=2g
+    volumes:
+      # Phase 12: shared cookie file (Netscape format) populated by
+      # POST /youtube/cookies (browser extension) and consumed by
+      # yt-dlp + youtube-transcript-api on every YouTube capture.
+      - yt_cookies:/run/cookies
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:3200/health').status==200 else 1)"]
@@ -325,3 +337,13 @@ volumes:
   affine_storage:
   affine_config:
   manticore_data:
+  # Phase 12: tmpfs-backed shared volume holding the Netscape cookies.txt
+  # uploaded by the browser extension. ingest writes (rw), cobalt reads (ro).
+  # tmpfs because cookies are short-lived and we don't want them on disk;
+  # extension auto-replenishes after container restart.
+  yt_cookies:
+    driver: local
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: "size=1m"
