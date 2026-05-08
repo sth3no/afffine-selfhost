@@ -223,11 +223,11 @@ services:
       # reverse proxy.
       - API_URL=http://cobalt:9000/
       - DURATION_LIMIT=${COBALT_DURATION_LIMIT:-10800}
-      # Phase 12: cookies file uploaded by the browser extension.
-      # Cobalt v11 reads YouTube auth cookies from this Netscape file.
-      # Mounted read-only from the shared yt_cookies volume populated
-      # by the ingest service (POST /youtube/cookies endpoint).
-      - COOKIE_PATH=/cookies/youtube.txt
+      # Phase 12 / 12.5 hotfix: cobalt v11 expects its OWN JSON format
+      # ({"youtube":["k=v; k=v"]}) — NOT Netscape. The ingest service
+      # converts on upload and writes cobalt.json alongside the
+      # Netscape youtube.txt. Both live on the shared yt_cookies tmpfs.
+      - COOKIE_PATH=/cookies/cobalt.json
     volumes:
       - yt_cookies:/cookies:ro
     restart: unless-stopped

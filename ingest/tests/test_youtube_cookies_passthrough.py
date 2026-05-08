@@ -73,13 +73,20 @@ async def test_ytdlp_metadata_omits_cookies_when_file_missing(tmp_path, monkeypa
 
 
 @pytest.mark.asyncio
-async def test_transcript_api_passes_cookie_path_when_file_exists(tmp_path, monkeypatch):
-    """YouTubeTranscriptApi(cookie_path=...) is the lib's hook — make
-    sure we pass it when cookies are available."""
+async def test_transcript_api_passes_http_client_when_file_exists(tmp_path, monkeypatch):
+    """YouTubeTranscriptApi 1.x takes `http_client=` (a requests.Session),
+    not `cookie_path`. We load the Netscape file via MozillaCookieJar
+    into a Session and pass that."""
+    import requests
+
     from src.pipeline.extractors import _youtube_transcript
 
     cookies = tmp_path / "youtube.txt"
-    cookies.write_text("# header\n.youtube.com\tTRUE\t/\tTRUE\t0\tSID\tabc\n", encoding="utf-8")
+    cookies.write_text(
+        "# Netscape HTTP Cookie File\n"
+        ".youtube.com\tTRUE\t/\tTRUE\t0\tSID\tabc\n",
+        encoding="utf-8",
+    )
 
     from src.config import settings
     monkeypatch.setattr(settings, "youtube_cookies_path", str(cookies))
@@ -102,11 +109,16 @@ async def test_transcript_api_passes_cookie_path_when_file_exists(tmp_path, monk
         )
 
     assert result == "hello"
-    assert init_kwargs.get("cookie_path") == str(cookies)
+    # The kwarg is `http_client`, and it's a requests.Session whose
+    # cookie jar contains the SID cookie loaded from the Netscape file.
+    assert "http_client" in init_kwargs
+    assert isinstance(init_kwargs["http_client"], requests.Session)
+    cookie_names = {c.name for c in init_kwargs["http_client"].cookies}
+    assert "SID" in cookie_names
 
 
 @pytest.mark.asyncio
-async def test_transcript_api_omits_cookie_path_when_file_missing(tmp_path, monkeypatch):
+async def test_transcript_api_omits_http_client_when_file_missing(tmp_path, monkeypatch):
     from src.pipeline.extractors import _youtube_transcript
 
     from src.config import settings
@@ -127,4 +139,5 @@ async def test_transcript_api_omits_cookie_path_when_file_missing(tmp_path, monk
     with patch("youtube_transcript_api.YouTubeTranscriptApi", _FakeApi):
         await _youtube_transcript.fetch_youtube_transcript("https://youtu.be/abcdefghijk")
 
-    assert "cookie_path" not in init_kwargs
+    assert "http_client" not in init_kwargs
+    assert "cookie_path" not in init_kwargs  # regression guard
