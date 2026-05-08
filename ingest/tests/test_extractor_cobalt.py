@@ -147,6 +147,10 @@ async def test_youtube_bot_block_falls_back_to_oembed(monkeypatch):
             "thumbnail_url": "https://i.ytimg.com/vi/x/hqdefault.jpg",
         }
     monkeypatch.setattr(cobalt_ext, "fetch_youtube_oembed", _fake_oembed, raising=False)
+    # Captions also unavailable for this test
+    async def _no_captions(url: str, **kwargs) -> None:
+        return None
+    monkeypatch.setattr(cobalt_ext, "fetch_youtube_transcript", _no_captions, raising=False)
 
     result = await cobalt_ext.extract(
         "https://www.youtube.com/watch?v=abc",
@@ -158,11 +162,56 @@ async def test_youtube_bot_block_falls_back_to_oembed(monkeypatch):
     assert result.media_kind == MediaKind.VIDEO
     assert result.extra["extractor"] == "youtube_oembed_fallback"
     assert result.extra["transcript_unavailable"] is True
+    assert result.extra["transcript_source"] == "unavailable"
     # Body should include the title, author, source URL, and a note about unavailability
     assert "How To Build An Agent" in result.body_md
     assert "Anthropic" in result.body_md
     assert "## Transcript" in result.body_md
     assert "Unavailable" in result.body_md
+
+
+@pytest.mark.asyncio
+async def test_youtube_bot_block_recovers_captions_via_transcript_api(monkeypatch):
+    """The big win: cobalt blocked, but YT's caption URL is unauthenticated
+    so we still get a real transcript. Body should have the captions, not
+    the 'unavailable' placeholder."""
+    from src.pipeline.extractors import cobalt_ext
+
+    def _cobalt_handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            400,
+            json={"status": "error", "error": {"code": "error.api.youtube.login"}},
+        )
+
+    monkeypatch.setattr(cobalt_ext, "_TEST_TRANSPORT", httpx.MockTransport(_cobalt_handler), raising=False)
+
+    async def _fail_metadata(url: str) -> None:
+        return None
+    monkeypatch.setattr(cobalt_ext, "fetch_metadata", _fail_metadata, raising=False)
+
+    async def _fake_oembed(url: str) -> dict:
+        return {"title": "Tutorial", "author_name": "ChannelX", "type": "video"}
+    monkeypatch.setattr(cobalt_ext, "fetch_youtube_oembed", _fake_oembed, raising=False)
+
+    async def _fake_captions(url: str, **kwargs) -> str:
+        return "Welcome to the tutorial.\nIn this video we will build a thing.\nLet's get started."
+    monkeypatch.setattr(cobalt_ext, "fetch_youtube_transcript", _fake_captions, raising=False)
+
+    result = await cobalt_ext.extract(
+        "https://www.youtube.com/watch?v=abc",
+        _platform(),
+    )
+
+    assert result.title == "Tutorial"
+    assert result.author == "ChannelX"
+    assert result.extra["transcript_source"] == "youtube_captions"
+    assert result.extra["transcript_unavailable"] is False
+    # Body has the captions block heading + the real transcript
+    assert "## Transcript (YouTube captions)" in result.body_md
+    assert "Welcome to the tutorial." in result.body_md
+    assert "build a thing" in result.body_md
+    # And NOT the "Unavailable" placeholder
+    assert "Unavailable" not in result.body_md
 
 
 @pytest.mark.asyncio
@@ -185,6 +234,9 @@ async def test_youtube_bot_block_with_oembed_failure_still_returns(monkeypatch):
     async def _fail_oembed(url: str) -> None:
         return None
     monkeypatch.setattr(cobalt_ext, "fetch_youtube_oembed", _fail_oembed, raising=False)
+    async def _no_captions(url: str, **kwargs) -> None:
+        return None
+    monkeypatch.setattr(cobalt_ext, "fetch_youtube_transcript", _no_captions, raising=False)
 
     result = await cobalt_ext.extract(
         "https://www.youtube.com/watch?v=abc",
@@ -195,7 +247,42 @@ async def test_youtube_bot_block_with_oembed_failure_still_returns(monkeypatch):
     assert result.author is None
     assert result.extra["extractor"] == "youtube_oembed_fallback"
     assert result.extra["has_metadata"] is False
+    assert result.extra["transcript_source"] == "unavailable"
     assert "Unavailable" in result.body_md
+
+
+@pytest.mark.asyncio
+async def test_youtube_bot_block_oembed_fails_but_captions_succeed(monkeypatch):
+    """Edge case: oEmbed 404 (e.g. unlisted video) but captions still work.
+    Title is None but body still has the transcript content."""
+    from src.pipeline.extractors import cobalt_ext
+
+    def _cobalt_handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            400,
+            json={"status": "error", "error": {"code": "error.api.youtube.login"}},
+        )
+
+    monkeypatch.setattr(cobalt_ext, "_TEST_TRANSPORT", httpx.MockTransport(_cobalt_handler), raising=False)
+    async def _fail_metadata(url: str) -> None:
+        return None
+    monkeypatch.setattr(cobalt_ext, "fetch_metadata", _fail_metadata, raising=False)
+    async def _fail_oembed(url: str) -> None:
+        return None
+    monkeypatch.setattr(cobalt_ext, "fetch_youtube_oembed", _fail_oembed, raising=False)
+    async def _fake_captions(url: str, **kwargs) -> str:
+        return "Captions content here."
+    monkeypatch.setattr(cobalt_ext, "fetch_youtube_transcript", _fake_captions, raising=False)
+
+    result = await cobalt_ext.extract(
+        "https://www.youtube.com/watch?v=abc",
+        _platform(),
+    )
+
+    assert result.title is None
+    assert result.extra["transcript_source"] == "youtube_captions"
+    assert result.extra["has_metadata"] is False
+    assert "Captions content here." in result.body_md
 
 
 @pytest.mark.asyncio

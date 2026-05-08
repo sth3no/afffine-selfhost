@@ -29,6 +29,7 @@ from src.config import Platform, settings
 from src.pipeline.extracted import Extracted, MediaKind, truncate_body
 from src.pipeline.extractors import register_extractor
 from src.pipeline.extractors._youtube_oembed import fetch_youtube_oembed
+from src.pipeline.extractors._youtube_transcript import fetch_youtube_transcript
 from src.pipeline.extractors._ytdlp_metadata import fetch_metadata
 from src.pipeline.extractors.ytdlp_ext import _whisper_transcribe
 
@@ -122,17 +123,45 @@ def _is_youtube_bot_block(exc: BaseException) -> bool:
 
 
 async def _youtube_metadata_only(url: str, platform: Platform) -> Extracted:
-    """Last-resort YouTube extractor: oEmbed for title/author, no transcript.
+    """YouTube fallback path: oEmbed metadata + transcript-api captions.
 
-    Returned Extracted carries `transcript_unavailable: True` in `extra` so
-    downstream consumers (UI, search) can flag these docs for later retry
-    once cookies are wired up.
+    Runs both fetches in parallel:
+      - oEmbed:        unauthenticated, gets title + author
+      - transcript-api: scrapes YT's caption URL, no auth needed for any
+                       video that has captions enabled (auto or manual)
+
+    Either or both can fail. If we get neither, the Extracted still
+    returns with title=None and a "transcript unavailable" body — the
+    summarizer can still produce a fallback title from the URL host.
+
+    Sets `extra.transcript_source` to one of:
+      "youtube_captions"  — got real captions
+      "unavailable"       — neither metadata nor captions worked
     """
-    oembed = await fetch_youtube_oembed(url)
+    oembed, captions = await asyncio.gather(
+        fetch_youtube_oembed(url),
+        fetch_youtube_transcript(url),
+    )
+
     title = oembed.get("title") if oembed else None
     author = oembed.get("author_name") if oembed else None
 
-    body_md = _build_body_md_metadata_only(url=url, title=title, author=author)
+    if captions:
+        # We have a real transcript — produce the same body shape as the
+        # cobalt happy path so the orchestrator's markdown→blocks parser
+        # emits Summary / Description / Transcript headings consistently.
+        body_md = _build_body_md(
+            url=url,
+            title=title,
+            author=author,
+            description="",
+            transcript=captions,
+            transcript_heading="## Transcript (YouTube captions)",
+        )
+        transcript_source = "youtube_captions"
+    else:
+        body_md = _build_body_md_metadata_only(url=url, title=title, author=author)
+        transcript_source = "unavailable"
 
     return Extracted(
         title=title,
@@ -144,14 +173,15 @@ async def _youtube_metadata_only(url: str, platform: Platform) -> Extracted:
             "extractor": "youtube_oembed_fallback",
             "platform_id": platform.id,
             "url": url,
-            "transcript_unavailable": True,
+            "transcript_source": transcript_source,
+            "transcript_unavailable": captions is None,
             "has_metadata": oembed is not None,
         },
     )
 
 
 def _build_body_md_metadata_only(*, url: str, title: str | None, author: str | None) -> str:
-    """Body for the metadata-only fallback. Mirrors _build_body_md's section
+    """Body for the no-transcript fallback. Mirrors _build_body_md's section
     layout so the orchestrator's markdown→blocks parser produces the same
     Summary / Description / Transcript heading structure.
     """
@@ -163,9 +193,8 @@ def _build_body_md_metadata_only(*, url: str, title: str | None, author: str | N
     parts.append(f"Source: {url}")
     parts.append("## Transcript")
     parts.append(
-        "_Unavailable — YouTube currently blocks unauthenticated audio downloads. "
-        "Watch the original video for the full content; retry the capture later "
-        "if cookies are wired up._",
+        "_Unavailable — YouTube blocked the audio download AND no captions "
+        "were available for this video. Watch the original to see the content._",
     )
     return "\n\n".join(parts)
 
@@ -198,6 +227,7 @@ def _build_body_md(
     author: str | None,
     description: str,
     transcript: str,
+    transcript_heading: str = "## Transcript (Whisper via cobalt)",
 ) -> str:
     """Compose a sectioned markdown body the orchestrator can split into blocks.
 
@@ -212,7 +242,7 @@ def _build_body_md(
     if description:
         parts.append("## Description")
         parts.append(description)
-    parts.append("## Transcript (Whisper via cobalt)")
+    parts.append(transcript_heading)
     parts.append(transcript or "(empty transcript)")
     return "\n\n".join(parts)
 
