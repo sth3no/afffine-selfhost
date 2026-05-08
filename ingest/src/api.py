@@ -458,6 +458,46 @@ async def delete_capture(
     return {"ok": True}
 
 
+# ── Routes ── Phase 12: YouTube cookies ──────────────────────────────
+
+
+@app.post("/youtube/cookies", status_code=status.HTTP_204_NO_CONTENT)
+async def upload_youtube_cookies(
+    request: Request,
+    _: str = require_token,
+):
+    """Upload a Netscape-format cookies.txt for YouTube extractors.
+
+    The browser extension POSTs this with the user's current YT session
+    cookies. We write atomically to a tmpfs file (chmod 600), and yt-dlp
+    + youtube-transcript-api + cobalt all read from there on every
+    request.
+
+    NEVER logs the body. Only logs `byte_count` for ops visibility.
+    """
+    from pathlib import Path
+
+    from src.youtube_cookies import (
+        InvalidCookieFile,  # noqa: F401 — kept available for tests
+        validate_netscape,
+        write_cookies_atomic,
+    )
+
+    raw = (await request.body()).decode("utf-8", errors="replace")
+    ok, err = validate_netscape(raw)
+    if not ok:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"invalid cookies.txt: {err}",
+        )
+
+    write_cookies_atomic(raw, Path(settings.youtube_cookies_path))
+    log.info(
+        "youtube cookies uploaded",
+        extra={"byte_count": len(raw), "path": settings.youtube_cookies_path},
+    )
+
+
 # ── Helpers ───────────────────────────────────────────────────────────
 
 

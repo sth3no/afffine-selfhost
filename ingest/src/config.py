@@ -33,6 +33,7 @@ class Settings(BaseSettings):
     embedding_model: str = "text-embedding-3-small"
     confidence_floor: float = 0.6
     similarity_threshold: float = 0.85
+    youtube_cookies_path: str = "/run/cookies/youtube.txt"
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore", case_sensitive=False)
 
