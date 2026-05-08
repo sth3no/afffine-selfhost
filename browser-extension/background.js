@@ -26,20 +26,42 @@ const BADGE_TEXT_STALE = '!';
 // ── Cookie collection ──────────────────────────────────────────────
 
 /**
- * Fetch all YouTube cookies via chrome.cookies API. Returns the
- * deduplicated list across both `youtube.com` and `.youtube.com` scopes.
- * httpOnly cookies ARE included — they're inaccessible from page JS but
- * the chrome.cookies API has full access (that's the whole point of
- * this extension).
+ * Fetch YouTube cookies via chrome.cookies API. Returns the deduplicated
+ * list across both `youtube.com` and `.youtube.com` scopes. httpOnly
+ * cookies ARE included — they're inaccessible from page JS but the
+ * chrome.cookies API has full access (that's the whole point of this
+ * extension).
+ *
+ * Phase 12.5: when `extendedScope` is enabled in options AND the
+ * optional `accounts.google.com` permission is currently granted, also
+ * collect from `accounts.google.com` + `.google.com`. This covers
+ * age-gated / members-only / certain music videos where YT auth lives
+ * on Google's central account domain, not `*.youtube.com`.
  */
 async function collectYouTubeCookies() {
-  const [bare, dotted] = await Promise.all([
+  const requests = [
     chrome.cookies.getAll({ domain: 'youtube.com' }),
     chrome.cookies.getAll({ domain: '.youtube.com' }),
-  ]);
+  ];
+
+  const { extendedScope } = await chrome.storage.local.get('extendedScope');
+  if (extendedScope) {
+    // Only collect when the user opted in AND the optional permission is
+    // currently granted (it can be revoked outside this UI from the
+    // browser's extension settings).
+    const hasPerm = await chrome.permissions.contains({
+      origins: ['*://accounts.google.com/*'],
+    });
+    if (hasPerm) {
+      requests.push(chrome.cookies.getAll({ domain: 'accounts.google.com' }));
+      requests.push(chrome.cookies.getAll({ domain: '.google.com' }));
+    }
+  }
+
+  const buckets = await Promise.all(requests);
   const seen = new Set();
   const out = [];
-  for (const c of [...bare, ...dotted]) {
+  for (const c of buckets.flat()) {
     const key = `${c.name}|${c.domain}|${c.path}`;
     if (seen.has(key)) continue;
     seen.add(key);

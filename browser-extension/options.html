@@ -57,6 +57,11 @@
   <label for="ingestToken">Bearer token</label>
   <input type="password" id="ingestToken" placeholder="ut_… (from your stack's INGEST_API_TOKEN)" autocomplete="off">
 
+  <label class="row" style="margin-top: 16px; font-weight: normal; align-items: flex-start;">
+    <input type="checkbox" id="extendedScope" style="margin-top: 3px;">
+    <span style="font-size: 12px; line-height: 1.4;">Also include <code>accounts.google.com</code> cookies (helps with age-gated &amp; members-only videos). Browser will prompt for permission.</span>
+  </label>
+
   <div class="row">
     <button id="save">Save</button>
     <button id="syncNow" class="secondary">Sync now</button>

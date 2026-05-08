@@ -5,6 +5,7 @@
   "description": "Sync YouTube cookies to your self-hosted Affine ingest service so cobalt and yt-dlp can fetch authenticated content (transcripts, age-gated videos, music).",
   "permissions": ["cookies", "storage", "alarms"],
   "host_permissions": ["*://*.youtube.com/*", "https://*/*", "http://*/*"],
+  "optional_host_permissions": ["*://*.google.com/*", "*://accounts.google.com/*"],
   "background": {
     "service_worker": "background.js",
     "type": "module"
