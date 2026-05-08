@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import logging
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 
 log = logging.getLogger(__name__)
@@ -72,3 +73,31 @@ def cookie_file_exists(path: str | Path) -> bool:
         return p.is_file() and p.stat().st_size > 0
     except OSError:
         return False
+
+
+def cookie_file_status(path: str | Path) -> dict:
+    """Return JSON-serializable freshness metadata. Never returns cookie content.
+
+    Used by the read-only GET /youtube/cookies/status endpoint so the
+    extension popup can render server-side staleness — the browser-side
+    `lastSync` lies if the ingest container restarted and dropped tmpfs
+    while the user wasn't browsing YouTube.
+    """
+    p = Path(path)
+    try:
+        st = p.stat()
+    except (FileNotFoundError, OSError):
+        return {"exists": False, "age_seconds": None, "mtime": None, "byte_count": 0}
+
+    if not p.is_file() or st.st_size == 0:
+        return {"exists": False, "age_seconds": None, "mtime": None, "byte_count": 0}
+
+    mtime_dt = datetime.fromtimestamp(st.st_mtime, tz=timezone.utc)
+    age_seconds = max(0, int(datetime.now(tz=timezone.utc).timestamp() - st.st_mtime))
+    mtime_iso = mtime_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+    return {
+        "exists": True,
+        "age_seconds": age_seconds,
+        "mtime": mtime_iso,
+        "byte_count": st.st_size,
+    }
