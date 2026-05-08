@@ -18,6 +18,11 @@ const ALARM_DAILY_SYNC = 'yt-cookie-daily-sync';
 const ALARM_DEBOUNCE_SYNC = 'yt-cookie-debounce-sync';
 const DEBOUNCE_MINUTES = 0.5;  // 30s
 
+// Phase 12.5: server-side staleness thresholds + badge constants.
+const STALE_AFTER_SECONDS = 60 * 60 * 24;  // 24h — beyond this, badge "!" turns on.
+const BADGE_COLOR_STALE = '#d33a2c';
+const BADGE_TEXT_STALE = '!';
+
 // ── Cookie collection ──────────────────────────────────────────────
 
 /**
@@ -76,6 +81,56 @@ function cookiesToNetscape(cookies) {
   return header.concat(rows).join('\n') + '\n';
 }
 
+// ── Server-side freshness (phase 12.5) ─────────────────────────────
+
+/**
+ * GET /youtube/cookies/status — returns the server's view of freshness.
+ * Never returns cookie content; only `exists`, `age_seconds`, `mtime`,
+ * `byte_count`. Returns null on any auth/network failure (caller treats
+ * as "unknown" — doesn't change badge state).
+ */
+async function fetchServerStatus(ingestUrl, ingestToken) {
+  if (!ingestUrl || !ingestToken) return null;
+  const endpoint = `${ingestUrl.replace(/\/$/, '')}/youtube/cookies/status`;
+  try {
+    const resp = await fetch(endpoint, {
+      method: 'GET',
+      headers: { 'Authorization': `Bearer ${ingestToken}` },
+    });
+    if (!resp.ok) return null;
+    return await resp.json();
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Map a server-status payload to a verdict the popup + badge consume.
+ * 'fresh'   — file exists and age < STALE_AFTER_SECONDS
+ * 'stale'   — file exists but age >= STALE_AFTER_SECONDS
+ * 'missing' — server says no file (tmpfs lost / never uploaded)
+ * 'unknown' — server unreachable / 401 — don't surface as a warning
+ */
+function verdictFromStatus(status) {
+  if (!status) return 'unknown';
+  if (!status.exists) return 'missing';
+  if ((status.age_seconds ?? 0) >= STALE_AFTER_SECONDS) return 'stale';
+  return 'fresh';
+}
+
+/**
+ * Set the toolbar badge: red "!" if stale or missing, cleared otherwise.
+ * No badge when verdict is 'unknown' — server unreachable shouldn't
+ * trigger a fake warning.
+ */
+async function applyBadge(verdict) {
+  const showBadge = verdict === 'stale' || verdict === 'missing';
+  await chrome.action.setBadgeText({ text: showBadge ? BADGE_TEXT_STALE : '' });
+  if (showBadge) {
+    await chrome.action.setBadgeBackgroundColor({ color: BADGE_COLOR_STALE });
+  }
+}
+
 // ── Sync ───────────────────────────────────────────────────────────
 
 /**
@@ -126,6 +181,13 @@ async function syncCookies() {
     return result;
   }
 
+  // Phase 12.5: pull the server's view of freshness so the popup + badge
+  // reflect what's actually on disk, not just what the browser uploaded.
+  const serverStatus = resp.ok
+    ? await fetchServerStatus(ingestUrl, ingestToken)
+    : null;
+  const verdict = verdictFromStatus(serverStatus);
+
   const result = {
     ok: resp.ok,
     status: resp.status,
@@ -133,8 +195,11 @@ async function syncCookies() {
     byte_count: body.length,
     synced_at: new Date().toISOString(),
     error: resp.ok ? null : `HTTP ${resp.status}`,
+    server_status: serverStatus,  // {exists, age_seconds, mtime, byte_count} | null
+    verdict,                      // 'fresh' | 'stale' | 'missing' | 'unknown'
   };
   await chrome.storage.local.set({ lastSync: result });
+  await applyBadge(verdict);
   return result;
 }
 
@@ -145,6 +210,14 @@ chrome.runtime.onInstalled.addListener(() => {
   syncCookies();
   // Schedule the daily safety-net.
   chrome.alarms.create(ALARM_DAILY_SYNC, { periodInMinutes: 60 * 24 });
+});
+
+// Service workers in MV3 die after ~30s idle. On every wake-up, restore
+// the badge from cached state so a "stale"/"missing" warning persists
+// across browser restarts without needing an immediate sync.
+chrome.runtime.onStartup.addListener(async () => {
+  const { lastSync } = await chrome.storage.local.get('lastSync');
+  await applyBadge(lastSync?.verdict ?? 'unknown');
 });
 
 chrome.cookies.onChanged.addListener(({ cookie }) => {
