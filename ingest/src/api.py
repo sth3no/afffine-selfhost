@@ -14,12 +14,16 @@ from datetime import datetime, timezone
 from typing import AsyncIterator
 
 import asyncpg
-from fastapi import Depends, FastAPI, HTTPException, status
+import httpx
+from fastapi import Depends, FastAPI, HTTPException, Request, status
+from fastapi.responses import JSONResponse
 from ulid import ULID
 
+from src import error_envelope
 from src.auth import require_token
 from src.config import load_topics, settings
 from src.db import CaptureRepository, CaptureRow, create_pool
+from src.logging_setup import trace_id_var
 from src.mcp_client import MCPClient
 from src.models import (
     CaptureDetail,
@@ -133,6 +137,26 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
 
 
 app = FastAPI(title="affine-ingest", version=settings.version, lifespan=lifespan)
+error_envelope.register(app)
+
+
+@app.middleware("http")
+async def trace_id_middleware(request: Request, call_next):
+    """Stamp every request with a ULID trace_id.
+
+    The id propagates into log records via the contextvar in logging_setup,
+    is echoed back in the X-Trace-Id response header, and is included in
+    error envelopes so the iOS Diagnostics dump can be greppped against
+    server logs.
+    """
+    tid = str(ULID())
+    token = trace_id_var.set(tid)
+    try:
+        response = await call_next(request)
+        response.headers["X-Trace-Id"] = tid
+        return response
+    finally:
+        trace_id_var.reset(token)
 
 
 # ── DI providers (overrideable in tests) ──────────────────────────────
@@ -179,6 +203,89 @@ async def health() -> dict:
         "worker_alive": bool(app_state.worker and app_state.worker.alive),
         "version": settings.version,
     }
+
+
+@app.get("/health/deep")
+async def health_deep() -> JSONResponse:
+    """Probe every dependency that synchronous /capture exercises.
+
+    Shallow /health is fine for `docker healthcheck` — it stays green as long
+    as the process is up and the DB pool is alive. /health/deep additionally
+    probes mcp_ext (TCP + /health) and AFFiNE-via-mcp_ext (a cheap MCP call),
+    because /capture fails when either of those is broken even though the
+    worker is "alive".
+
+    Returns 200 when all checks pass, 503 otherwise. The payload always names
+    each check + its latency so the operator can see which layer is red.
+    """
+    import time
+
+    checks: dict[str, dict] = {}
+    overall_ok = True
+
+    # 1. DB pool reachable.
+    t0 = time.monotonic()
+    if app_state.pool is None:
+        checks["db"] = {"ok": False, "error": "pool not initialized"}
+        overall_ok = False
+    else:
+        try:
+            async with app_state.pool.acquire() as conn:
+                await conn.fetchval("SELECT 1")
+            checks["db"] = {"ok": True, "latency_ms": int((time.monotonic() - t0) * 1000)}
+        except Exception as e:
+            checks["db"] = {"ok": False, "error": f"{type(e).__name__}: {e}"}
+            overall_ok = False
+
+    # 2. mcp_ext liveness — TCP + /health.
+    mcp_url = os.environ.get("MCP_EXT_URL", "http://mcp_ext:3100").rstrip("/")
+    t0 = time.monotonic()
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            resp = await client.get(f"{mcp_url}/health")
+        if resp.status_code == 200:
+            checks["mcp_ext"] = {
+                "ok": True,
+                "latency_ms": int((time.monotonic() - t0) * 1000),
+            }
+        else:
+            checks["mcp_ext"] = {
+                "ok": False,
+                "status_code": resp.status_code,
+                "latency_ms": int((time.monotonic() - t0) * 1000),
+            }
+            overall_ok = False
+    except Exception as e:
+        checks["mcp_ext"] = {"ok": False, "error": f"{type(e).__name__}: {e}"}
+        overall_ok = False
+
+    # 3. AFFiNE-via-mcp_ext — exercises AFFINE_ACCESS_TOKEN + workspace.
+    #    Skipped automatically when mcp_ext probe is already red.
+    if checks.get("mcp_ext", {}).get("ok") and app_state.mcp is not None:
+        t0 = time.monotonic()
+        try:
+            await app_state.mcp.list_folder_tree()
+            checks["mcp_affine"] = {
+                "ok": True,
+                "latency_ms": int((time.monotonic() - t0) * 1000),
+            }
+        except Exception as e:
+            checks["mcp_affine"] = {
+                "ok": False,
+                "error": f"{type(e).__name__}: {e}",
+                "latency_ms": int((time.monotonic() - t0) * 1000),
+            }
+            overall_ok = False
+
+    return JSONResponse(
+        status_code=200 if overall_ok else 503,
+        content={
+            "ok": overall_ok,
+            "checks": checks,
+            "worker_alive": bool(app_state.worker and app_state.worker.alive),
+            "version": settings.version,
+        },
+    )
 
 
 @app.post("/capture", response_model=CaptureResponse, status_code=status.HTTP_202_ACCEPTED)
