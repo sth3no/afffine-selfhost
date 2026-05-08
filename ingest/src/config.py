@@ -34,6 +34,15 @@ class Settings(BaseSettings):
     confidence_floor: float = 0.6
     similarity_threshold: float = 0.85
     youtube_cookies_path: str = "/run/cookies/youtube.txt"
+    # Phase 13 — video frame analysis
+    video_analysis_enabled: bool = True
+    vision_model: str = "claude-sonnet-4-6"
+    cobalt_video_max_size_mb: int = 200
+    max_frames_per_video: int = 8
+    max_keyframes_in_doc: int = 4
+    keyframe_importance_threshold: int = 4
+    frame_long_edge_px: int = 1024
+    scenedetect_threshold: float = 27.0
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore", case_sensitive=False)
 
