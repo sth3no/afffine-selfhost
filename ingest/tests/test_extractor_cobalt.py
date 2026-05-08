@@ -40,9 +40,11 @@ async def test_cobalt_happy_path_returns_transcript(monkeypatch):
             body = json.loads(request.content)
             assert body["url"] == "https://www.youtube.com/watch?v=abc"
             assert body["downloadMode"] == "audio"
+            # Cobalt v11 only accepts: best | mp3 | ogg | wav | opus.
+            assert body["audioFormat"] in {"best", "mp3", "ogg", "wav", "opus"}
             return httpx.Response(
                 200,
-                json={"status": "tunnel", "url": "http://cobalt:9000/tunnel/xyz", "filename": "sample.m4a"},
+                json={"status": "tunnel", "url": "http://cobalt:9000/tunnel/xyz", "filename": "sample.mp3"},
             )
         if request.url.path.startswith("/tunnel/"):
             return httpx.Response(200, content=b"\x00" * 32)

@@ -73,7 +73,9 @@ async def _request_tunnel(url: str) -> str:
     payload = {
         "url": url,
         "downloadMode": "audio",
-        "audioFormat": "m4a",
+        # cobalt v11 accepts only: best | mp3 | ogg | wav | opus.
+        # mp3 is the safest cross-platform format for the Whisper API too.
+        "audioFormat": "mp3",
     }
     async with _client() as client:
         try:
@@ -107,7 +109,9 @@ async def _request_tunnel(url: str) -> str:
 
 
 async def _download_audio(tunnel_url: str, workdir: Path) -> Path:
-    out_path = workdir / "audio.m4a"
+    # Filename extension matters: OpenAI's Whisper multipart upload sniffs
+    # the MIME from the filename. Keep it in sync with audioFormat above.
+    out_path = workdir / "audio.mp3"
     async with _client() as client:
         async with client.stream("GET", tunnel_url) as resp:
             if resp.status_code >= 400:
