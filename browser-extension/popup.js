@@ -44,6 +44,7 @@ function setStatus(result) {
   if (!result) {
     $status.className = 'status';
     $status.textContent = 'Last sync: never. Click Settings to configure.';
+    setServerStatus(null);
     return;
   }
   if (result.ok) {
@@ -53,6 +54,31 @@ function setStatus(result) {
   } else {
     $status.className = 'status err';
     $status.textContent = `Failed: ${result.error ?? 'unknown'}`;
+  }
+  setServerStatus(result);
+}
+
+// Server-side verdict (phase 12.5). Disagrees with the line above when
+// the ingest container has restarted and lost the tmpfs cookies file —
+// browser thinks it synced, server has nothing.
+function setServerStatus(result) {
+  const $sv = document.getElementById('serverStatus');
+  if (!result || !result.verdict || result.verdict === 'unknown') {
+    $sv.hidden = true;
+    return;
+  }
+  $sv.hidden = false;
+  if (result.verdict === 'fresh') {
+    $sv.className = 'status server';
+    const ageMin = Math.floor((result.server_status?.age_seconds ?? 0) / 60);
+    $sv.textContent = `Server: fresh (uploaded ${ageMin} min ago)`;
+  } else if (result.verdict === 'stale') {
+    $sv.className = 'status server warn';
+    const ageH = Math.floor((result.server_status?.age_seconds ?? 0) / 3600);
+    $sv.textContent = `Server: stale (cookies ${ageH}h old). Open YouTube + click Sync now.`;
+  } else if (result.verdict === 'missing') {
+    $sv.className = 'status server err';
+    $sv.textContent = `Server: cookies missing. Likely an ingest restart — click Sync now.`;
   }
 }
 

@@ -22,6 +22,9 @@
     }
     .status.ok { background: #e7f5e7; color: #1a6e1a; }
     .status.err { background: #fde7e7; color: #a02020; }
+    .status.server { font-size: 11px; opacity: 0.85; margin-top: 6px; }
+    .status.server.warn { background: #fff3cd; color: #856404; opacity: 1; }
+    .status.server.err  { background: #fde7e7; color: #a02020; opacity: 1; }
     .row { display: flex; gap: 6px; }
     button {
       flex: 1;
@@ -43,6 +46,7 @@
 <body>
   <h1>Affine YT Cookie Sync</h1>
   <div id="status" class="status">Loading…</div>
+  <div id="serverStatus" class="status server" hidden>Server: …</div>
   <div class="row">
     <button id="syncNow">Sync now</button>
     <button id="openOptions" class="secondary">Settings</button>

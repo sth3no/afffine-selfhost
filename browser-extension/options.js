@@ -7,12 +7,34 @@ const $token = document.getElementById('ingestToken');
 const $save = document.getElementById('save');
 const $syncNow = document.getElementById('syncNow');
 const $status = document.getElementById('status');
+const $extendedScope = document.getElementById('extendedScope');
+
+// Phase 12.5: optional cookie scope (covers age-gated / members-only).
+const EXTENDED_ORIGINS = ['*://accounts.google.com/*', '*://*.google.com/*'];
 
 // Load existing values + last-sync status.
-chrome.storage.local.get(['ingestUrl', 'ingestToken', 'lastSync']).then(data => {
+chrome.storage.local.get(['ingestUrl', 'ingestToken', 'lastSync', 'extendedScope']).then(data => {
   if (data.ingestUrl) $url.value = data.ingestUrl;
   if (data.ingestToken) $token.value = data.ingestToken;
+  $extendedScope.checked = Boolean(data.extendedScope);
   renderStatus(data.lastSync ?? null);
+});
+
+$extendedScope.addEventListener('change', async () => {
+  if ($extendedScope.checked) {
+    const granted = await chrome.permissions.request({ origins: EXTENDED_ORIGINS });
+    if (!granted) {
+      $extendedScope.checked = false;
+      setStatus('err', 'Permission denied — extended scope disabled.');
+      return;
+    }
+    await chrome.storage.local.set({ extendedScope: true });
+    setStatus('ok', 'Extended scope enabled. Click Sync now to push the broader cookie set.');
+  } else {
+    await chrome.permissions.remove({ origins: EXTENDED_ORIGINS });
+    await chrome.storage.local.set({ extendedScope: false });
+    setStatus('ok', 'Extended scope disabled.');
+  }
 });
 
 $save.addEventListener('click', async () => {

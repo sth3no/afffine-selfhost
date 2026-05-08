@@ -356,6 +356,27 @@ Lines emitted while a capture is being processed include `capture_id` so you can
 docker logs affine_ingest --since 1h | jq -c 'select(.capture_id == "01J-X")'
 ```
 
+### YouTube cookies
+
+Captures of YouTube videos that hit `Sign in to confirm you're not a bot`
+or get blocked transcripts are fixed by uploading the user's browser-side
+YouTube cookies via the [Affine YT Cookie Sync](browser-extension/) MV3
+extension. Install once, configure ingest URL + token, and the extension
+auto-syncs on every YT cookie change.
+
+**Verify server-side freshness** (added in 12.5):
+
+```bash
+curl -H "Authorization: Bearer $INGEST_API_TOKEN" \
+  "$INGEST_BASE/youtube/cookies/status"
+# → {"exists": true, "age_seconds": 1342, "mtime": "...Z", "byte_count": 12345}
+```
+
+If `exists: false`, the tmpfs is empty — usually because the ingest
+container restarted. Click **Sync now** in the extension popup to
+repopulate. The popup also surfaces this state automatically as a red
+toolbar badge + `Server: cookies missing` line.
+
 ### Troubleshooting
 
 **Capture stuck at `queued`**

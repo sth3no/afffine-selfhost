@@ -498,6 +498,22 @@ async def upload_youtube_cookies(
     )
 
 
+@app.get("/youtube/cookies/status")
+async def get_youtube_cookies_status(_: str = require_token):
+    """Read-only freshness check. NEVER returns cookie content.
+
+    The browser extension polls this on its daily alarm to detect the
+    "ingest container restarted, tmpfs is empty, my browser-side lastSync
+    is misleading" failure mode. The extension renders a stale/missing
+    badge based on `age_seconds`.
+    """
+    from pathlib import Path
+
+    from src.youtube_cookies import cookie_file_status
+
+    return cookie_file_status(Path(settings.youtube_cookies_path))
+
+
 # ── Helpers ───────────────────────────────────────────────────────────
 
 

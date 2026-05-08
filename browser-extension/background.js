@@ -18,23 +18,50 @@ const ALARM_DAILY_SYNC = 'yt-cookie-daily-sync';
 const ALARM_DEBOUNCE_SYNC = 'yt-cookie-debounce-sync';
 const DEBOUNCE_MINUTES = 0.5;  // 30s
 
+// Phase 12.5: server-side staleness thresholds + badge constants.
+const STALE_AFTER_SECONDS = 60 * 60 * 24;  // 24h — beyond this, badge "!" turns on.
+const BADGE_COLOR_STALE = '#d33a2c';
+const BADGE_TEXT_STALE = '!';
+
 // ── Cookie collection ──────────────────────────────────────────────
 
 /**
- * Fetch all YouTube cookies via chrome.cookies API. Returns the
- * deduplicated list across both `youtube.com` and `.youtube.com` scopes.
- * httpOnly cookies ARE included — they're inaccessible from page JS but
- * the chrome.cookies API has full access (that's the whole point of
- * this extension).
+ * Fetch YouTube cookies via chrome.cookies API. Returns the deduplicated
+ * list across both `youtube.com` and `.youtube.com` scopes. httpOnly
+ * cookies ARE included — they're inaccessible from page JS but the
+ * chrome.cookies API has full access (that's the whole point of this
+ * extension).
+ *
+ * Phase 12.5: when `extendedScope` is enabled in options AND the
+ * optional `accounts.google.com` permission is currently granted, also
+ * collect from `accounts.google.com` + `.google.com`. This covers
+ * age-gated / members-only / certain music videos where YT auth lives
+ * on Google's central account domain, not `*.youtube.com`.
  */
 async function collectYouTubeCookies() {
-  const [bare, dotted] = await Promise.all([
+  const requests = [
     chrome.cookies.getAll({ domain: 'youtube.com' }),
     chrome.cookies.getAll({ domain: '.youtube.com' }),
-  ]);
+  ];
+
+  const { extendedScope } = await chrome.storage.local.get('extendedScope');
+  if (extendedScope) {
+    // Only collect when the user opted in AND the optional permission is
+    // currently granted (it can be revoked outside this UI from the
+    // browser's extension settings).
+    const hasPerm = await chrome.permissions.contains({
+      origins: ['*://accounts.google.com/*'],
+    });
+    if (hasPerm) {
+      requests.push(chrome.cookies.getAll({ domain: 'accounts.google.com' }));
+      requests.push(chrome.cookies.getAll({ domain: '.google.com' }));
+    }
+  }
+
+  const buckets = await Promise.all(requests);
   const seen = new Set();
   const out = [];
-  for (const c of [...bare, ...dotted]) {
+  for (const c of buckets.flat()) {
     const key = `${c.name}|${c.domain}|${c.path}`;
     if (seen.has(key)) continue;
     seen.add(key);
@@ -74,6 +101,56 @@ function cookiesToNetscape(cookies) {
     ].join('\t');
   });
   return header.concat(rows).join('\n') + '\n';
+}
+
+// ── Server-side freshness (phase 12.5) ─────────────────────────────
+
+/**
+ * GET /youtube/cookies/status — returns the server's view of freshness.
+ * Never returns cookie content; only `exists`, `age_seconds`, `mtime`,
+ * `byte_count`. Returns null on any auth/network failure (caller treats
+ * as "unknown" — doesn't change badge state).
+ */
+async function fetchServerStatus(ingestUrl, ingestToken) {
+  if (!ingestUrl || !ingestToken) return null;
+  const endpoint = `${ingestUrl.replace(/\/$/, '')}/youtube/cookies/status`;
+  try {
+    const resp = await fetch(endpoint, {
+      method: 'GET',
+      headers: { 'Authorization': `Bearer ${ingestToken}` },
+    });
+    if (!resp.ok) return null;
+    return await resp.json();
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Map a server-status payload to a verdict the popup + badge consume.
+ * 'fresh'   — file exists and age < STALE_AFTER_SECONDS
+ * 'stale'   — file exists but age >= STALE_AFTER_SECONDS
+ * 'missing' — server says no file (tmpfs lost / never uploaded)
+ * 'unknown' — server unreachable / 401 — don't surface as a warning
+ */
+function verdictFromStatus(status) {
+  if (!status) return 'unknown';
+  if (!status.exists) return 'missing';
+  if ((status.age_seconds ?? 0) >= STALE_AFTER_SECONDS) return 'stale';
+  return 'fresh';
+}
+
+/**
+ * Set the toolbar badge: red "!" if stale or missing, cleared otherwise.
+ * No badge when verdict is 'unknown' — server unreachable shouldn't
+ * trigger a fake warning.
+ */
+async function applyBadge(verdict) {
+  const showBadge = verdict === 'stale' || verdict === 'missing';
+  await chrome.action.setBadgeText({ text: showBadge ? BADGE_TEXT_STALE : '' });
+  if (showBadge) {
+    await chrome.action.setBadgeBackgroundColor({ color: BADGE_COLOR_STALE });
+  }
 }
 
 // ── Sync ───────────────────────────────────────────────────────────
@@ -126,6 +203,13 @@ async function syncCookies() {
     return result;
   }
 
+  // Phase 12.5: pull the server's view of freshness so the popup + badge
+  // reflect what's actually on disk, not just what the browser uploaded.
+  const serverStatus = resp.ok
+    ? await fetchServerStatus(ingestUrl, ingestToken)
+    : null;
+  const verdict = verdictFromStatus(serverStatus);
+
   const result = {
     ok: resp.ok,
     status: resp.status,
@@ -133,8 +217,11 @@ async function syncCookies() {
     byte_count: body.length,
     synced_at: new Date().toISOString(),
     error: resp.ok ? null : `HTTP ${resp.status}`,
+    server_status: serverStatus,  // {exists, age_seconds, mtime, byte_count} | null
+    verdict,                      // 'fresh' | 'stale' | 'missing' | 'unknown'
   };
   await chrome.storage.local.set({ lastSync: result });
+  await applyBadge(verdict);
   return result;
 }
 
@@ -145,6 +232,14 @@ chrome.runtime.onInstalled.addListener(() => {
   syncCookies();
   // Schedule the daily safety-net.
   chrome.alarms.create(ALARM_DAILY_SYNC, { periodInMinutes: 60 * 24 });
+});
+
+// Service workers in MV3 die after ~30s idle. On every wake-up, restore
+// the badge from cached state so a "stale"/"missing" warning persists
+// across browser restarts without needing an immediate sync.
+chrome.runtime.onStartup.addListener(async () => {
+  const { lastSync } = await chrome.storage.local.get('lastSync');
+  await applyBadge(lastSync?.verdict ?? 'unknown');
 });
 
 chrome.cookies.onChanged.addListener(({ cookie }) => {
