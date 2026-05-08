@@ -128,3 +128,63 @@ async def test_move_to_topic_returns_none_when_topic_is_none():
         result=result,
     )
     assert folder_id is None
+
+
+# ── Pool-wiring path (production) ──────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_move_to_topic_raises_clearly_when_neither_pool_nor_repos():
+    """Regression: api.py wired Filer(mcp) without pool or repos and every
+    confident-classified capture failed at the filing step. The error
+    message must guide the operator to the right fix."""
+    mcp = AsyncMock()
+    mcp.list_folder_tree.return_value = {"totalNodes": 0, "tree": []}
+    embed_fn = AsyncMock(return_value=[0.1] * 1536)
+    filer = Filer(mcp, embed_fn=embed_fn)  # no pool, no repos
+
+    with pytest.raises(RuntimeError, match="requires either pool or embeddings_repo"):
+        await filer.move_to_topic_folder(
+            platform_path=["Sources", "Socials", "Instagram"],
+            result=ClassificationResult(topic="Recipes", confidence=0.9, reasoning="x"),
+        )
+
+
+@pytest.mark.asyncio
+async def test_move_to_topic_acquires_repos_from_pool():
+    """Production path: Filer(pool=...) acquires a connection per call and
+    builds repos against it."""
+    mcp = AsyncMock()
+    mcp.list_folder_tree.return_value = {"totalNodes": 0, "tree": [
+        {"id": "f-sources", "type": "folder", "name": "Sources", "children": [
+            {"id": "f-socials", "type": "folder", "name": "Socials", "children": [
+                {"id": "f-ig", "type": "folder", "name": "Instagram", "children": []},
+            ]},
+        ]},
+    ]}
+    mcp.create_folder.return_value = {"folderId": "f-new", "ok": True}
+
+    # Mock the asyncpg pool.acquire() context manager → connection.
+    fake_conn = MagicMock()
+    fake_conn.fetchval = AsyncMock(return_value=None)  # alias miss
+    fake_conn.fetch = AsyncMock(return_value=[])        # no existing embeddings
+    fake_conn.execute = AsyncMock()                     # upsert + record
+
+    fake_pool = MagicMock()
+    acquire_ctx = MagicMock()
+    acquire_ctx.__aenter__ = AsyncMock(return_value=fake_conn)
+    acquire_ctx.__aexit__ = AsyncMock(return_value=None)
+    fake_pool.acquire = MagicMock(return_value=acquire_ctx)
+
+    embed_fn = AsyncMock(return_value=[0.1] * 1536)
+    filer = Filer(mcp, pool=fake_pool, embed_fn=embed_fn)
+
+    result = ClassificationResult(topic="Music", confidence=0.9, reasoning="x")
+    folder_id = await filer.move_to_topic_folder(
+        platform_path=["Sources", "Socials", "Instagram"],
+        result=result,
+    )
+
+    assert folder_id == "f-new"
+    fake_pool.acquire.assert_called_once()  # exactly one acquire per call
+    mcp.create_folder.assert_awaited_once_with("Music", parent_folder_id="f-ig")

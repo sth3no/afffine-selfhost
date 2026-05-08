@@ -83,12 +83,23 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
             "fails on the synchronous mcp_ext call."
         )
     app_state.mcp = await MCPClient(mcp_url, affine_token).__aenter__()
-    app_state.filer = Filer(app_state.mcp)
 
     # asyncpg pool (skipped when DATABASE_URL points at the placeholder used
     # by `pip install` smoke tests on developer machines).
     if settings.database_url and "placeholder" not in settings.database_url:
         app_state.pool = await create_pool(settings.database_url)
+
+    # Filer needs the pool + an embed function for topic-folder dedup
+    # (Phase 5). Without these, every confident-classified capture
+    # raises "move_to_topic_folder requires embeddings_repo, ..." at
+    # filing step.
+    from src.pipeline.embeddings import embed
+    app_state.filer = Filer(
+        app_state.mcp,
+        pool=app_state.pool,
+        embed_fn=embed,
+        similarity_threshold=settings.similarity_threshold,
+    )
 
     # Crash recovery: reset any in-flight rows from a prior process restart.
     if app_state.pool is not None:
