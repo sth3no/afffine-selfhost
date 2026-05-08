@@ -28,6 +28,33 @@ _VIDEO_ID_RE = re.compile(
 )
 
 
+def _build_cookie_session(cookie_path: str):
+    """Load a Netscape cookies.txt into a requests.Session for transcript-api.
+
+    Returns the session, or None on any failure — caller falls back to
+    no-cookies mode (still works for ~80% of public videos with auto-captions).
+    """
+    try:
+        import http.cookiejar
+        import requests
+    except ImportError:
+        return None
+
+    try:
+        jar = http.cookiejar.MozillaCookieJar(cookie_path)
+        # ignore_discard=True: include session cookies (expires=0 in Netscape)
+        # ignore_expires=True: don't drop cookies based on the expires column
+        # (yt-dlp cookies dumps often have expires=0 even for non-session ones).
+        jar.load(ignore_discard=True, ignore_expires=True)
+    except (FileNotFoundError, OSError, http.cookiejar.LoadError) as e:
+        log.warning("youtube_transcript: cookie load failed: %s", e)
+        return None
+
+    session = requests.Session()
+    session.cookies = jar
+    return session
+
+
 def extract_video_id(url: str) -> str | None:
     """Return the 11-char YouTube video id from any URL shape, or None."""
     m = _VIDEO_ID_RE.search(url)
@@ -56,10 +83,11 @@ async def fetch_youtube_transcript(
 def _fetch_sync(video_id: str, languages: tuple[str, ...]) -> str | None:
     """Synchronous fetch + format. Errors → None.
 
-    Phase 12: when a YouTube cookies file is present, pass it to
-    YouTubeTranscriptApi so authenticated requests bypass the
-    cloud-IP block. Without cookies, cloud-provider IPs typically
-    get RequestBlocked.
+    Phase 12: when a YouTube cookies file is present, load it into a
+    requests.Session via MozillaCookieJar and pass as `http_client=`.
+    youtube-transcript-api 1.x doesn't take a cookie file path directly
+    (its __init__ only accepts `proxy_config` and `http_client`) — the
+    earlier `cookie_path=` kwarg crashed at runtime.
     """
     try:
         from youtube_transcript_api import (
@@ -80,8 +108,9 @@ def _fetch_sync(video_id: str, languages: tuple[str, ...]) -> str | None:
 
     api_kwargs: dict = {}
     if cookie_file_exists(settings.youtube_cookies_path):
-        # youtube-transcript-api 1.x accepts cookie_path in __init__.
-        api_kwargs["cookie_path"] = settings.youtube_cookies_path
+        session = _build_cookie_session(settings.youtube_cookies_path)
+        if session is not None:
+            api_kwargs["http_client"] = session
 
     try:
         ytt_api = YouTubeTranscriptApi(**api_kwargs)
