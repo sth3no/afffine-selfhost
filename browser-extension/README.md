@@ -88,15 +88,55 @@ youtube-transcript-api succeed (no IP-block error). The doc body will
 contain the real Whisper-transcribed audio rather than the
 "Unavailable" placeholder.
 
+## Staleness UI (added in 12.5)
+
+The popup shows two lines:
+
+- **Last sync:** browser-side — when this extension last POSTed to ingest.
+- **Server:** server-side — what the ingest service currently has on disk.
+
+The two can disagree if the ingest container restarts and drops the
+tmpfs file before the extension has a reason to resync. When that
+happens you'll see a red `!` on the toolbar icon and `Server: cookies
+missing` in the popup. Click **Sync now** — that's the fix.
+
+You'll see `Server: stale (cookies Xh old)` if the cookies file on
+the server is older than 24 hours. Open a YouTube tab in the same
+browser profile — the next `cookies.onChanged` will trigger a resync
+within 30 seconds.
+
+The verdict comes from a new `GET /youtube/cookies/status` endpoint
+that returns `{exists, age_seconds, mtime, byte_count}` — never
+returns cookie content.
+
+## Extended scope (opt-in, added in 12.5)
+
+By default the extension reads cookies only from `*.youtube.com`. Some
+videos (age-gated, members-only, certain music with regional rights
+holds) authenticate via `accounts.google.com` cookies — you can enable
+that scope from the options page:
+
+1. Click the extension icon → Settings.
+2. Tick **"Also include `accounts.google.com` cookies"**.
+3. The browser asks for permission — approve it.
+4. Click **Sync now**.
+
+Untick the checkbox to revoke. The extension calls
+`chrome.permissions.remove`, so site access is genuinely removed —
+not just hidden in the UI. Verify in `chrome://extensions/` →
+Affine YT Cookie Sync → Details → "Site access".
+
 ## Security notes
 
 - The bearer token sits in `chrome.storage.local`. Chrome's storage
   is encrypted at rest only on some configurations; Firefox encrypts
   via the OS keychain. Treat it as roughly equivalent to a password
   in your password manager.
-- The extension reads ALL cookies for `youtube.com` (including
-  httpOnly ones — that's required to capture session tokens). It
-  does NOT read cookies from any other domain.
+- By default the extension reads ALL cookies for `youtube.com`
+  (including httpOnly ones — that's required to capture session
+  tokens). With extended scope opt-in, it ALSO reads from
+  `accounts.google.com` + `.google.com`. It does NOT read cookies
+  from any other domain.
 - Cookies are POSTed over HTTPS only (the options page rejects plain
   HTTP unless the host is `localhost`).
 - The server writes cookies to a tmpfs volume with chmod 600 — they
