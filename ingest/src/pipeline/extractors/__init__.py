@@ -34,10 +34,11 @@ def get_extractor(name: str) -> ExtractFunc:
     return _REGISTRY[name]
 
 
-# Side-effect imports register the four built-ins.
+# Side-effect imports register the built-ins.
 from src.pipeline.extractors import (  # noqa: E402, F401
     markitdown_ext,
     ytdlp_ext,
     oembed_ytdlp_ext,
     reddit_json_ext,
+    cobalt_ext,
 )

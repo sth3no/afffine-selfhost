@@ -23,6 +23,8 @@ class Settings(BaseSettings):
     version: str = "0.1.0"
     max_transcript_min: int = 30
     max_body_chars: int = 50_000
+    cobalt_api_url: str = "http://cobalt:9000"
+    cobalt_duration_limit: int = 10800
     openai_api_key: str = ""
     anthropic_api_key: str = ""
     classifier_model: str = "claude-haiku-4-5-20251001"
