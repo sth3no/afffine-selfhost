@@ -56,7 +56,21 @@ _COBALT_TIMEOUT = httpx.Timeout(connect=5.0, read=120.0, write=10.0, pool=5.0)
 _TMP_PARENT = "/tmp/ingest"
 
 
-async def extract(url: str, platform: Platform) -> Extracted:
+async def extract(
+    url: str,
+    platform: Platform,
+    *,
+    mcp_client: object | None = None,
+    capture_id: str | None = None,
+    **_kwargs,
+) -> Extracted:
+    """Extract audio + (optional Phase 13) video keyframes for a URL.
+
+    `mcp_client` and `capture_id` are kwargs passed by the orchestrator
+    when the call is in the production worker; legacy callers / tests
+    that don't pass them get audio-only behavior. `**_kwargs` swallows
+    forward-compat additions.
+    """
     # The compose stack mounts /tmp/ingest as a size-capped tmpfs; outside
     # the container (e.g., unit tests) the directory needs creating.
     os.makedirs(_TMP_PARENT, exist_ok=True)
@@ -88,6 +102,16 @@ async def extract(url: str, platform: Platform) -> Extracted:
         audio_path = await _download_audio(tunnel_url, workdir)
         transcript = await _whisper_transcribe(audio_path)
 
+        # Phase 13: optional video frame analysis. Best-effort — failures
+        # leave the audio-only path untouched.
+        video_summary, keyframes = await _maybe_run_video_analysis(
+            url=url,
+            workdir=workdir,
+            transcript=transcript,
+            mcp_client=mcp_client,
+            capture_id=capture_id,
+        )
+
         title, author, description, published_at = _unpack_metadata(metadata)
         body_md = _build_body_md(
             url=url,
@@ -110,10 +134,62 @@ async def extract(url: str, platform: Platform) -> Extracted:
                 "url": url,
                 "has_metadata": metadata is not None,
                 "description": description if description else None,
+                # Phase 13 fields — None when video_analysis is disabled or fails.
+                "video_summary": video_summary,
+                "keyframes": [
+                    {
+                        "blob_source_id": k.blob_source_id,
+                        "caption": k.caption,
+                        "timestamp_seconds": k.timestamp_seconds,
+                    }
+                    for k in keyframes
+                ],
+                "video_analysis_ok": video_summary is not None or len(keyframes) > 0,
             },
         )
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
+
+
+async def _maybe_run_video_analysis(
+    *,
+    url: str,
+    workdir: Path,
+    transcript: str,
+    mcp_client: object | None,
+    capture_id: str | None,
+):
+    """Best-effort video download + scene-detect + vision call.
+
+    Returns (video_summary, keyframes). Both empty on disable / failure.
+    """
+    if not settings.video_analysis_enabled:
+        return None, []
+    if mcp_client is None or capture_id is None:
+        # No way to upload blobs — skip silently. (Tests that just want
+        # audio path don't need this.)
+        return None, []
+
+    try:
+        from src.pipeline.extractors._video_download import download_video
+        from src.pipeline.video_analysis import analyze_video
+
+        video_path = await download_video(url, workdir)
+        summary, keyframes = await analyze_video(
+            video_path=video_path,
+            workdir=workdir,
+            transcript=transcript,
+            capture_id=capture_id,
+            mcp_client=mcp_client,
+        )
+        log.info(
+            "video_analysis: ok summary=%s keyframes=%d",
+            summary is not None, len(keyframes),
+        )
+        return summary, keyframes
+    except Exception as e:  # noqa: BLE001 — by design
+        log.warning("video_analysis skipped: %s", e)
+        return None, []
 
 
 def _is_youtube_bot_block(exc: BaseException) -> bool:

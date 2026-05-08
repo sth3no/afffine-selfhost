@@ -204,3 +204,27 @@ class MCPClient:
 
     async def delete_block(self, doc_id: str, block_id: str) -> dict:
         return await self.call_tool("delete_block", {"docId": doc_id, "blockId": block_id})
+
+    async def upload_blob(
+        self,
+        *,
+        filename: str,
+        content_type: str,
+        data: bytes,
+    ) -> dict:
+        """Upload binary bytes to AFFiNE workspace blob storage.
+
+        Returns `{sourceId, byteCount, ok}`. The `sourceId` is the value
+        you pass as `prop:sourceId` on an `affine:image` block.
+        """
+        import base64
+
+        b64 = base64.b64encode(data).decode("ascii")
+        return await self.call_tool(
+            "upload_blob",
+            {
+                "filename": filename,
+                "contentType": content_type,
+                "base64": b64,
+            },
+        )

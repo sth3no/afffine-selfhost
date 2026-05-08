@@ -30,7 +30,7 @@ from src.pipeline.extracted import Extracted, MediaKind, truncate_body
 from src.pipeline.extractors import register_extractor
 
 
-async def extract(url: str, platform: Platform) -> Extracted:
+async def extract(url: str, platform: Platform, **_kwargs) -> Extracted:
     workdir_path: Path | None = None
     try:
         workdir_path = await _run_ytdlp_metadata(url)

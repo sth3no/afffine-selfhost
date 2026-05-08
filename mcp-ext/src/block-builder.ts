@@ -191,6 +191,15 @@ export type BlockSpec =
       /** LaTeX equation block (renders as math). */
       type: 'latex';
       latex: string;
+    }
+  | {
+      /** Image block — references a workspace blob by sourceId (the filename
+       *  returned by the `upload_blob` MCP tool / GraphQL setBlob mutation). */
+      type: 'image';
+      sourceId: string;
+      caption?: string;
+      width?: number;
+      height?: number;
     };
 
 interface Delta {
@@ -534,6 +543,31 @@ export function addLatexBlock(doc: Y.Doc, latex: string): string {
   return id;
 }
 
+/** Image block — references a workspace blob by sourceId. The blob must
+ *  exist (upload via setBlob mutation / `upload_blob` MCP tool first;
+ *  the filename returned IS the sourceId). The image-block schema is
+ *  `affine:image` v1 with the GfxCommonBlockProps + sourceId + optional
+ *  caption + width/height. */
+export function addImageBlock(
+  doc: Y.Doc,
+  sourceId: string,
+  opts: { caption?: string; width?: number; height?: number } = {}
+): string {
+  const id = newBlockId();
+  const block = insertBlockMap(doc, id, 'affine:image');
+  block.set('prop:sourceId', sourceId);
+  block.set('prop:caption', opts.caption ?? '');
+  block.set('prop:width', opts.width ?? 0);
+  block.set('prop:height', opts.height ?? 0);
+  // size = -1 means "let the renderer compute from blob bytes" (default).
+  block.set('prop:size', -1);
+  block.set('prop:rotate', 0);
+  block.set('prop:index', 'a0');
+  block.set('prop:xywh', '[0,0,0,0]');
+  block.set('prop:lockedBySelf', false);
+  return id;
+}
+
 /**
  * Create a block from a BlockSpec and return its new id. Doesn't attach it
  * to any parent — caller is responsible for pushing the id into a
@@ -575,6 +609,12 @@ export function addBlockFromSpec(doc: Y.Doc, spec: BlockSpec): string {
       return addCalloutBlock(doc, spec.text, spec.emoji);
     case 'latex':
       return addLatexBlock(doc, spec.latex);
+    case 'image':
+      return addImageBlock(doc, spec.sourceId, {
+        caption: spec.caption,
+        width: spec.width,
+        height: spec.height,
+      });
   }
 }
 

@@ -62,14 +62,27 @@ async def process_capture(
             extra={"text_only": True},
         )
     else:
-        extracted = await extract_fn(row.url, platform)
+        # Phase 13: pass mcp_client + capture_id so extractors that
+        # support video frame analysis (cobalt_ext) can upload keyframe
+        # blobs. All extractors swallow unknown kwargs via **_kwargs.
+        extracted = await extract_fn(
+            row.url,
+            platform,
+            mcp_client=filer._mcp,
+            capture_id=row.id,
+        )
 
     log.info("transition", extra={"step": "extracted", "platform": platform.id})
 
     # ── Summarize (best-effort) → new doc title + summary block ──────
+    # Phase 13: prefer the vision-grounded summary from video_analysis
+    # over a re-run of the text-only summarizer. Title still comes from
+    # the summarizer (cheap Haiku call) — vision focuses on summary
+    # content, not naming.
+    video_summary = (extracted.extra or {}).get("video_summary")
     summary = await _try_summarize(extracted, summarize_fn=summarize_fn)
     new_title = (summary.title if summary else fallback_title(extracted, url=row.url)).strip() or "Untitled capture"
-    summary_md = summary.summary_md if summary else None
+    summary_md = video_summary or (summary.summary_md if summary else None)
 
     try:
         await filer._mcp.set_doc_title(row.doc_id, new_title)
@@ -197,6 +210,8 @@ def _build_body_blocks(
     Layout:
       ## Summary           (if summary available)
       <summary paragraph>
+      ## Keyframes         (Phase 13 — if video analysis produced any)
+      [image] [caption]    (one image block + caption paragraph per keyframe)
       ## Description       (if extractor provided one)
       <description paragraph>
       ## Transcript / body
@@ -208,6 +223,29 @@ def _build_body_blocks(
     if summary_md:
         blocks.append({"type": "paragraph", "style": "h2", "text": "Summary"})
         blocks.append({"type": "paragraph", "style": "text", "text": summary_md.strip()})
+
+    # Phase 13: keyframes from video analysis (if any).
+    keyframes = (extracted.extra or {}).get("keyframes") or []
+    if keyframes:
+        blocks.append({"type": "paragraph", "style": "h2", "text": "Keyframes"})
+        for kf in keyframes:
+            source_id = kf.get("blob_source_id")
+            caption = (kf.get("caption") or "").strip()
+            ts = kf.get("timestamp_seconds", 0.0)
+            if not source_id:
+                continue
+            blocks.append({"type": "image", "sourceId": source_id, "caption": caption})
+            # Caption + timestamp as a small italic paragraph below the image
+            ts_label = f"[{ts:.1f}s]"
+            blocks.append({
+                "type": "paragraph",
+                "style": "text",
+                "text": [
+                    {"text": ts_label, "italic": True},
+                    {"text": " "},
+                    {"text": caption} if caption else {"text": ""},
+                ],
+            })
 
     description = (extracted.extra or {}).get("description")
     body_md = extracted.body_md or ""

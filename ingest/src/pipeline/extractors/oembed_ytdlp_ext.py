@@ -22,7 +22,7 @@ _HTML_TAG = re.compile(r"<[^>]+>")
 _WHITESPACE = re.compile(r"\s+")
 
 
-async def extract(url: str, platform: Platform) -> Extracted:
+async def extract(url: str, platform: Platform, **_kwargs) -> Extracted:
     params = {"url": url, "omit_script": "true"}
     async with httpx.AsyncClient(timeout=10.0) as client:
         resp = await client.get(_OEMBED_BASE + "?" + urlencode(params))

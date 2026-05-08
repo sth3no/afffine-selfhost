@@ -11,7 +11,7 @@ from src.pipeline.extracted import Extracted, MediaKind, truncate_body
 from src.pipeline.extractors import register_extractor
 
 
-async def extract(url: str, platform: Platform) -> Extracted:
+async def extract(url: str, platform: Platform, **_kwargs) -> Extracted:
     json_url = url.split("?")[0].rstrip("/") + ".json"
     headers = {"User-Agent": "affine-ingest/0.1"}
     async with httpx.AsyncClient(timeout=10.0, headers=headers) as client:

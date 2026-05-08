@@ -26,6 +26,7 @@ import { listPages } from './doc-store.js';
 import type { ToolDefinition } from './tools-shared.js';
 import { writeTools } from './write-tools.js';
 import { folderTools } from './folder-tools.js';
+import { blobTools } from './blob-tools.js';
 import { readDoc } from './yjs-writer.js';
 
 export type { ToolDefinition } from './tools-shared.js';
@@ -487,6 +488,8 @@ export const tools: ToolDefinition[] = [
   ...writeTools,
   // Organize sidebar folder tree (list / create / rename / delete / move).
   ...folderTools,
+  // Blob upload (images, attachments) via GraphQL setBlob multipart.
+  ...blobTools,
 ];
 
 export const toolByName = new Map(tools.map(t => [t.name, t] as const));

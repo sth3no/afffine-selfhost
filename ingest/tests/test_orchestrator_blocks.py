@@ -119,3 +119,73 @@ def test_build_body_blocks_drops_cobalt_metadata_preamble_when_summary_present()
     paragraph_texts = [b["text"] for b in blocks if b["style"] == "text" and isinstance(b["text"], str)]
     assert all("_by Channel_" not in t for t in paragraph_texts)
     assert all(not t.startswith("**My Title**") for t in paragraph_texts)
+
+
+# ── Phase 13: keyframe → image block emission ──────────────────────
+
+
+def _e_with_keyframes(keyframes: list[dict]) -> Extracted:
+    return Extracted(
+        title="A Video",
+        body_md="## Transcript\n\nfull transcript here",
+        author=None,
+        published_at=None,
+        media_kind=MediaKind.VIDEO,
+        extra={"keyframes": keyframes},
+    )
+
+
+def test_build_body_blocks_emits_image_blocks_for_keyframes():
+    """When extracted.extra.keyframes is non-empty, emit a `## Keyframes`
+    heading + one image block + caption paragraph per keyframe."""
+    keyframes = [
+        {"blob_source_id": "blob-abc", "caption": "Title screen", "timestamp_seconds": 0.5},
+        {"blob_source_id": "blob-def", "caption": "Code snippet", "timestamp_seconds": 12.3},
+    ]
+    blocks = _build_body_blocks(
+        extracted=_e_with_keyframes(keyframes),
+        summary_md="grounded summary",
+        url="https://example.com/v",
+    )
+
+    # Find the Keyframes h2
+    h2s = [b for b in blocks if b.get("style") == "h2"]
+    h2_texts = [b["text"] for b in h2s]
+    assert "Keyframes" in h2_texts
+
+    # Image blocks must be present with our sourceIds
+    image_blocks = [b for b in blocks if b.get("type") == "image"]
+    assert len(image_blocks) == 2
+    assert image_blocks[0]["sourceId"] == "blob-abc"
+    assert image_blocks[0]["caption"] == "Title screen"
+    assert image_blocks[1]["sourceId"] == "blob-def"
+    assert image_blocks[1]["caption"] == "Code snippet"
+
+
+def test_build_body_blocks_no_keyframes_no_keyframes_heading():
+    """Empty keyframes list = no Keyframes section emitted at all."""
+    blocks = _build_body_blocks(
+        extracted=_e_with_keyframes([]),
+        summary_md="just text",
+        url=None,
+    )
+    h2_texts = [b["text"] for b in blocks if b.get("style") == "h2"]
+    assert "Keyframes" not in h2_texts
+    assert not any(b.get("type") == "image" for b in blocks)
+
+
+def test_build_body_blocks_skips_keyframes_with_missing_source_id():
+    """Defensive: keyframes without blob_source_id are dropped (not crash)."""
+    keyframes = [
+        {"blob_source_id": "blob-ok", "caption": "ok", "timestamp_seconds": 1.0},
+        {"caption": "no source — should be dropped", "timestamp_seconds": 2.0},
+        {"blob_source_id": "", "caption": "empty source — also dropped", "timestamp_seconds": 3.0},
+    ]
+    blocks = _build_body_blocks(
+        extracted=_e_with_keyframes(keyframes),
+        summary_md=None,
+        url=None,
+    )
+    image_blocks = [b for b in blocks if b.get("type") == "image"]
+    assert len(image_blocks) == 1
+    assert image_blocks[0]["sourceId"] == "blob-ok"
