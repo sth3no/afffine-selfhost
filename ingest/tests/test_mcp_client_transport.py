@@ -7,6 +7,19 @@ import pytest
 from src.mcp_client import MCPClient, MCPError, MCPToolError
 
 
+@pytest.mark.parametrize("bad_token", ["", " ", "  \t\n"])
+def test_mcp_client_rejects_empty_token(bad_token: str):
+    """Empty / whitespace-only tokens must fail at construction.
+
+    Regression: production sent `Authorization: Bearer ` (trailing space,
+    no credential) when AFFINE_ACCESS_TOKEN was unset, which httpx then
+    rejected with an opaque `LocalProtocolError: Illegal header value
+    b'Bearer '` on every outbound /capture call.
+    """
+    with pytest.raises(ValueError, match="non-empty bearer token"):
+        MCPClient("http://mcp_ext:3100", bad_token)
+
+
 def _rpc_response(req_id: Any, result: Any) -> httpx.Response:
     return httpx.Response(
         200,

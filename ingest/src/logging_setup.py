@@ -29,6 +29,10 @@ capture_id_var: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "capture_id", default=None,
 )
 
+trace_id_var: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "trace_id", default=None,
+)
+
 
 # Standard LogRecord attributes — anything else is treated as user-supplied
 # `extra=` and emitted into the JSON payload.
@@ -53,6 +57,9 @@ class JsonFormatter(logging.Formatter):
         cap = capture_id_var.get(None)
         if cap:
             payload["capture_id"] = cap
+        tid = trace_id_var.get(None)
+        if tid:
+            payload["trace_id"] = tid
 
         # Attach exception info if present.
         if record.exc_info:
