@@ -252,6 +252,14 @@ services:
       - INGEST_API_TOKEN=${INGEST_API_TOKEN:-}
       - DATABASE_URL=postgresql://${DB_USERNAME}:${DB_PASSWORD}@postgres:5432/affine_ingest
       - MCP_EXT_URL=http://mcp_ext:3100
+      # MCP client to mcp_ext authenticates with the AFFiNE workspace token.
+      # Without this every synchronous /capture call fails with
+      # `httpx.LocalProtocolError: Illegal header value b'Bearer '`. The
+      # workspace id + external URL are used by _build_web_url to construct
+      # the doc link returned to the iOS client.
+      - AFFINE_ACCESS_TOKEN=${AFFINE_ACCESS_TOKEN:-}
+      - AFFINE_WORKSPACE_ID=${AFFINE_WORKSPACE_ID:-}
+      - AFFINE_SERVER_EXTERNAL_URL=${AFFINE_SERVER_EXTERNAL_URL:-http://localhost:3010}
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
       - MAX_TRANSCRIPT_MIN=${MAX_TRANSCRIPT_MIN:-30}
