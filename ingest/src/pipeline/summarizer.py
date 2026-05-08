@@ -8,15 +8,19 @@ Uses Claude Haiku 4.5 by default (matching the existing classifier choice
 for cost-conscious per-capture LLM calls). Override via SUMMARIZER_MODEL
 to switch to Opus 4.7 / Sonnet 4.6 if quality matters more than cost.
 
+Schema is enforced via `messages.parse(output_format=SummaryResult)` —
+Anthropic's structured-outputs feature guarantees the response matches
+the Pydantic model, so the model can't silently drop a field. Without
+this, Haiku occasionally returned just `{"title": "..."}` and the
+Pydantic validation tripped on the missing `summary_md`.
+
 The system prompt is marked cache_control: ephemeral so successive calls
 within the 5-minute window reuse the prefix.
 """
 
 from __future__ import annotations
 
-import json
 import logging
-from typing import Any
 
 from anthropic import AsyncAnthropic
 from pydantic import BaseModel, Field
@@ -28,7 +32,7 @@ log = logging.getLogger(__name__)
 
 
 class SummaryResult(BaseModel):
-    """Strict shape Claude must return."""
+    """Strict shape Claude must return — enforced by structured-outputs."""
 
     title: str = Field(
         description=(
@@ -70,7 +74,12 @@ Return STRICT JSON only — no prose, no markdown code fences.
 
 
 async def summarize(extracted: Extracted) -> SummaryResult:
-    """Single Anthropic call → SummaryResult."""
+    """Single Anthropic call → SummaryResult.
+
+    Uses `messages.parse(output_format=SummaryResult)` — Anthropic's
+    structured-outputs feature enforces the schema server-side, so
+    `parsed_output` is guaranteed to be a fully-populated SummaryResult.
+    """
     client = AsyncAnthropic(api_key=settings.anthropic_api_key)
 
     body_excerpt = (extracted.body_md or "")[: settings.summarizer_max_body_chars]
@@ -85,7 +94,7 @@ async def summarize(extracted: Extracted) -> SummaryResult:
         f"{body_excerpt}\n"
     )
 
-    response = await client.messages.create(
+    response = await client.messages.parse(
         model=settings.summarizer_model,
         max_tokens=512,
         system=[
@@ -96,17 +105,15 @@ async def summarize(extracted: Extracted) -> SummaryResult:
             }
         ],
         messages=[{"role": "user", "content": user_msg}],
+        output_format=SummaryResult,
     )
 
-    text = response.content[0].text.strip()
-    # Strip optional code-fence if the model wrapped output despite the prompt.
-    if text.startswith("```"):
-        text = text.strip("`")
-        if text.lower().startswith("json"):
-            text = text[4:]
-        text = text.strip()
-    payload: dict[str, Any] = json.loads(text)
-    return SummaryResult.model_validate(payload)
+    if response.parsed_output is None:
+        raise RuntimeError(
+            "summarizer: parsed_output is None — schema-enforced parse failed; "
+            "check classifier_model supports structured outputs",
+        )
+    return response.parsed_output
 
 
 def fallback_title(extracted: Extracted, *, url: str | None) -> str:

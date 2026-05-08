@@ -37,15 +37,27 @@ class Filer:
         mcp: MCPClient,
         *,
         clock: Callable[[], float] = time.monotonic,
+        pool: Any = None,
         embeddings_repo: Any = None,
         aliases_repo: Any = None,
         embed_fn: Any = None,
         similarity_threshold: float = 0.85,
     ) -> None:
+        """Construct a Filer.
+
+        Production wiring: pass `pool` (asyncpg pool) + `embed_fn`. Each
+        `move_to_topic_folder` call acquires a fresh connection from the
+        pool and builds repos against it — avoids serializing concurrent
+        captures on a single shared connection.
+
+        Test wiring: pass `embeddings_repo` + `aliases_repo` directly to
+        skip the pool dependency. `embed_fn` is still required.
+        """
         self._mcp = mcp
         self._clock = clock
         self._tree_snapshot: list[dict] | None = None
         self._tree_fetched_at: float = 0.0
+        self._pool = pool
         self._embeddings_repo = embeddings_repo
         self._aliases_repo = aliases_repo
         self._embed_fn = embed_fn
@@ -124,37 +136,73 @@ class Filer:
         """
         if result.topic is None:
             return None
-        if self._embeddings_repo is None or self._aliases_repo is None or self._embed_fn is None:
-            raise RuntimeError(
-                "move_to_topic_folder requires embeddings_repo, aliases_repo, embed_fn"
+        if self._embed_fn is None:
+            raise RuntimeError("move_to_topic_folder requires embed_fn")
+
+        # Test wiring: repos pre-injected → use them directly.
+        if self._embeddings_repo is not None and self._aliases_repo is not None:
+            return await self._do_move(
+                platform_path=platform_path,
+                result=result,
+                embeddings_repo=self._embeddings_repo,
+                aliases_repo=self._aliases_repo,
             )
 
+        # Production wiring: acquire a fresh connection per call so
+        # concurrent classifications don't serialize on one shared conn.
+        if self._pool is None:
+            raise RuntimeError(
+                "move_to_topic_folder requires either pool or "
+                "embeddings_repo + aliases_repo to be provided",
+            )
+
+        from src.db import FolderEmbeddingRepository, TopicAliasRepository
+
+        async with self._pool.acquire() as conn:
+            return await self._do_move(
+                platform_path=platform_path,
+                result=result,
+                embeddings_repo=FolderEmbeddingRepository(conn),
+                aliases_repo=TopicAliasRepository(conn),
+            )
+
+    async def _do_move(
+        self,
+        *,
+        platform_path: list[str],
+        result: ClassificationResult,
+        embeddings_repo: Any,
+        aliases_repo: Any,
+    ) -> str | None:
+        """Topic-folder resolution + creation logic. Repos are passed in so
+        the same logic works whether they're long-lived (tests) or per-call
+        (production via pool acquisition)."""
         platform_folder_id = await self.resolve_or_create_folder(platform_path)
         parent_path = "/".join(platform_path)
 
         # 1. Pre-recorded alias hit?
-        alias_canonical = await self._aliases_repo.lookup(parent_path=parent_path, alias=result.topic)
+        alias_canonical = await aliases_repo.lookup(parent_path=parent_path, alias=result.topic)
         if alias_canonical is not None:
             return await self._resolve_existing_topic_folder(platform_folder_id, alias_canonical)
 
         # 2. Explicit alias_of from classifier?
         if result.alias_of:
             folder_id = await self._resolve_existing_topic_folder(platform_folder_id, result.alias_of)
-            await self._aliases_repo.record(
+            await aliases_repo.record(
                 parent_path=parent_path, alias=result.topic, canonical=result.alias_of,
             )
             return folder_id
 
         # 3. Embedding-similarity check against existing siblings.
         proposed_vec = await self._embed_fn(result.topic)
-        siblings = await self._embeddings_repo.list_for_parent(parent_path)
+        siblings = await embeddings_repo.list_for_parent(parent_path)
         best_match: tuple[str, str, float] | None = None  # (folder_id, name, cosine)
         for sib in siblings:
             sim = cosine_similarity(proposed_vec, sib.embedding)
             if sim >= self._similarity_threshold and (best_match is None or sim > best_match[2]):
                 best_match = (sib.folder_id, sib.folder_name, sim)
         if best_match is not None:
-            await self._aliases_repo.record(
+            await aliases_repo.record(
                 parent_path=parent_path, alias=result.topic, canonical=best_match[1],
             )
             return best_match[0]
@@ -164,7 +212,7 @@ class Filer:
 
         created = await self._mcp.create_folder(result.topic, parent_folder_id=platform_folder_id)
         new_folder_id = str(created["folderId"])
-        await self._embeddings_repo.upsert(FolderEmbeddingRow(
+        await embeddings_repo.upsert(FolderEmbeddingRow(
             folder_id=new_folder_id,
             folder_name=result.topic,
             parent_path=parent_path,
