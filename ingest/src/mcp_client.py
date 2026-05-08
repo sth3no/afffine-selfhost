@@ -52,6 +52,17 @@ class MCPClient:
         *,
         _transport: httpx.AsyncBaseTransport | httpx.MockTransport | None = None,
     ) -> None:
+        # Reject empty/whitespace tokens at construction. Otherwise the
+        # Authorization header serializes to `Bearer ` (trailing space, no
+        # credential) and httpx raises `LocalProtocolError: Illegal header
+        # value b'Bearer '` on every outbound request — opaque from the
+        # caller's perspective.
+        token = (token or "").strip()
+        if not token:
+            raise ValueError(
+                "MCPClient requires a non-empty bearer token "
+                "(check AFFINE_ACCESS_TOKEN env var)."
+            )
         self._base_url = base_url.rstrip("/")
         self._token = token
         self._timeout = timeout

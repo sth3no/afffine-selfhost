@@ -71,7 +71,17 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
 
     # MCP client to mcp_ext (lazy connect — no network call here).
     mcp_url = os.environ.get("MCP_EXT_URL", "http://mcp_ext:3100")
-    affine_token = os.environ.get("AFFINE_ACCESS_TOKEN", "")
+    affine_token = os.environ.get("AFFINE_ACCESS_TOKEN", "").strip()
+    # Fail loudly when the token is missing rather than booting and 5xx-ing
+    # on every /capture. Symptom seen in prod: `httpx.LocalProtocolError:
+    # Illegal header value b'Bearer '` on each outbound MCP call.
+    if not affine_token:
+        raise RuntimeError(
+            "AFFINE_ACCESS_TOKEN is empty. Set it in the stack env "
+            "(AFFiNE → Workspace Settings → Integration → MCP Server → "
+            "Generate Token) and redeploy. Without it, every /capture "
+            "fails on the synchronous mcp_ext call."
+        )
     app_state.mcp = await MCPClient(mcp_url, affine_token).__aenter__()
     app_state.filer = Filer(app_state.mcp)
 
