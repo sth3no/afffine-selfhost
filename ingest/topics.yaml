@@ -12,25 +12,25 @@ platforms:
     group: Socials
     folder_name: Youtube
     hosts: [youtube.com, www.youtube.com, m.youtube.com, youtu.be, music.youtube.com]
-    extractor: ytdlp
+    extractor: cobalt
 
   - id: instagram
     group: Socials
     folder_name: Instagram
     hosts: [instagram.com, www.instagram.com]
-    extractor: ytdlp
+    extractor: cobalt
 
   - id: tiktok
     group: Socials
     folder_name: TikTok
     hosts: [tiktok.com, www.tiktok.com, vm.tiktok.com, m.tiktok.com]
-    extractor: ytdlp
+    extractor: cobalt
 
   - id: x
     group: Socials
     folder_name: X
     hosts: [x.com, www.x.com, twitter.com, www.twitter.com, mobile.twitter.com]
-    extractor: oembed_ytdlp
+    extractor: cobalt
 
   - id: reddit
     group: Socials
@@ -42,7 +42,7 @@ platforms:
     group: Socials
     folder_name: Vimeo
     hosts: [vimeo.com, www.vimeo.com]
-    extractor: ytdlp
+    extractor: cobalt
 
   - id: arxiv
     group: Research papers
