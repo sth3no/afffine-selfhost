@@ -111,8 +111,10 @@ def test_write_cookies_atomic_writes_and_chmods(tmp_path):
     assert dest.read_text(encoding="utf-8") == body
     if sys.platform != "win32":
         # chmod is best-effort on Windows; only assert on POSIX.
+        # Mode 0o644 (world-readable): cobalt + ingest run as different
+        # users on the same tmpfs volume; 0o600 silently broke cobalt.
         mode = stat.S_IMODE(dest.stat().st_mode)
-        assert mode == 0o600
+        assert mode == 0o644
 
 
 def test_write_cookies_atomic_overwrites_existing(tmp_path):

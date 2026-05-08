@@ -28,18 +28,26 @@ class InvalidCookieFile(ValueError):
 
 
 def write_cookies_atomic(content: str, dest: Path) -> None:
-    """Write `content` to `dest` atomically with mode 0o600.
+    """Write `content` to `dest` atomically with mode 0o644.
 
-    Atomic via os.rename — a concurrent reader either sees the old file or
+    Atomic via os.replace — a concurrent reader either sees the old file or
     the new one, never a half-written one. Parent dirs are created if
     missing (the production tmpfs mount is `/run/cookies`, exists at
     container start).
+
+    Mode is 0o644 (world-readable) on purpose: the cobalt container reads
+    the cookies file as a non-root user, and ingest writes as a different
+    user. Mode 0o600 silently broke cobalt's fs.readFile — every YT
+    capture hit error.api.youtube.login because cobalt couldn't open the
+    file. The volume is tmpfs internal to the docker compose network; the
+    "extra protection" of 0o600 was protecting against nothing while
+    actively breaking the consumer.
     """
     dest.parent.mkdir(parents=True, exist_ok=True)
     tmp = dest.with_suffix(dest.suffix + ".tmp")
     tmp.write_text(content, encoding="utf-8")
     try:
-        os.chmod(tmp, 0o600)
+        os.chmod(tmp, 0o644)
     except OSError:
         # Some filesystems (Windows during dev) don't honor chmod —
         # don't fail the write over it.
