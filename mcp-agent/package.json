@@ -9,6 +9,7 @@
     "stale-docs": "tsx src/automations/stale-docs.ts",
     "comment-summary": "tsx src/automations/comment-summary.ts",
     "sources-reorg": "tsx src/automations/sources-reorg.ts",
+    "auto-organize": "tsx src/automations/auto-organize.ts",
     "scheduler": "tsx src/scheduler.ts",
     "test": "vitest run"
   },

@@ -171,4 +171,114 @@ describe('runSourcesReorg', () => {
       anthropicApiKey: '',
     })).rejects.toThrow(/ANTHROPIC_API_KEY/);
   });
+
+  it("'tool-use' executor: tracks create_folder + move_document via the tool loop", async () => {
+    const { fakeClient, calls } = makeClientMock(fakeTree(20));
+
+    // Stub the rpc method that loadMcpToolsForAnthropic uses to fetch tools/list.
+    (fakeClient as any).rpc = vi.fn(async (method: string) => {
+      if (method === 'tools/list') {
+        return {
+          tools: [
+            { name: 'create_folder', description: 'd', inputSchema: { type: 'object' } },
+            { name: 'move_document', description: 'd', inputSchema: { type: 'object' } },
+            { name: 'list_folder_tree', description: 'd', inputSchema: { type: 'object' } },
+          ],
+        };
+      }
+      throw new Error(`unexpected rpc: ${method}`);
+    });
+
+    // Fake Anthropic client: first response has 1 create_folder + 3 move_documents
+    // → 4 tool_use blocks. Second response wraps up.
+    const create = vi.fn()
+      .mockResolvedValueOnce({
+        id: 'm1',
+        type: 'message',
+        role: 'assistant',
+        model: 'claude-sonnet-4-6',
+        content: [
+          { type: 'text', text: 'splitting...' },
+          { type: 'tool_use', id: 'tu_1', name: 'create_folder',
+            input: { name: 'Healthy', parentFolderId: 'f-recipes' } },
+          { type: 'tool_use', id: 'tu_2', name: 'move_document',
+            input: { docId: 'doc-0', folderId: 'new-Healthy-2' } },
+          { type: 'tool_use', id: 'tu_3', name: 'move_document',
+            input: { docId: 'doc-1', folderId: 'new-Healthy-2' } },
+          { type: 'tool_use', id: 'tu_4', name: 'move_document',
+            input: { docId: 'doc-2', folderId: 'new-Healthy-2' } },
+        ],
+        stop_reason: 'tool_use',
+        usage: { input_tokens: 100, output_tokens: 50 },
+      })
+      .mockResolvedValueOnce({
+        id: 'm2',
+        type: 'message',
+        role: 'assistant',
+        model: 'claude-sonnet-4-6',
+        content: [{ type: 'text', text: 'Created Healthy and moved 3 docs.' }],
+        stop_reason: 'end_turn',
+        usage: { input_tokens: 50, output_tokens: 30 },
+      });
+    const fakeAnthropic = { messages: { create } };
+
+    const summary = await runSourcesReorg({
+      client: fakeClient,
+      threshold: 15,
+      anthropicApiKey: 'sk-test',
+      executor: 'tool-use',
+      anthropicClient: fakeAnthropic as any,
+    });
+
+    expect(summary.scanned).toBe(1);
+    expect(summary.splits).toHaveLength(1);
+    expect(summary.splits[0].clusters).toHaveLength(1);
+    expect(summary.splits[0].clusters[0]).toEqual({
+      name: 'Healthy',
+      folderId: 'new-Healthy-2',
+      docCount: 3,
+    });
+
+    // Verify the tool calls landed on mcp-ext too (not just observed by the loop)
+    expect(calls.filter(c => c.name === 'create_folder')).toHaveLength(1);
+    expect(calls.filter(c => c.name === 'move_document')).toHaveLength(3);
+  });
+
+  it("'tool-use' executor: returns no split when LLM creates no folders", async () => {
+    const { fakeClient } = makeClientMock(fakeTree(20));
+
+    (fakeClient as any).rpc = vi.fn(async () => ({
+      tools: [
+        { name: 'create_folder', description: 'd', inputSchema: { type: 'object' } },
+        { name: 'move_document', description: 'd', inputSchema: { type: 'object' } },
+        { name: 'list_folder_tree', description: 'd', inputSchema: { type: 'object' } },
+      ],
+    }));
+
+    // LLM looks at the folder, decides no split is needed.
+    const fakeAnthropic = {
+      messages: {
+        create: vi.fn().mockResolvedValueOnce({
+          id: 'm1',
+          type: 'message',
+          role: 'assistant',
+          model: 'claude-sonnet-4-6',
+          content: [{ type: 'text', text: 'No clear sub-clusters; leaving as-is.' }],
+          stop_reason: 'end_turn',
+          usage: { input_tokens: 80, output_tokens: 20 },
+        }),
+      },
+    };
+
+    const summary = await runSourcesReorg({
+      client: fakeClient,
+      threshold: 15,
+      anthropicApiKey: 'sk-test',
+      executor: 'tool-use',
+      anthropicClient: fakeAnthropic as any,
+    });
+
+    expect(summary.scanned).toBe(1);
+    expect(summary.splits).toHaveLength(0);
+  });
 });

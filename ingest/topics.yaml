@@ -10,7 +10,7 @@
 platforms:
   - id: youtube
     group: Socials
-    folder_name: Youtube
+    folder_name: YouTube
     hosts: [youtube.com, www.youtube.com, m.youtube.com, youtu.be, music.youtube.com]
     extractor: cobalt
 
@@ -45,7 +45,7 @@ platforms:
     extractor: cobalt
 
   - id: arxiv
-    group: Research papers
+    group: Research Papers
     folder_name: arXiv
     hosts: [arxiv.org, www.arxiv.org]
     extractor: markitdown
@@ -63,9 +63,11 @@ platforms:
     extractor: markitdown
 
   # Catch-all for everything else. `*` matches any host.
+  # Routes into Sources/Websites/General to match the workspace's existing
+  # Sources/Websites/ folder rather than creating a parallel Sources/Articles/.
   - id: article
-    group: Articles
-    folder_name: Web
+    group: Websites
+    folder_name: General
     hosts: ["*"]
     extractor: markitdown
 

@@ -195,3 +195,12 @@ class MCPClient:
 
     async def delete_doc(self, doc_id: str) -> dict:
         return await self.call_tool("delete_doc", {"docId": doc_id})
+
+    async def set_doc_title(self, doc_id: str, title: str) -> dict:
+        return await self.call_tool("set_doc_title", {"docId": doc_id, "title": title})
+
+    async def list_doc_blocks(self, doc_id: str) -> dict:
+        return await self.call_tool("list_doc_blocks", {"docId": doc_id})
+
+    async def delete_block(self, doc_id: str, block_id: str) -> dict:
+        return await self.call_tool("delete_block", {"docId": doc_id, "blockId": block_id})

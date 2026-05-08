@@ -1,24 +1,26 @@
-"""Cobalt-based media extractor.
+"""Cobalt-based media extractor + yt-dlp metadata.
 
 Pipeline:
-    1. POST {COBALT_API_URL}/ with the target URL, downloadMode=audio.
-    2. Parse the tunnel/redirect URL out of the response.
-    3. Stream the audio to a temp file.
-    4. Run it through Whisper (reusing ytdlp_ext._whisper_transcribe).
-    5. Return Extracted with body_md = the transcript.
+    1. In parallel: POST {COBALT_API_URL}/ for the audio tunnel AND run
+       yt-dlp --skip-download for metadata (title, description, channel).
+    2. Stream cobalt audio to a temp file → Whisper transcript.
+    3. Compose Extracted: title/author from metadata, body_md =
+       description + transcript (in sectioned markdown).
 
-Why no rich metadata: cobalt doesn't return reliable title/channel/
-description. The iOS client already provides `shared_title`, which the
-caller (api.py) uses for the AFFiNE doc title — so leaving title=None
-in Extracted doesn't lose anything observable to the user. Author/
-published_at are None for the same reason.
+Metadata is best-effort — yt-dlp may fail (e.g. YouTube cookie blocks);
+the transcript still goes through. Author / published_at default to None
+in that case so the downstream summarizer regenerates the title from
+content alone.
 """
 
 from __future__ import annotations
 
+import asyncio
+import logging
 import os
 import shutil
 import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
 
 import httpx
@@ -26,7 +28,10 @@ import httpx
 from src.config import Platform, settings
 from src.pipeline.extracted import Extracted, MediaKind, truncate_body
 from src.pipeline.extractors import register_extractor
+from src.pipeline.extractors._ytdlp_metadata import fetch_metadata
 from src.pipeline.extractors.ytdlp_ext import _whisper_transcribe
+
+log = logging.getLogger(__name__)
 
 
 # Tests inject a MockTransport here. Production leaves it None so httpx
@@ -46,27 +51,89 @@ async def extract(url: str, platform: Platform) -> Extracted:
     os.makedirs(_TMP_PARENT, exist_ok=True)
     workdir = Path(tempfile.mkdtemp(prefix="ingest-cobalt-", dir=_TMP_PARENT))
     try:
-        tunnel_url = await _request_tunnel(url)
+        # Fan out metadata fetch + cobalt tunnel request — yt-dlp metadata
+        # is independent of cobalt audio download, so run them in parallel
+        # to save ~2-5s per capture.
+        tunnel_url, metadata = await asyncio.gather(
+            _request_tunnel(url),
+            fetch_metadata(url),
+        )
         audio_path = await _download_audio(tunnel_url, workdir)
         transcript = await _whisper_transcribe(audio_path)
 
-        body_parts = [f"# {url}", "", "## Transcript (Whisper via cobalt)", "", transcript]
-        body_md = truncate_body("\n".join(body_parts), limit=settings.max_body_chars)
+        title, author, description, published_at = _unpack_metadata(metadata)
+        body_md = _build_body_md(
+            url=url,
+            title=title,
+            author=author,
+            description=description,
+            transcript=transcript,
+        )
 
         return Extracted(
-            title=None,
-            body_md=body_md,
-            author=None,
-            published_at=None,
+            title=title,
+            body_md=truncate_body(body_md, limit=settings.max_body_chars),
+            author=author,
+            published_at=published_at,
             media_kind=MediaKind.VIDEO,
             extra={
                 "extractor": "cobalt",
                 "platform_id": platform.id,
                 "tunnel_url": tunnel_url,
+                "url": url,
+                "has_metadata": metadata is not None,
+                "description": description if description else None,
             },
         )
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
+
+
+def _unpack_metadata(
+    metadata: dict | None,
+) -> tuple[str | None, str | None, str, datetime | None]:
+    """Return (title, author, description, published_at) from yt-dlp info.json."""
+    if not metadata:
+        return None, None, "", None
+    title = metadata.get("title") or None
+    author = metadata.get("channel") or metadata.get("uploader") or None
+    description = (metadata.get("description") or "").strip()
+    upload_date_str = metadata.get("upload_date")
+    published_at: datetime | None = None
+    if upload_date_str:
+        try:
+            published_at = datetime.strptime(str(upload_date_str), "%Y%m%d").replace(
+                tzinfo=timezone.utc,
+            )
+        except ValueError:
+            published_at = None
+    return title, author, description, published_at
+
+
+def _build_body_md(
+    *,
+    url: str,
+    title: str | None,
+    author: str | None,
+    description: str,
+    transcript: str,
+) -> str:
+    """Compose a sectioned markdown body the orchestrator can split into blocks.
+
+    Section headings drive the orchestrator's block layout — keep these stable.
+    """
+    parts: list[str] = []
+    if title:
+        parts.append(f"**{title}**")
+    if author:
+        parts.append(f"_by {author}_")
+    parts.append(f"Source: {url}")
+    if description:
+        parts.append("## Description")
+        parts.append(description)
+    parts.append("## Transcript (Whisper via cobalt)")
+    parts.append(transcript or "(empty transcript)")
+    return "\n\n".join(parts)
 
 
 async def _request_tunnel(url: str) -> str:
