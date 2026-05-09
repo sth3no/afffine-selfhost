@@ -12,6 +12,7 @@ itself — separation of concerns.
 from __future__ import annotations
 
 import logging
+import re
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timezone
 from typing import Any
@@ -282,6 +283,47 @@ _HEADING_PREFIXES = (
 )
 
 
+# Inline markdown link with optional bold/italic on the label:
+#   [text](url)
+#   [**bold**](url)
+#   [*italic*](url)
+# Captures: opener (** or * or empty), label, closer (** or * or empty), url.
+_INLINE_LINK_RE = re.compile(
+    r"\[(?P<open>\*\*|\*)?(?P<label>[^\]]+?)(?P<close>\*\*|\*)?\]\((?P<url>[^)\s]+)\)"
+)
+
+
+def _parse_inline_markdown(text: str):
+    """Parse `[**0:00**](https://...)` and similar inline links into the
+    InlineOp[] structure that the mcp-ext block-builder turns into rich-text
+    deltas. Plain text without inline syntax falls through unchanged so we
+    don't pay parser cost for normal paragraphs.
+    """
+    if "](" not in text:
+        return text  # fast path: no possible link
+    parts: list[dict] = []
+    pos = 0
+    for m in _INLINE_LINK_RE.finditer(text):
+        if m.start() > pos:
+            parts.append({"text": text[pos:m.start()]})
+        opener = m.group("open") or ""
+        closer = m.group("close") or ""
+        label = m.group("label")
+        url = m.group("url")
+        op: dict = {"text": label, "link": url}
+        if opener == "**" and closer == "**":
+            op["bold"] = True
+        elif opener == "*" and closer == "*":
+            op["italic"] = True
+        parts.append(op)
+        pos = m.end()
+    if pos == 0:
+        return text  # regex matched nothing usable
+    if pos < len(text):
+        parts.append({"text": text[pos:]})
+    return parts
+
+
 def _markdown_to_blocks(body_md: str, *, skip_top_metadata: bool = False) -> list[dict[str, Any]]:
     """Lightweight markdown → block-spec converter.
 
@@ -300,7 +342,14 @@ def _markdown_to_blocks(body_md: str, *, skip_top_metadata: bool = False) -> lis
             return
         text = "\n".join(paragraph).strip()
         if text:
-            blocks.append({"type": "paragraph", "style": "text", "text": text})
+            # Parse inline `[label](url)` markdown links so they render as
+            # clickable text in AFFiNE — particularly important for the
+            # transcript's `[**0:00**](youtube...?t=Ns)` timestamp prefixes.
+            blocks.append({
+                "type": "paragraph",
+                "style": "text",
+                "text": _parse_inline_markdown(text),
+            })
         paragraph.clear()
 
     lines = body_md.splitlines()
