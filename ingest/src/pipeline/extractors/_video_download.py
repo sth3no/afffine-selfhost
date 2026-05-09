@@ -1,13 +1,14 @@
 """yt-dlp video download (Phase 13 first stage).
 
 Replaces the previous cobalt-based path. yt-dlp uses:
-  - Cookies from settings.youtube_cookies_path (when present).
   - HTTP_PROXY/HTTPS_PROXY env vars (residential tunnel) — inherited
     by the subprocess automatically.
-  - bgutil-ytdlp-pot-provider script mode for poToken generation. The
-    plugin's BgUtils-based JS server lives at /opt/bgutil-pot/server
-    (set up in the Dockerfile). Pure-Node — no Chromium, no proxy
-    fragility, unlike the previous yt_session_server sidecar.
+  - YouTube iOS player_client, which serves format URLs that work without
+    poToken. Cookies are deliberately NOT passed (would force yt-dlp to
+    skip the iOS client and fall back to web → poToken → bgutil hang).
+  - bgutil-ytdlp-pot-provider script mode is wired in the args as a
+    fallback for non-iOS clients but should never actually be invoked
+    for YouTube on this path.
 
 Returns the path to the downloaded mp4 (`workdir/video.mp4`). Raises
 RuntimeError on yt-dlp failure or empty output. Caller (cobalt_ext's
@@ -20,9 +21,6 @@ import asyncio
 import logging
 import os
 from pathlib import Path
-
-from src.config import settings
-from src.youtube_cookies import cookie_file_exists
 
 log = logging.getLogger(__name__)
 
@@ -64,8 +62,18 @@ async def download_video(url: str, workdir: Path) -> Path:
         "--extractor-args",
         "youtube:player_client=ios",
     ]
-    if cookie_file_exists(settings.youtube_cookies_path):
-        ytdlp_args += ["--cookies", settings.youtube_cookies_path]
+    # NOTE: --cookies is intentionally NOT passed here. yt-dlp silently
+    # SKIPS the iOS player_client whenever cookies are present
+    # ("WARNING: [youtube] Skipping client \"ios\" since it does not
+    # support cookies"), which forces it back to web → poToken → bgutil
+    # script-node → hang on the Innertube fetch (Node fetch ignores
+    # HTTP_PROXY). Without cookies, iOS is allowed and serves format URLs
+    # that work over the residential proxy without any poToken mint.
+    # Trade-off: login-gated content (private/age-restricted/members-only)
+    # won't yield Phase 13 keyframes. The captions and audio paths still
+    # use cookies (via youtube-transcript-api / cobalt) so transcript
+    # content for those videos still lands in the doc — only the inline
+    # keyframe images are missing for the auth-gated subset.
 
     ytdlp_args += ["-o", str(out_path), url]
 

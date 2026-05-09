@@ -138,9 +138,13 @@ async def test_download_video_no_output_file_raises(monkeypatch, tmp_path: Path)
 
 
 @pytest.mark.asyncio
-async def test_download_video_passes_cookies_when_present(monkeypatch, tmp_path: Path):
-    """When the cookies file exists (extension synced), the yt-dlp invocation
-    must include `--cookies <path>`. Mirrors _ytdlp_metadata behavior."""
+async def test_download_video_does_not_pass_cookies(monkeypatch, tmp_path: Path):
+    """yt-dlp silently SKIPS the iOS player_client whenever --cookies is
+    passed ("Skipping client 'ios' since it does not support cookies"),
+    which forces the web client → poToken → bgutil hang. So we explicitly
+    do NOT pass --cookies on the video download path even when a cookies
+    file exists. Cookies stay on the captions / metadata paths via
+    youtube-transcript-api / cobalt."""
     import asyncio
     from src.pipeline.extractors import _video_download as vd
     from src.config import settings
@@ -165,9 +169,10 @@ async def test_download_video_passes_cookies_when_present(monkeypatch, tmp_path:
     await vd.download_video("https://www.youtube.com/watch?v=abc", tmp_path)
 
     argv = captured["args"]
-    assert "--cookies" in argv
-    cookies_idx = argv.index("--cookies")
-    assert argv[cookies_idx + 1] == str(cookies_path)
+    assert "--cookies" not in argv, (
+        f"expected --cookies absent (would force web client + bgutil hang) but "
+        f"found in: {argv}"
+    )
 
 
 @pytest.mark.asyncio
