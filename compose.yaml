@@ -239,7 +239,12 @@ services:
       - yt_cookies:/cookies:ro
     depends_on:
       yt_session_server:
-        condition: service_started
+        # service_healthy (not service_started) — cobalt fetches poToken
+        # ONCE at boot. If the session server's HTTP listener isn't ready
+        # yet, cobalt logs "Failed loading poToken & visitor_data" and
+        # runs forever without it. service_healthy waits for our wget
+        # healthcheck to pass before starting cobalt.
+        condition: service_healthy
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:9000/"]
