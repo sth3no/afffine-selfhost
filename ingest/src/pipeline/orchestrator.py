@@ -253,7 +253,14 @@ def _build_body_blocks(
 
     if description:
         blocks.append({"type": "paragraph", "style": "h2", "text": "Description"})
-        blocks.append({"type": "paragraph", "style": "text", "text": str(description).strip()})
+        # Split on blank lines so each paragraph in the source description
+        # becomes its own block — matches AFFiNE's reading rhythm and looks
+        # like the rest of the doc body. Single-paragraph descriptions
+        # collapse to a single block automatically.
+        for chunk in re.split(r"\n\s*\n", str(description).strip()):
+            chunk = chunk.strip()
+            if chunk:
+                blocks.append({"type": "paragraph", "style": "text", "text": chunk})
 
     # Body parsing: split markdown headings into proper heading blocks; keep
     # everything else as paragraphs separated by blank lines. This handles
