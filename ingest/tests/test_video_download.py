@@ -198,3 +198,32 @@ async def test_download_video_passes_potoken_extractor_args(monkeypatch, tmp_pat
         "youtubepot-bgutilscript:server_home=/opt/bgutil-pot/server" in a
         for a in argv
     ), f"missing bgutil extractor-args in: {argv}"
+
+
+@pytest.mark.asyncio
+async def test_download_video_forces_ios_player_client(monkeypatch, tmp_path: Path):
+    """The yt-dlp invocation must force YouTube's iOS player client to
+    bypass the web client's poToken requirement (which would otherwise
+    trigger bgutil's hanging Innertube fetch)."""
+    import asyncio
+    from src.pipeline.extractors import _video_download as vd
+
+    captured: dict = {}
+
+    async def _capturing_exec(*args, **_kwargs):
+        captured["args"] = list(args)
+        argv = list(args)
+        o_idx = argv.index("-o")
+        out_path = Path(argv[o_idx + 1])
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_bytes(b"\x00" * (128 * 1024))
+        return _FakeProc(returncode=0)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _capturing_exec)
+
+    await vd.download_video("https://www.youtube.com/watch?v=abc", tmp_path)
+
+    argv = captured["args"]
+    assert any(
+        "youtube:player_client=ios" in a for a in argv
+    ), f"missing iOS player_client extractor-args in: {argv}"
