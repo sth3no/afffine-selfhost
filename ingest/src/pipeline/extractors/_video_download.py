@@ -73,8 +73,19 @@ async def download_video(url: str, workdir: Path) -> Path:
         )
     except asyncio.TimeoutError:
         proc.kill()
+        # Drain whatever stderr was buffered before the kill — that's the
+        # only window into what yt-dlp/bgutil were doing during the hang.
+        # With -v on the invocation, this will surface the [bgutil*] /
+        # [youtube] debug lines preceding the freeze.
+        try:
+            _, stderr = await asyncio.wait_for(proc.communicate(), timeout=2.0)
+        except (asyncio.TimeoutError, ProcessLookupError):
+            stderr = b""
+        full = stderr.decode(errors="replace")
+        tail = full[-2000:].strip() if len(full) > 2000 else full.strip()
         raise RuntimeError(
-            f"yt-dlp video timed out after {_DOWNLOAD_TIMEOUT_SECONDS}s"
+            f"yt-dlp video timed out after {_DOWNLOAD_TIMEOUT_SECONDS}s. "
+            f"stderr tail (last 2000 chars):\n{tail or '(empty)'}"
         ) from None
 
     if proc.returncode != 0:
