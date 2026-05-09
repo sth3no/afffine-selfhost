@@ -14,12 +14,17 @@ RUN apt-get update \
 # below) shells out here to mint poToken on demand. Pure-Node — no
 # headless Chromium needed, unlike the previous yt_session_server sidecar
 # this replaces.
-ARG BGUTIL_VERSION=master
+#
+# `npm ci` (no --omit=dev) is intentional: TypeScript is in devDependencies
+# and `npx tsc` needs it to compile. We prune devDeps + npm cache after
+# the build to keep the image lean.
+ARG BGUTIL_VERSION=1.3.1
 RUN git clone --depth 1 --branch ${BGUTIL_VERSION} \
         https://github.com/Brainicism/bgutil-ytdlp-pot-provider /opt/bgutil-pot \
     && cd /opt/bgutil-pot/server \
-    && npm ci --omit=dev \
+    && npm ci \
     && npx tsc \
+    && npm prune --omit=dev \
     && rm -rf /root/.npm
 
 WORKDIR /app
