@@ -119,6 +119,71 @@ def netscape_to_cobalt_json(content: str) -> str:
     return json.dumps({"youtube": ["; ".join(pairs)]})
 
 
+def cookie_names_only(netscape_content: str) -> list[dict]:
+    """Return cookie metadata WITHOUT values for diagnostic visibility.
+
+    Each entry: {name, domain, expires (epoch or 'session'), secure, http_only_unknown}.
+    Used by GET /youtube/cookies/diagnostic so an operator can verify the
+    expected auth cookie names (`__Secure-3PSID`, `SID`, etc.) are in the
+    upload — without ever exposing values.
+    """
+    out: list[dict] = []
+    for line in netscape_content.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        fields = line.split("\t")
+        if len(fields) != 7:
+            continue
+        domain, _, _, secure, expires, name, _ = fields
+        out.append({
+            "name": name,
+            "domain": domain,
+            "expires": "session" if expires in ("0", "") else expires,
+            "secure": secure == "TRUE",
+        })
+    return out
+
+
+def cobalt_json_diagnostic(cobalt_json_content: str) -> dict:
+    """Parse the cobalt-format JSON and report shape + cookie names per service.
+
+    Returns: {valid_json: bool, services: {<service>: {entry_count: int, cookie_names: list[str]}}}
+    Used by the diagnostic endpoint to verify cobalt's COOKIE_PATH file is parseable.
+    """
+    import json
+
+    try:
+        parsed = json.loads(cobalt_json_content)
+    except json.JSONDecodeError as e:
+        return {"valid_json": False, "error": str(e), "services": {}}
+
+    services: dict[str, dict] = {}
+    if not isinstance(parsed, dict):
+        return {"valid_json": True, "services": {}, "error": "root is not an object"}
+
+    for service, entries in parsed.items():
+        if not isinstance(entries, list):
+            services[service] = {"entry_count": 0, "cookie_names": [], "error": "not a list"}
+            continue
+        cookie_names: list[str] = []
+        for entry in entries:
+            if not isinstance(entry, str):
+                continue
+            for pair in entry.split(";"):
+                pair = pair.strip()
+                if "=" in pair:
+                    name = pair.split("=", 1)[0].strip()
+                    if name:
+                        cookie_names.append(name)
+        services[service] = {
+            "entry_count": len(entries),
+            "cookie_names": sorted(set(cookie_names)),
+        }
+
+    return {"valid_json": True, "services": services}
+
+
 def cookie_file_status(path: str | Path) -> dict:
     """Return JSON-serializable freshness metadata. Never returns cookie content.
 

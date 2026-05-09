@@ -526,6 +526,56 @@ async def get_youtube_cookies_status(_: str = require_token):
     return cookie_file_status(Path(settings.youtube_cookies_path))
 
 
+@app.get("/youtube/cookies/diagnostic")
+async def get_youtube_cookies_diagnostic(_: str = require_token):
+    """Diagnostic snapshot — cookie NAMES + structural metadata only.
+
+    NEVER returns cookie values. Used to verify the right auth cookie
+    names (`__Secure-3PSID`, `SID`, etc.) are present in both the
+    Netscape file and the cobalt JSON. If they're missing, the upstream
+    sync from the browser extension is incomplete; if they're present
+    but auth still fails, the issue is downstream (cookies invalid /
+    YT IP block / yt-dlp PO token requirement / etc.).
+    """
+    from pathlib import Path
+
+    from src.youtube_cookies import (
+        cobalt_json_diagnostic,
+        cookie_file_status,
+        cookie_names_only,
+    )
+
+    netscape_path = Path(settings.youtube_cookies_path)
+    cobalt_path = netscape_path.parent / "cobalt.json"
+
+    result: dict = {
+        "netscape": {
+            **cookie_file_status(netscape_path),
+            "cookies": [],
+        },
+        "cobalt": {
+            **cookie_file_status(cobalt_path),
+            "parse": {"valid_json": False, "services": {}},
+        },
+    }
+
+    if netscape_path.is_file():
+        try:
+            content = netscape_path.read_text(encoding="utf-8", errors="replace")
+            result["netscape"]["cookies"] = cookie_names_only(content)
+        except OSError as e:
+            result["netscape"]["read_error"] = str(e)
+
+    if cobalt_path.is_file():
+        try:
+            content = cobalt_path.read_text(encoding="utf-8", errors="replace")
+            result["cobalt"]["parse"] = cobalt_json_diagnostic(content)
+        except OSError as e:
+            result["cobalt"]["read_error"] = str(e)
+
+    return result
+
+
 # ── Helpers ───────────────────────────────────────────────────────────
 
 
