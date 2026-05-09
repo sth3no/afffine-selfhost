@@ -53,6 +53,16 @@ async def download_video(url: str, workdir: Path) -> Path:
         "--merge-output-format", "mp4",
         "--extractor-args",
         f"youtubepot-bgutilscript:server_home={_BGUTIL_SERVER_HOME}",
+        # Force the iOS player client. The default (web) returns format URLs
+        # gated behind poToken, which forces a bgutil call — and bgutil's
+        # Node fetch() doesn't honor HTTP_PROXY env vars, so it hangs trying
+        # to reach YouTube directly from the cloud IP. The iOS client
+        # historically hands back format URLs that work with cookies alone,
+        # bypassing the entire poToken minting path. If YouTube tightens the
+        # iOS client too (mid-2026 trajectory), bgutil HTTP server mode is
+        # the planned next step.
+        "--extractor-args",
+        "youtube:player_client=ios",
     ]
     if cookie_file_exists(settings.youtube_cookies_path):
         ytdlp_args += ["--cookies", settings.youtube_cookies_path]
