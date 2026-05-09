@@ -228,8 +228,18 @@ services:
       # converts on upload and writes cobalt.json alongside the
       # Netscape youtube.txt. Both live on the shared yt_cookies tmpfs.
       - COOKIE_PATH=/cookies/cobalt.json
+      # Phase 12.5 fix #4: cookies alone don't authenticate on cloud IPs
+      # since YT enforced PO tokens (late 2024). The yt_session_server
+      # sidecar mints poToken + visitor_data via BotGuard — cobalt sends
+      # those alongside the cookies, which gets us past the bot wall.
+      # Without this, every YT request returns error.api.youtube.login
+      # regardless of cookie quality.
+      - YOUTUBE_SESSION_SERVER=http://yt_session_server:8080/
     volumes:
       - yt_cookies:/cookies:ro
+    depends_on:
+      yt_session_server:
+        condition: service_started
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:9000/"]
@@ -237,6 +247,23 @@ services:
       timeout: 5s
       retries: 5
       start_period: 10s
+    networks:
+      - affine_net
+
+  # Phase 12.5 fix #4: PO token + visitor_data generator for cobalt.
+  # https://github.com/imputnet/yt-session-generator — runs YouTube's
+  # BotGuard JS in a Node sandbox to produce the auth artifacts cobalt
+  # needs alongside cookies. Stateless, no creds. ~150 MB RAM idle.
+  yt_session_server:
+    image: ghcr.io/imputnet/yt-session-generator:webserver
+    container_name: affine_yt_session_server
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
     networks:
       - affine_net
 
