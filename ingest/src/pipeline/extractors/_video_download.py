@@ -30,7 +30,16 @@ _COBALT_TIMEOUT = httpx.Timeout(connect=5.0, read=300.0, write=10.0, pool=5.0)
 
 
 async def download_video(url: str, workdir: Path) -> Path:
-    """Download merged video+audio mp4 to `workdir/video.mp4`."""
+    """Download merged video+audio mp4 to `workdir/video.mp4`.
+
+    Mirrors `cobalt_ext._download_audio`'s empty-body guard: cobalt's
+    video tunnel can return HTTP 200 with an empty / HTML body when its
+    upstream YT fetch silently failed (typically: no poToken, stale
+    cookies, or YT serving a format URL that 403s). A 0-byte file
+    crashes PySceneDetect's OpenCV-based reader with a useless message
+    ("Failed to open video"); we raise a descriptive RuntimeError
+    pointing at the real cause instead.
+    """
     tunnel_url = await _request_video_tunnel(url)
     out_path = workdir / "video.mp4"
     max_bytes = settings.cobalt_video_max_size_mb * 1024 * 1024
@@ -50,6 +59,27 @@ async def download_video(url: str, workdir: Path) -> Path:
                             f"{settings.cobalt_video_max_size_mb} MB cap",
                         )
                     f.write(chunk)
+
+    # Empty-body guard. A real video at 720p is at minimum a few hundred
+    # KB even for a 10-second clip; 64 KB is well below any plausible
+    # video and well above any HTML error body.
+    _MIN_VIDEO_BYTES = 64 * 1024
+    if total < _MIN_VIDEO_BYTES:
+        out_path.unlink(missing_ok=True)
+        raise RuntimeError(
+            f"cobalt video too small: {total} bytes — cobalt's tunnel "
+            f"returned an empty / error body. Most common cause: cobalt "
+            f"is missing a working poToken from yt_session_server (check "
+            f"`docker logs affine_cobalt | grep -i potoken` for "
+            f"`[✓] loaded poToken` vs `[!] Failed loading poToken`). "
+            f"Phase 13 keyframes will be empty until cobalt's video fetch "
+            f"actually succeeds."
+        )
+
+    log.info(
+        "cobalt video downloaded",
+        extra={"byte_count": total, "path": str(out_path)},
+    )
     return out_path
 
 
