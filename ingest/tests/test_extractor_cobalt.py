@@ -71,6 +71,48 @@ async def test_cobalt_happy_path_returns_transcript(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_youtube_captions_first_skips_cobalt_audio(monkeypatch):
+    """Phase 12.5 fix #9: when YT auto-captions are available, the new
+    captions-first strategy uses them directly — skipping the cobalt
+    audio download AND the Whisper API call. Saves time + ~$0.006/min."""
+    from src.pipeline.extractors import cobalt_ext
+
+    cobalt_calls = {"count": 0}
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        cobalt_calls["count"] += 1
+        return httpx.Response(500, text="cobalt should not be called when captions exist")
+
+    monkeypatch.setattr(cobalt_ext, "_TEST_TRANSPORT", httpx.MockTransport(_handler), raising=False)
+
+    # Captions return real text — no need to fall back to Whisper.
+    async def _captions(url: str, **kwargs) -> str:
+        return "Hello and welcome to today's tutorial. We're going to learn about Python."
+    monkeypatch.setattr(cobalt_ext, "fetch_youtube_transcript", _captions, raising=False)
+
+    # yt-dlp metadata returns reasonable values
+    async def _metadata(url: str) -> dict:
+        return {"title": "Python Tutorial", "channel": "TeacherChan", "description": "Learn Python."}
+    monkeypatch.setattr(cobalt_ext, "fetch_metadata", _metadata, raising=False)
+
+    # Spy on Whisper — must NOT be called.
+    whisper_spy = AsyncMock(return_value="should-not-appear")
+    monkeypatch.setattr(cobalt_ext, "_whisper_transcribe", whisper_spy)
+
+    result = await cobalt_ext.extract(
+        "https://www.youtube.com/watch?v=abc",
+        _platform(),
+    )
+
+    assert cobalt_calls["count"] == 0, "cobalt audio API was called even though captions existed"
+    whisper_spy.assert_not_awaited()
+    assert result.extra["transcript_source"] == "youtube_captions"
+    assert "Python Tutorial" == result.title
+    assert "## Transcript (YouTube captions)" in result.body_md
+    assert "today's tutorial" in result.body_md
+
+
+@pytest.mark.asyncio
 async def test_cobalt_redirect_status_treated_like_tunnel(monkeypatch):
     """cobalt sometimes returns status=redirect (direct CDN URL) — same shape."""
     from src.pipeline.extractors import cobalt_ext

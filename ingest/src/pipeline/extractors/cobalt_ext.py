@@ -76,22 +76,41 @@ async def extract(
     os.makedirs(_TMP_PARENT, exist_ok=True)
     workdir = Path(tempfile.mkdtemp(prefix="ingest-cobalt-", dir=_TMP_PARENT))
     try:
+        # Phase 12.5 fix #9: captions-first transcript strategy for YouTube.
+        # YT auto-captions via youtube-transcript-api are FREE, FAST, and
+        # match what users see in the YT UI. They cover ~80% of public
+        # videos. Cobalt audio + Whisper is slower and costs ~$0.006/min;
+        # only run that path when captions don't exist.
+        # Non-YouTube platforms (Instagram, X, TikTok) skip this branch
+        # and go straight to the cobalt path — no caption equivalent.
+        captions_transcript: str | None = None
+        if platform.id == "youtube":
+            try:
+                captions_transcript = await fetch_youtube_transcript(url)
+            except Exception as e:  # noqa: BLE001 — best-effort, fall through to audio path
+                log.warning("captions probe failed: %s", e)
+                captions_transcript = None
+
         try:
-            # Fan out metadata fetch + cobalt tunnel request — yt-dlp metadata
-            # is independent of cobalt audio download, so run them in parallel
-            # to save ~2-5s per capture.
-            tunnel_url, metadata = await asyncio.gather(
-                _request_tunnel(url),
-                fetch_metadata(url),
-            )
+            if captions_transcript:
+                # Captions worked — skip the cobalt audio download AND the
+                # Whisper API call. We still fetch metadata in parallel so
+                # title/author/description are populated; tunnel_url is
+                # unused on this path.
+                metadata = await fetch_metadata(url)
+                tunnel_url = ""
+            else:
+                # No captions — fall back to cobalt audio + Whisper.
+                tunnel_url, metadata = await asyncio.gather(
+                    _request_tunnel(url),
+                    fetch_metadata(url),
+                )
         except RuntimeError as e:
             # YouTube has been escalating bot detection in 2026 — both
             # cobalt and yt-dlp need cookies to scrape video pages. Rather
             # than hard-fail the capture (and force manual retries), fall
             # back to YouTube's unauthenticated oEmbed endpoint to at
-            # least recover the title + uploader. The summarizer + filer
-            # can then run on metadata alone, so the doc gets a real
-            # title and lands in a topic folder instead of stuck "failed".
+            # least recover the title + uploader.
             if platform.id == "youtube" and _is_youtube_bot_block(e):
                 log.warning(
                     "youtube bot-block hit; falling back to oEmbed-only metadata: %s", e,
@@ -99,11 +118,21 @@ async def extract(
                 return await _youtube_metadata_only(url, platform)
             raise
 
-        audio_path = await _download_audio(tunnel_url, workdir)
-        transcript = await _whisper_transcribe(audio_path)
+        if captions_transcript:
+            transcript = captions_transcript
+            transcript_heading = "## Transcript (YouTube captions)"
+            log.info("transcript via youtube-transcript-api (captions, free)",
+                     extra={"char_count": len(transcript)})
+        else:
+            audio_path = await _download_audio(tunnel_url, workdir)
+            transcript = await _whisper_transcribe(audio_path)
+            transcript_heading = "## Transcript (Whisper via cobalt)"
+            log.info("transcript via cobalt + Whisper (no captions available)",
+                     extra={"char_count": len(transcript)})
 
         # Phase 13: optional video frame analysis. Best-effort — failures
-        # leave the audio-only path untouched.
+        # leave the audio-only path untouched. Independent of which
+        # transcript path was used (downloads video separately).
         video_summary, keyframes = await _maybe_run_video_analysis(
             url=url,
             workdir=workdir,
@@ -113,12 +142,27 @@ async def extract(
         )
 
         title, author, description, published_at = _unpack_metadata(metadata)
+
+        # When yt-dlp metadata fails (bot-walled or video-formats issue),
+        # fall through to oEmbed for title + author. Unauthenticated and
+        # cheap, and it's what the metadata-only fallback already uses.
+        # Especially important on the captions-first path where we never
+        # hit the bot-block fallback that would have called oEmbed.
+        if title is None and platform.id == "youtube":
+            try:
+                oembed = await fetch_youtube_oembed(url)
+                if oembed:
+                    title = oembed.get("title") or title
+                    author = oembed.get("author_name") or author
+            except Exception as e:  # noqa: BLE001
+                log.warning("oEmbed metadata fallback failed: %s", e)
         body_md = _build_body_md(
             url=url,
             title=title,
             author=author,
             description=description,
             transcript=transcript,
+            transcript_heading=transcript_heading,
         )
 
         return Extracted(
@@ -134,6 +178,8 @@ async def extract(
                 "url": url,
                 "has_metadata": metadata is not None,
                 "description": description if description else None,
+                "transcript_source": "youtube_captions" if captions_transcript else "whisper",
+                "transcript_unavailable": False,  # both paths produced a transcript
                 # Phase 13 fields — None when video_analysis is disabled or fails.
                 "video_summary": video_summary,
                 "keyframes": [
