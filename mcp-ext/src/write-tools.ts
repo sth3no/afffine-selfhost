@@ -193,10 +193,34 @@ function parseBlockSpec(raw: unknown, i: number): BlockSpec {
     return { type: 'latex', latex: b.latex };
   }
 
+  if (type === 'image') {
+    // Image block — references a workspace blob by sourceId. Caller must
+    // upload the blob first (via upload_blob / setBlob) and pass the
+    // returned filename here as sourceId. block-builder.ts emits the
+    // affine:image flavour with prop:sourceId; AFFiNE's renderer fetches
+    // the blob bytes by sourceId and displays them inline.
+    if (typeof b.sourceId !== 'string' || !b.sourceId) {
+      throw new Error(`blocks[${i}]: image needs string "sourceId"`);
+    }
+    if (b.width !== undefined && typeof b.width !== 'number') {
+      throw new Error(`blocks[${i}]: image "width" must be a number when set`);
+    }
+    if (b.height !== undefined && typeof b.height !== 'number') {
+      throw new Error(`blocks[${i}]: image "height" must be a number when set`);
+    }
+    return {
+      type: 'image',
+      sourceId: b.sourceId,
+      caption: typeof b.caption === 'string' ? b.caption : undefined,
+      width: typeof b.width === 'number' ? b.width : undefined,
+      height: typeof b.height === 'number' ? b.height : undefined,
+    };
+  }
+
   throw new Error(
     `blocks[${i}]: unknown type "${String(type)}". Expected paragraph|list|code|divider|bookmark|` +
     `embed-iframe|embed-youtube|embed-github|embed-figma|embed-loom|embed-html|embed-linked-doc|` +
-    `embed-synced-doc|callout|latex.`
+    `embed-synced-doc|callout|latex|image.`
   );
 }
 
@@ -221,6 +245,8 @@ const BLOCK_SPEC_SCHEMA = {
     '  • embed-synced-doc — { type:"embed-synced-doc", docId, caption? }  (full inline render of another doc)\n' +
     '  • callout — { type:"callout", emoji?, text }\n' +
     '  • latex — { type:"latex", latex }  (LaTeX equation block)\n' +
+    '  • image — { type:"image", sourceId, caption?, width?, height? }  ' +
+      '(sourceId is the filename returned by upload_blob; AFFiNE renders the blob inline)\n' +
     'text can be a plain string OR an array of inline ops: ' +
     '[{text:"hello",bold:true}, {text:" see ",refDocId:"<docId>"}] — ' +
     'refDocId renders as an @DocName pill linking to that doc. Other inline marks: ' +
