@@ -5,7 +5,11 @@ in isolation. The full orchestrator flow is tested via test_orchestrator.py.
 """
 
 from src.pipeline.extracted import Extracted, MediaKind
-from src.pipeline.orchestrator import _build_body_blocks, _markdown_to_blocks
+from src.pipeline.orchestrator import (
+    _build_body_blocks,
+    _markdown_to_blocks,
+    _url_embed_block,
+)
 
 
 def _e(body_md: str, *, description: str | None = None, title: str | None = None) -> Extracted:
@@ -194,9 +198,83 @@ def test_build_body_blocks_drops_cobalt_metadata_preamble_when_summary_present()
         url="https://example.com/x",
     )
     # The bold/by/source lines should not appear as their own paragraphs.
-    paragraph_texts = [b["text"] for b in blocks if b["style"] == "text" and isinstance(b["text"], str)]
+    # Use .get() because non-paragraph blocks (e.g. the embed/bookmark at
+    # the top of the doc) don't have a "style" key.
+    paragraph_texts = [
+        b["text"] for b in blocks
+        if b.get("style") == "text" and isinstance(b.get("text"), str)
+    ]
     assert all("_by Channel_" not in t for t in paragraph_texts)
     assert all(not t.startswith("**My Title**") for t in paragraph_texts)
+
+
+# ── _url_embed_block ────────────────────────────────────────────────
+
+
+def test_url_embed_youtube_main_host():
+    assert _url_embed_block("https://www.youtube.com/watch?v=abc") == {
+        "type": "embed-youtube",
+        "url": "https://www.youtube.com/watch?v=abc",
+    }
+
+
+def test_url_embed_youtube_short_host():
+    assert _url_embed_block("https://youtu.be/abc")["type"] == "embed-youtube"
+
+
+def test_url_embed_youtube_mobile_host():
+    assert _url_embed_block("https://m.youtube.com/watch?v=abc")["type"] == "embed-youtube"
+
+
+def test_url_embed_github_repo():
+    assert _url_embed_block("https://github.com/sth3no/afffine-selfhost")["type"] == "embed-github"
+
+
+def test_url_embed_figma_design():
+    assert _url_embed_block("https://www.figma.com/file/abc/Design")["type"] == "embed-figma"
+
+
+def test_url_embed_loom_video():
+    assert _url_embed_block("https://www.loom.com/share/abc")["type"] == "embed-loom"
+
+
+def test_url_embed_falls_back_to_bookmark_for_unknown_host():
+    """Instagram, TikTok, X, generic blogs etc. all use bookmark — AFFiNE
+    fetches og:image/title/description for the card preview."""
+    for url in (
+        "https://www.instagram.com/reel/abc/",
+        "https://www.tiktok.com/@user/video/123",
+        "https://x.com/user/status/123",
+        "https://example.com/some/article",
+    ):
+        assert _url_embed_block(url) == {"type": "bookmark", "url": url}, url
+
+
+def test_build_body_blocks_prepends_url_embed():
+    """When a URL is present, the very first block is a rich URL embed
+    (or bookmark fallback). Lets the reader see the source thumbnail
+    before scrolling past Summary / Description / Transcript."""
+    blocks = _build_body_blocks(
+        extracted=_e("## Transcript\n\nbody"),
+        summary_md="A summary.",
+        url="https://www.youtube.com/watch?v=NBblpaIfeS0",
+    )
+    assert blocks[0] == {
+        "type": "embed-youtube",
+        "url": "https://www.youtube.com/watch?v=NBblpaIfeS0",
+    }
+
+
+def test_build_body_blocks_no_url_skips_embed():
+    """Text-only / shared-text captures with no URL → no embed at top."""
+    blocks = _build_body_blocks(
+        extracted=_e("## Transcript\n\nbody"),
+        summary_md=None,
+        url=None,
+    )
+    # First block is the Transcript heading from body_md, NOT an embed.
+    assert blocks[0]["type"] == "paragraph"
+    assert all(b.get("type") not in ("embed-youtube", "bookmark") for b in blocks)
 
 
 # ── Phase 13: keyframe → image block emission ──────────────────────

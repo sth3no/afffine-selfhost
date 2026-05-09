@@ -200,6 +200,37 @@ async def _delete_stub_block(*, filer: Filer, doc_id: str) -> None:
             return
 
 
+def _url_embed_block(url: str) -> dict[str, Any]:
+    """Pick the right AFFiNE embed block type for a given URL.
+
+    AFFiNE has dedicated rich-preview embed flavours for a few platforms
+    (YouTube renders an inline player thumbnail, GitHub renders a repo
+    card, etc.). For everything else, `bookmark` produces a generic URL
+    card with og:image / og:title / og:description fetched by AFFiNE
+    server-side after the block lands.
+
+    | Host                 | Block            |
+    |----------------------|------------------|
+    | youtube.com / youtu.be | embed-youtube  |
+    | github.com           | embed-github     |
+    | figma.com            | embed-figma      |
+    | loom.com             | embed-loom       |
+    | (anything else)      | bookmark         |
+    """
+    from urllib.parse import urlparse
+    host = (urlparse(url).hostname or "").lower()
+
+    if host == "youtu.be" or host == "youtube.com" or host.endswith(".youtube.com"):
+        return {"type": "embed-youtube", "url": url}
+    if host == "github.com" or host.endswith(".github.com"):
+        return {"type": "embed-github", "url": url}
+    if host == "figma.com" or host.endswith(".figma.com"):
+        return {"type": "embed-figma", "url": url}
+    if host == "loom.com" or host.endswith(".loom.com"):
+        return {"type": "embed-loom", "url": url}
+    return {"type": "bookmark", "url": url}
+
+
 def _build_body_blocks(
     *,
     extracted: Extracted,
@@ -209,6 +240,8 @@ def _build_body_blocks(
     """Compose structured block specs for the doc body.
 
     Layout:
+      [embed url]          (rich preview at the very top — youtube/github/etc;
+                            falls back to bookmark for unknown hosts)
       ## Summary           (if summary available)
       <summary paragraph>
       ## Keyframes         (Phase 13 — if video analysis produced any)
@@ -220,6 +253,12 @@ def _build_body_blocks(
       Source: <url>        (italic at bottom)
     """
     blocks: list[dict[str, Any]] = []
+
+    # Rich URL preview at the very top of the doc — gives the reader a
+    # thumbnail / "Watch on YouTube" affordance before scrolling through
+    # the summary + transcript.
+    if url:
+        blocks.append(_url_embed_block(url))
 
     if summary_md:
         blocks.append({"type": "paragraph", "style": "h2", "text": "Summary"})
