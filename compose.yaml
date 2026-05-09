@@ -234,7 +234,7 @@ services:
       # those alongside the cookies, which gets us past the bot wall.
       # Without this, every YT request returns error.api.youtube.login
       # regardless of cookie quality.
-      - YOUTUBE_SESSION_SERVER=http://yt_session_server:8080/
+      - YOUTUBE_SESSION_SERVER=http://yt_session_adapter:8080/
     volumes:
       - yt_cookies:/cookies:ro
     depends_on:
@@ -264,13 +264,60 @@ services:
   # cobalt needs alongside cookies. Stateless, no creds.
   # No healthcheck: the image has no wget/curl and the only endpoints
   # are GET /token (expensive — generates a fresh token via BotGuard)
-  # and POST /update. Healthcheck-by-/token would burn CPU every 30s
-  # for no net benefit. cobalt_watchdog handles the boot-order race:
-  # by the time the extension uploads cookies and the watchdog
-  # restarts cobalt, Chromium has long since finished booting here.
+  # and POST /update.
   yt_session_server:
     image: ghcr.io/imputnet/yt-session-generator:webserver
     container_name: affine_yt_session_server
+    restart: unless-stopped
+    networks:
+      - affine_net
+
+  # Phase 12.5 fix #6: protocol adapter between cobalt and
+  # yt-session-generator's webserver image. Cobalt POSTs to /get_pot
+  # (api/src/processing/helpers/youtube-session.js) but the webserver
+  # image only serves GET /, /token, /update. Direct wiring returns
+  # the literal "Not Found" 404 body which cobalt JSON-parses → crash.
+  # Both images are maintained by imputnet but the wire format drifted.
+  # This 15-line adapter translates POST /get_pot → GET /token.
+  yt_session_adapter:
+    image: python:3.13-alpine
+    container_name: affine_yt_session_adapter
+    command:
+      - python
+      - -u
+      - -c
+      - |
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+        import urllib.request
+
+        UPSTREAM = "http://yt_session_server:8080/token"
+
+        class Adapter(BaseHTTPRequestHandler):
+            def do_POST(self):
+                if self.path != "/get_pot":
+                    self.send_error(404, "only POST /get_pot is supported")
+                    return
+                try:
+                    with urllib.request.urlopen(UPSTREAM, timeout=30) as r:
+                        body = r.read()
+                        self.send_response(200)
+                        self.send_header("Content-Type", "application/json")
+                        self.send_header("Content-Length", str(len(body)))
+                        self.end_headers()
+                        self.wfile.write(body)
+                except Exception as e:
+                    self.send_error(502, f"upstream failed: {e}")
+
+            def log_message(self, fmt, *args):
+                # Use unbuffered stderr so docker logs see entries promptly.
+                import sys
+                sys.stderr.write(f"[adapter] {fmt % args}\n")
+                sys.stderr.flush()
+
+        print("[adapter] listening on :8080, forwarding POST /get_pot -> GET", UPSTREAM, flush=True)
+        HTTPServer(("0.0.0.0", 8080), Adapter).serve_forever()
+    depends_on:
+      - yt_session_server
     restart: unless-stopped
     networks:
       - affine_net

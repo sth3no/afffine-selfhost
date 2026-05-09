@@ -368,10 +368,12 @@ auto-syncs on every YT cookie change.
 late 2024 — YouTube enforces a Proof-of-Origin (PO) token on most
 clients. The stack ships a `yt_session_server` sidecar
 ([yt-session-generator](https://github.com/imputnet/yt-session-generator))
-that mints PO tokens via BotGuard for cobalt; yt-dlp uses bot-resistant
-extractor clients (`web_embedded`, `tv_simply`) that don't require PO
-tokens. With both in place, cookies + PO token + a logged-in YT
-account is the working combination.
+that mints PO tokens via BotGuard, plus a tiny `yt_session_adapter`
+that translates between cobalt's `POST /get_pot` and the session
+server's `GET /token` (the two upstreams drifted apart). yt-dlp uses
+bot-resistant extractor clients (`web_embedded`, `tv_simply`) that
+don't require PO tokens. With both in place, cookies + PO token +
+a logged-in YT account is the working combination.
 
 **Cobalt's startup race — handled automatically by `cobalt_watchdog`:**
 
