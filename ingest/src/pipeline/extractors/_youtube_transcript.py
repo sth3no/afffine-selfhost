@@ -28,31 +28,66 @@ _VIDEO_ID_RE = re.compile(
 )
 
 
-def _build_cookie_session(cookie_path: str):
-    """Load a Netscape cookies.txt into a requests.Session for transcript-api.
+def _build_session(cookie_path: str | None):
+    """Build a requests.Session for youtube-transcript-api with:
+      - cookies loaded from Netscape file (when cookie_path is given)
+      - proxies pulled from HTTP_PROXY / HTTPS_PROXY env vars (always)
 
     Returns the session, or None on any failure — caller falls back to
-    no-cookies mode (still works for ~80% of public videos with auto-captions).
+    transcript-api's default Session.
+
+    Why we set proxies explicitly: requests.Session(trust_env=True) is
+    supposed to auto-detect HTTP_PROXY but fires inconsistently when
+    session.cookies is replaced with a custom MozillaCookieJar AND when
+    a session is passed via http_client= to a third-party library that
+    may construct its own internal request paths. Explicit assignment
+    is robust against both.
     """
     try:
         import http.cookiejar
+        import os
         import requests
     except ImportError:
         return None
 
-    try:
-        jar = http.cookiejar.MozillaCookieJar(cookie_path)
-        # ignore_discard=True: include session cookies (expires=0 in Netscape)
-        # ignore_expires=True: don't drop cookies based on the expires column
-        # (yt-dlp cookies dumps often have expires=0 even for non-session ones).
-        jar.load(ignore_discard=True, ignore_expires=True)
-    except (FileNotFoundError, OSError, http.cookiejar.LoadError) as e:
-        log.warning("youtube_transcript: cookie load failed: %s", e)
-        return None
-
     session = requests.Session()
-    session.cookies = jar
+
+    # Cookies — optional. Captions endpoint works without them for most
+    # public videos; cookies just unlock private/age-gated/members-only.
+    if cookie_path:
+        try:
+            jar = http.cookiejar.MozillaCookieJar(cookie_path)
+            jar.load(ignore_discard=True, ignore_expires=True)
+            session.cookies = jar
+        except (FileNotFoundError, OSError, http.cookiejar.LoadError) as e:
+            log.warning("youtube_transcript: cookie load failed: %s", e)
+            # Continue without cookies — the Session is still usable.
+
+    # Explicit proxy plumbing — required to actually exit via the
+    # residential tunnel instead of the cloud IP that YT bot-walls.
+    proxies: dict[str, str] = {}
+    http_proxy = os.environ.get("HTTP_PROXY") or os.environ.get("http_proxy")
+    https_proxy = os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy")
+    if http_proxy:
+        proxies["http"] = http_proxy
+    if https_proxy:
+        proxies["https"] = https_proxy
+    if proxies:
+        session.proxies = proxies
+        log.info("youtube_transcript: proxy configured on session",
+                 extra={"http_proxy_set": bool(http_proxy),
+                        "https_proxy_set": bool(https_proxy)})
+    else:
+        log.warning(
+            "youtube_transcript: NO proxy env vars set — transcript fetch "
+            "will go direct from cloud IP and likely get RequestBlocked. "
+            "Check RESIDENTIAL_PROXY_URL in stack env.",
+        )
     return session
+
+
+# Backward-compat alias — older callers / tests reference the old name.
+_build_cookie_session = _build_session
 
 
 def extract_video_id(url: str) -> str | None:
@@ -178,9 +213,21 @@ def _fetch_sync(video_id: str, languages: tuple[str, ...], video_url: str) -> st
     from src.config import settings
     from src.youtube_cookies import cookie_file_exists
 
+    # Build a Session only when we have something to configure on it
+    # (cookies OR a proxy env var). Without either, transcript-api's
+    # default Session is fine (and tests without env-overrides still
+    # exercise the trivial path).
+    import os as _os  # local — keep _build_session import isolated
+    has_cookies = cookie_file_exists(settings.youtube_cookies_path)
+    has_proxy_env = bool(
+        _os.environ.get("HTTP_PROXY") or _os.environ.get("HTTPS_PROXY")
+        or _os.environ.get("http_proxy") or _os.environ.get("https_proxy")
+    )
+
     api_kwargs: dict = {}
-    if cookie_file_exists(settings.youtube_cookies_path):
-        session = _build_cookie_session(settings.youtube_cookies_path)
+    if has_cookies or has_proxy_env:
+        cookie_path = settings.youtube_cookies_path if has_cookies else None
+        session = _build_session(cookie_path)
         if session is not None:
             api_kwargs["http_client"] = session
 
