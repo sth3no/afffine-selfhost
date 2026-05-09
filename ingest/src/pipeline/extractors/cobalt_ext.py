@@ -391,16 +391,21 @@ def _build_body_md(
     """Compose a sectioned markdown body the orchestrator can split into blocks.
 
     Section headings drive the orchestrator's block layout — keep these stable.
+
+    Description is intentionally NOT included here even though we receive it
+    as an arg — the orchestrator emits it separately from `extra["description"]`
+    via its own `## Description` block. Including it both places caused the
+    description to render twice (once via body_md → _markdown_to_blocks, once
+    via extra). The arg is kept in the signature for back-compat with callers
+    and tests that still pass it.
     """
+    del description  # rendered by orchestrator from extra["description"] instead
     parts: list[str] = []
     if title:
         parts.append(f"**{title}**")
     if author:
         parts.append(f"_by {author}_")
     parts.append(f"Source: {url}")
-    if description:
-        parts.append("## Description")
-        parts.append(description)
     parts.append(transcript_heading)
     parts.append(transcript or "(empty transcript)")
     return "\n\n".join(parts)
