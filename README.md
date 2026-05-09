@@ -373,13 +373,42 @@ extractor clients (`web_embedded`, `tv_simply`) that don't require PO
 tokens. With both in place, cookies + PO token + a logged-in YT
 account is the working combination.
 
-**Verify cobalt actually loaded the cookies** (not just that the file
-exists on disk):
+**Cobalt's startup race — must be handled on first deploy:**
+
+Cobalt reads `/cookies/cobalt.json` exactly ONCE at startup, and fetches
+the PO token from `yt_session_server` exactly ONCE at startup. Neither
+reloads. On a fresh stack deploy:
+
+1. Cobalt boots → `cookies.json` doesn't exist yet (tmpfs is empty,
+   extension hasn't synced) → cobalt logs `[!] failed to load cookies.`
+2. Extension syncs → `cobalt.json` is written.
+3. Cobalt **does not** notice. It runs forever with empty cookies.
+
+**The first-deploy ritual:**
+
+```bash
+# 1. Stack up + healthy
+# 2. Click "Sync now" in the extension popup — verify byte_count in ingest logs
+# 3. Manually restart cobalt so it re-reads cookies + re-fetches poToken
+docker restart affine_cobalt
+# 4. Confirm:
+docker logs affine_cobalt 2>&1 | tail -20 | grep -iE 'cookies|poToken|visitor'
+# expect: [✓] cookies loaded successfully!
+#         [✓] loaded poToken successfully (or similar)
+```
+
+After that, cobalt's in-memory cookie state self-rotates as YouTube
+sends `Set-Cookie` headers — no more restarts needed until the stack
+itself is recreated.
+
+If you see `[!] failed to load cookies` AFTER the manual restart, the
+JSON format is wrong — check the diagnostic endpoint below.
+
+**Quick verification:**
 
 ```bash
 docker logs affine_cobalt 2>&1 | grep -iE 'cookies|\[!\]'
 # expect: [✓] cookies loaded successfully!
-# if you see [!] failed to load cookies — JSON format mismatch, check the diagnostic
 ```
 
 **Cookie diagnostic** (names only, never values — safe to share for debugging):
