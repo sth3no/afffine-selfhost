@@ -104,6 +104,43 @@ def test_markdown_to_blocks_empty_input():
     assert _markdown_to_blocks("   \n\n   ") == []
 
 
+def test_markdown_to_blocks_bulleted_list_emits_list_blocks():
+    """Markdown bulleted lines (- or * prefix) become AFFiNE list blocks
+    so the new bullet-list summary format renders as a real list, not
+    paragraph text with literal dashes."""
+    md = "## Summary\n\n- First exciting thing\n- Second one\n* Star bullet works too"
+    blocks = _markdown_to_blocks(md)
+    list_blocks = [b for b in blocks if b.get("type") == "list"]
+    assert len(list_blocks) == 3
+    assert all(b["style"] == "bulleted" for b in list_blocks)
+    # Plain bullet (no inline markdown) keeps fast-path string text
+    assert list_blocks[0]["text"] == "First exciting thing"
+    assert list_blocks[1]["text"] == "Second one"
+    assert list_blocks[2]["text"] == "Star bullet works too"
+
+
+def test_markdown_to_blocks_bullet_with_inline_link_keeps_inline_op():
+    """Bulleted summary item containing `[label](url)` markdown should still
+    parse the link into an InlineOp, same as paragraph text does."""
+    md = "- See [docs](https://example.com/x) for details"
+    blocks = _markdown_to_blocks(md)
+    assert len(blocks) == 1
+    assert blocks[0]["type"] == "list"
+    text = blocks[0]["text"]
+    assert isinstance(text, list)
+    assert any(op.get("link") == "https://example.com/x" for op in text)
+
+
+def test_markdown_to_blocks_skips_empty_bullet_items():
+    """A bare `- ` with no content is silently dropped (no empty block)."""
+    md = "- Real item\n- \n- Another real item"
+    blocks = _markdown_to_blocks(md)
+    list_blocks = [b for b in blocks if b.get("type") == "list"]
+    assert len(list_blocks) == 2
+    assert list_blocks[0]["text"] == "Real item"
+    assert list_blocks[1]["text"] == "Another real item"
+
+
 # ── _build_body_blocks ──────────────────────────────────────────────
 
 

@@ -223,7 +223,12 @@ def _build_body_blocks(
 
     if summary_md:
         blocks.append({"type": "paragraph", "style": "h2", "text": "Summary"})
-        blocks.append({"type": "paragraph", "style": "text", "text": summary_md.strip()})
+        # Run the summary through _markdown_to_blocks so bulleted summaries
+        # (the new prompt format — "- item" per line) render as proper
+        # AFFiNE list blocks rather than a single paragraph with literal
+        # dashes. Single-paragraph summaries collapse to one paragraph
+        # block as before.
+        blocks.extend(_markdown_to_blocks(summary_md.strip()))
 
     # Phase 13: keyframes from video analysis (if any).
     keyframes = (extracted.extra or {}).get("keyframes") or []
@@ -381,6 +386,18 @@ def _markdown_to_blocks(body_md: str, *, skip_top_metadata: bool = False) -> lis
         if heading_style is not None:
             flush_paragraph()
             blocks.append({"type": "paragraph", "style": heading_style, "text": stripped})
+        elif stripped.startswith("- ") or stripped.startswith("* "):
+            # Markdown bullet → AFFiNE list block. One block per item; AFFiNE's
+            # list flavour represents each item as its own block (consecutive
+            # bulleted blocks render as a contiguous list in the editor).
+            flush_paragraph()
+            item_text = stripped[2:].strip()
+            if item_text:
+                blocks.append({
+                    "type": "list",
+                    "style": "bulleted",
+                    "text": _parse_inline_markdown(item_text),
+                })
         elif raw.strip() == "":
             flush_paragraph()
         else:
