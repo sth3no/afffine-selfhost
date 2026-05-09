@@ -265,13 +265,52 @@ services:
   # No healthcheck: the image has no wget/curl and the only endpoints
   # are GET /token (expensive — generates a fresh token via BotGuard)
   # and POST /update. Healthcheck-by-/token would burn CPU every 30s
-  # for no net benefit. Cobalt's depends_on uses service_started; if
-  # cobalt boots first and ECONNREFUSEs the session server, the
-  # documented manual `docker restart affine_cobalt` after first
-  # extension sync catches up cleanly.
+  # for no net benefit. cobalt_watchdog handles the boot-order race:
+  # by the time the extension uploads cookies and the watchdog
+  # restarts cobalt, Chromium has long since finished booting here.
   yt_session_server:
     image: ghcr.io/imputnet/yt-session-generator:webserver
     container_name: affine_yt_session_server
+    restart: unless-stopped
+    networks:
+      - affine_net
+
+  # Phase 12.5 fix #5: cobalt loads cookies + poToken ONCE at boot and
+  # never re-reads. On a fresh stack deploy the cookies file doesn't
+  # exist yet (extension syncs AFTER stack is up) → cobalt boots with
+  # empty cookies and stays that way. This watchdog notices the file's
+  # missing→present transition and runs `docker restart affine_cobalt`
+  # exactly once. On the second boot, cookies + poToken both load
+  # cleanly. After that, cobalt's in-memory state self-rotates from
+  # YT's Set-Cookie responses and the extension's continuous re-syncs
+  # don't trigger further restarts (the file stays "present").
+  cobalt_watchdog:
+    image: docker:cli
+    container_name: affine_cobalt_watchdog
+    command:
+      - sh
+      - -c
+      - |
+        WAS_VALID="false"
+        echo "[watchdog] starting; will restart affine_cobalt when /cookies/cobalt.json appears"
+        while true; do
+          if [ -s /cookies/cobalt.json ] && grep -q '"youtube"' /cookies/cobalt.json 2>/dev/null; then
+            if [ "$$WAS_VALID" = "false" ]; then
+              echo "[watchdog] cobalt.json valid; restarting affine_cobalt"
+              if docker restart affine_cobalt; then
+                WAS_VALID="true"
+              else
+                echo "[watchdog] docker restart failed; will retry next tick"
+              fi
+            fi
+          else
+            WAS_VALID="false"
+          fi
+          sleep 10
+        done
+    volumes:
+      - yt_cookies:/cookies:ro
+      - /var/run/docker.sock:/var/run/docker.sock
     restart: unless-stopped
     networks:
       - affine_net
