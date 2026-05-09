@@ -133,3 +133,75 @@ def test_cookies_status_does_not_log_body(app_with_token, caplog):
         )
     for record in caplog.records:
         assert secret not in record.getMessage()
+
+
+# ── GET /youtube/cookies/diagnostic ───────────────────────────────────
+
+
+def test_diagnostic_requires_token(app_with_token):
+    client, _ = app_with_token
+    resp = client.get("/youtube/cookies/diagnostic")
+    assert resp.status_code in (401, 403)
+
+
+def test_diagnostic_missing_files(app_with_token):
+    client, _ = app_with_token
+    resp = client.get(
+        "/youtube/cookies/diagnostic",
+        headers={"Authorization": "Bearer test-token"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["netscape"]["exists"] is False
+    assert body["cobalt"]["exists"] is False
+    assert body["netscape"]["cookies"] == []
+    assert body["cobalt"]["parse"]["valid_json"] is False
+
+
+def test_diagnostic_returns_names_not_values(app_with_token):
+    """Diagnostic endpoint must NEVER return cookie values."""
+    import json
+
+    client, dest = app_with_token
+    secret = "EXTREMELY_SECRET_VALUE_42"
+    dest.write_text(
+        f"# header\n"
+        f".youtube.com\tTRUE\t/\tTRUE\t0\tSID\t{secret}\n"
+        f".youtube.com\tTRUE\t/\tTRUE\t0\t__Secure-3PSID\tanother_{secret}\n",
+    )
+    # Also create a sibling cobalt.json in the diagnostic-expected location.
+    cobalt_path = dest.parent / "cobalt.json"
+    cobalt_path.write_text(
+        json.dumps({"youtube": [f"SID={secret}; __Secure-3PSID=another_{secret}"]}),
+    )
+
+    resp = client.get(
+        "/youtube/cookies/diagnostic",
+        headers={"Authorization": "Bearer test-token"},
+    )
+    body = resp.json()
+
+    # Names appear, values don't.
+    netscape_names = {c["name"] for c in body["netscape"]["cookies"]}
+    assert netscape_names == {"SID", "__Secure-3PSID"}
+
+    cobalt_names = set(body["cobalt"]["parse"]["services"]["youtube"]["cookie_names"])
+    assert cobalt_names == {"SID", "__Secure-3PSID"}
+
+    # Hard regression guard: the secret value must appear NOWHERE in the response.
+    raw = resp.text
+    assert secret not in raw
+
+
+def test_diagnostic_flags_invalid_cobalt_json(app_with_token):
+    client, dest = app_with_token
+    dest.write_text("# header\n.youtube.com\tTRUE\t/\tTRUE\t0\tSID\tx\n")
+    (dest.parent / "cobalt.json").write_text("not valid json {{{")
+
+    resp = client.get(
+        "/youtube/cookies/diagnostic",
+        headers={"Authorization": "Bearer test-token"},
+    )
+    body = resp.json()
+    assert body["cobalt"]["parse"]["valid_json"] is False
+    assert "error" in body["cobalt"]["parse"]
