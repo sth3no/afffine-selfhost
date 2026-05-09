@@ -50,18 +50,12 @@ async def fetch_metadata(url: str) -> dict | None:
         if cookie_file_exists(settings.youtube_cookies_path):
             ytdlp_args += ["--cookies", settings.youtube_cookies_path]
 
-        # Phase 12.5 fix #4: since late 2024 YT enforces a Proof-of-Origin
-        # token on most player clients. The `web_embedded` client is
-        # exempted (per yt-dlp wiki + issue #12561) and `tv_simply` is
-        # the most bot-resistant alternative. Combined with cookies this
-        # clears the bot wall on cloud IPs without us running a separate
-        # PO-token provider for yt-dlp.
-        # Reference: https://github.com/yt-dlp/yt-dlp/wiki/PO-Token-Guide
-        if "youtube.com" in url or "youtu.be" in url:
-            ytdlp_args += [
-                "--extractor-args",
-                "youtube:player_client=web_embedded,tv_simply",
-            ]
+        # Phase 12.5 fix #8: dropped `--extractor-args player_client=web_embedded,tv_simply`
+        # added in fix #4. With residential proxy egress (RESIDENTIAL_PROXY_URL),
+        # the default web client works AND has all formats — web_embedded
+        # was reporting "Requested format is not available" on niche
+        # videos because that client returns a limited format list.
+        # Cookies + residential proxy is enough; no per-client juggling.
 
         ytdlp_args += [
             "-o", str(workdir / "video.%(ext)s"),
