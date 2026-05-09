@@ -44,8 +44,11 @@ async def download_video(url: str, workdir: Path) -> Path:
 
     ytdlp_args: list[str] = [
         "yt-dlp",
-        "--no-warnings",
-        "--quiet",
+        # -v emits "[debug] Loaded plugin: ..." + "[youtube] Looking up POT
+        # provider: ..." which is exactly what we need to see when downloads
+        # fail. Stderr is only surfaced to the caller on rc!=0, so happy-path
+        # logs aren't bloated by it.
+        "-v",
         "-f", "bestvideo[height<=720]+bestaudio/best[height<=720]",
         "--merge-output-format", "mp4",
         "--extractor-args",
@@ -75,7 +78,11 @@ async def download_video(url: str, workdir: Path) -> Path:
         ) from None
 
     if proc.returncode != 0:
-        msg = stderr.decode(errors="replace")[:500].strip()
+        # Take the LAST 2000 chars of stderr — the actual error and any
+        # "[bgutil*]" / "[youtube]" debug lines immediately preceding it
+        # are at the END of -v output, not the start.
+        full = stderr.decode(errors="replace")
+        msg = full[-2000:].strip() if len(full) > 2000 else full.strip()
         raise RuntimeError(f"yt-dlp video failed (rc={proc.returncode}): {msg}")
 
     if not out_path.exists():
