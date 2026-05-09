@@ -47,7 +47,9 @@ async def test_cobalt_happy_path_returns_transcript(monkeypatch):
                 json={"status": "tunnel", "url": "http://cobalt:9000/tunnel/xyz", "filename": "sample.mp3"},
             )
         if request.url.path.startswith("/tunnel/"):
-            return httpx.Response(200, content=b"\x00" * 32)
+            # 8 KB stub — must be >= _MIN_AUDIO_BYTES (4 KB) so the
+            # empty-audio guard in _download_audio doesn't trip on tests.
+            return httpx.Response(200, content=b"\x00" * 8192)
         return httpx.Response(404)
 
     monkeypatch.setattr(cobalt_ext, "_TEST_TRANSPORT", httpx.MockTransport(_handler), raising=False)
@@ -79,13 +81,39 @@ async def test_cobalt_redirect_status_treated_like_tunnel(monkeypatch):
                 200,
                 json={"status": "redirect", "url": "http://cdn.example.com/audio.m4a", "filename": "a.m4a"},
             )
-        return httpx.Response(200, content=b"\x00" * 16)
+        return httpx.Response(200, content=b"\x00" * 8192)
 
     monkeypatch.setattr(cobalt_ext, "_TEST_TRANSPORT", httpx.MockTransport(_handler), raising=False)
     monkeypatch.setattr(cobalt_ext, "_whisper_transcribe", AsyncMock(return_value="ok"))
 
     result = await cobalt_ext.extract("https://example.com/x", _platform())
     assert "ok" in result.body_md
+
+
+@pytest.mark.asyncio
+async def test_cobalt_empty_audio_raises_descriptive_error(monkeypatch):
+    """Phase 12.5 fix #8: cobalt occasionally returns HTTP 200 with an
+    empty / HTML body when the upstream YT fetch silently failed.
+    Whisper would then choke with cryptic "Invalid file format /
+    duration 0" — _download_audio now detects this and raises a clear
+    error pointing at the real cause."""
+    from src.pipeline.extractors import cobalt_ext
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST":
+            return httpx.Response(
+                200,
+                json={"status": "tunnel", "url": "http://cobalt:9000/tunnel/empty"},
+            )
+        # 200 OK but only 100 bytes (an HTML error page would be ~300,
+        # an empty body would be 0 — both are below the 4 KB threshold)
+        return httpx.Response(200, content=b"<html>not audio</html>" + b"\x00" * 50)
+
+    monkeypatch.setattr(cobalt_ext, "_TEST_TRANSPORT", httpx.MockTransport(_handler), raising=False)
+    monkeypatch.setattr(cobalt_ext, "_whisper_transcribe", AsyncMock(return_value="ok"))
+
+    with pytest.raises(RuntimeError, match="cobalt audio too small"):
+        await cobalt_ext.extract("https://example.com/x", _platform())
 
 
 @pytest.mark.asyncio

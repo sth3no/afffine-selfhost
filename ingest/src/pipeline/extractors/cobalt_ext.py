@@ -366,6 +366,7 @@ async def _download_audio(tunnel_url: str, workdir: Path) -> Path:
     # Filename extension matters: OpenAI's Whisper multipart upload sniffs
     # the MIME from the filename. Keep it in sync with audioFormat above.
     out_path = workdir / "audio.mp3"
+    byte_count = 0
     async with _client() as client:
         async with client.stream("GET", tunnel_url) as resp:
             if resp.status_code >= 400:
@@ -373,6 +374,27 @@ async def _download_audio(tunnel_url: str, workdir: Path) -> Path:
             with out_path.open("wb") as f:
                 async for chunk in resp.aiter_bytes():
                     f.write(chunk)
+                    byte_count += len(chunk)
+
+    # Cobalt's tunnel can return HTTP 200 with an empty / HTML body when
+    # the upstream YT fetch silently failed. Whisper then chokes with a
+    # cryptic "Invalid file format / duration 0" — detect here so the
+    # error message points at the real cause (and the orchestrator can
+    # gracefully fall back to oEmbed-only metadata).
+    # 4 KB is well below any real audio file (a 5-second mp3 is ~80 KB)
+    # and well above any plausible HTML error body (~300 bytes).
+    _MIN_AUDIO_BYTES = 4096
+    if byte_count < _MIN_AUDIO_BYTES:
+        raise RuntimeError(
+            f"cobalt audio too small: {byte_count} bytes — cobalt likely "
+            f"failed silently on the upstream YT fetch (audio body was "
+            f"empty or an error page). Expect oEmbed-only fallback."
+        )
+
+    log.info(
+        "cobalt audio downloaded",
+        extra={"byte_count": byte_count, "path": str(out_path)},
+    )
     return out_path
 
 
