@@ -143,7 +143,9 @@ async def test_transcript_api_passes_http_client_when_file_exists(tmp_path, monk
             "https://youtu.be/abcdefghijk",
         )
 
-    assert result == "hello"
+    # Output now has timestamp formatting (PR #42); just verify content + format.
+    assert "hello" in result
+    assert "[**0:00**]" in result
     # The kwarg is `http_client`, and it's a requests.Session whose
     # cookie jar contains the SID cookie loaded from the Netscape file.
     assert "http_client" in init_kwargs
