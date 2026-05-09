@@ -44,6 +44,17 @@ _STANDARD_RECORD_ATTRS = frozenset({
 })
 
 
+# Loggers we silence to WARNING. They're either too chatty or low-signal:
+#   - uvicorn.access: a GET /health line every 5s drowns out everything else
+#   - httpcore: low-level connection-pool plumbing
+#   - asyncpg.pool: connection acquire/release events
+_SILENCED_LOGGERS = (
+    "uvicorn.access",
+    "httpcore",
+    "asyncpg.pool",
+)
+
+
 class JsonFormatter(logging.Formatter):
     """Render LogRecord as a single JSON line with capture_id correlation."""
 
@@ -79,16 +90,49 @@ class JsonFormatter(logging.Formatter):
 
 
 def setup_logging(*, level: str | int = "INFO") -> None:
-    """Configure root logger to emit JSON lines on stdout. Idempotent."""
+    """Configure root logger to emit JSON lines on stdout.
+
+    Idempotent. The first call wins; subsequent calls bail. This guards
+    against accidental re-entry (e.g., uvicorn re-importing the app).
+
+    Aggressively strips handlers from EVERY existing logger and forces
+    propagation to root, so the only emit path is root's JsonFormatter
+    handler. Without this sweep, frameworks that pre-attach their own
+    StreamHandler (uvicorn especially) keep emitting through their
+    native format AND through our JSON, and at high concurrency the
+    bytes interleave on stdout — producing the mangled
+    `INFO INFO INFO ts=... logger=...` output that's been making
+    production logs unreadable.
+
+    Also silences a small set of chatty loggers (uvicorn.access for
+    health-check spam, httpcore, asyncpg.pool) to WARNING.
+    """
+    root = logging.getLogger()
+
+    # Idempotency: if our JsonFormatter is already on root, bail.
+    if any(isinstance(h.formatter, JsonFormatter) for h in root.handlers):
+        return
+
     handler = logging.StreamHandler(sys.stdout)
     handler.setFormatter(JsonFormatter())
 
-    root = logging.getLogger()
     root.setLevel(level)
-    # Drop any existing handlers (e.g., uvicorn's default) so we don't
-    # double-log.
     root.handlers[:] = [handler]
-    root.propagate = False
+
+    # Walk every existing logger, strip its handlers, force propagation
+    # to root. Snapshot the keys first because we mutate the registry.
+    for name in list(logging.Logger.manager.loggerDict.keys()):
+        existing = logging.Logger.manager.loggerDict.get(name)
+        if not isinstance(existing, logging.Logger):
+            # Skip PlaceHolder entries (lazy parent slots).
+            continue
+        existing.handlers[:] = []
+        existing.propagate = True
+
+    # Quiet the noise — these still go through root JSON, just at a higher
+    # threshold so the signal lines aren't drowned out.
+    for name in _SILENCED_LOGGERS:
+        logging.getLogger(name).setLevel(logging.WARNING)
 
 
 @contextlib.contextmanager
