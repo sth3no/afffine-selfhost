@@ -421,6 +421,48 @@ docker logs affine_cobalt 2>&1 | grep -iE 'cookies|\[!\]'
 # expect: [✓] cookies loaded successfully!
 ```
 
+### Residential proxy (the cloud-IP unlock)
+
+**Cookies + PO token + perfect config aren't enough on their own.**
+YouTube blocks most cloud / VPS IPs from generating PO tokens via
+BotGuard AND from fetching auto-captions via youtube-transcript-api,
+regardless of cookie quality. From a Hetzner / AWS / Google Cloud /
+DigitalOcean IP you'll see `error.api.youtube.login` from cobalt and
+`RequestBlocked` from transcript-api on niche / age-gated / tutorial
+content. Popular content (Rick Astley etc.) still works because YT
+treats it more leniently.
+
+The fix is a residential proxy. The stack is wired to use one
+transparently — drop the URL into `.env` and **all three YT-touching
+containers** route through it:
+
+```bash
+# In .env (or Portainer stack env):
+RESIDENTIAL_PROXY_URL=http://USER:PASS@gateway.smartproxy.com:7000
+```
+
+Then redeploy. `cobalt`, `yt_session_server` (Chromium for BotGuard)
+and `ingest` (transcript-api + yt-dlp) all pick up the `HTTP_PROXY` /
+`HTTPS_PROXY` env. Internal docker traffic stays direct via `NO_PROXY`.
+Anthropic / OpenAI API calls also stay direct (no point burning
+residential bandwidth on those).
+
+**Recommended providers for personal-scale use** (~$5–15/month):
+- **Webshare** — cheapest entry point, 10-IP rotating plan ~$3-5/mo
+- **Smartproxy** — better routing, higher reliability, ~$8-15/mo
+- **Bright Data** — enterprise, overkill for personal
+
+Sign up, generate a gateway URL, paste into `.env`, redeploy. After
+that, captures of any YT video should produce a real Whisper
+transcript instead of "Unavailable — YouTube blocked the audio
+download."
+
+**Verify the proxy is active:**
+```bash
+docker exec affine_cobalt env | grep -i proxy
+# expect: HTTP_PROXY=http://...   HTTPS_PROXY=http://...   NO_PROXY=...
+```
+
 **Cookie diagnostic** (names only, never values — safe to share for debugging):
 
 ```bash

@@ -235,6 +235,16 @@ services:
       # Without this, every YT request returns error.api.youtube.login
       # regardless of cookie quality.
       - YOUTUBE_SESSION_SERVER=http://yt_session_adapter:8080/
+      # Phase 12.5 fix #7: residential-proxy support for cobalt's outbound
+      # to YouTube. Set RESIDENTIAL_PROXY_URL in .env (e.g.
+      # http://user:pass@gw.smartproxy.com:7000) to route ALL of cobalt's
+      # YT requests through the proxy. Empty = direct connection (the
+      # cloud-IP path, which YT bot-walls for niche / age-gated content).
+      # NO_PROXY excludes internal docker hostnames so they don't get
+      # tunneled through the residential gateway.
+      - HTTP_PROXY=${RESIDENTIAL_PROXY_URL:-}
+      - HTTPS_PROXY=${RESIDENTIAL_PROXY_URL:-}
+      - NO_PROXY=cobalt,ingest,mcp_ext,mcp_agent,postgres,redis,yt_session_server,yt_session_adapter,localhost,127.0.0.1
     volumes:
       - yt_cookies:/cookies:ro
     depends_on:
@@ -268,6 +278,15 @@ services:
   yt_session_server:
     image: ghcr.io/imputnet/yt-session-generator:webserver
     container_name: affine_yt_session_server
+    environment:
+      # Phase 12.5 fix #7: same residential-proxy hook as cobalt. The
+      # BotGuard challenge that runs inside the headless Chromium here
+      # is what YT bot-walls hardest from cloud IPs. With a residential
+      # proxy URL, Chromium calls YT through the residential gateway
+      # and BotGuard completes → poToken is minted → cobalt has it.
+      - HTTP_PROXY=${RESIDENTIAL_PROXY_URL:-}
+      - HTTPS_PROXY=${RESIDENTIAL_PROXY_URL:-}
+      - NO_PROXY=cobalt,ingest,mcp_ext,mcp_agent,postgres,redis,yt_session_server,yt_session_adapter,localhost,127.0.0.1
     restart: unless-stopped
     networks:
       - affine_net
@@ -423,6 +442,15 @@ services:
       - MAX_TRANSCRIPT_MIN=${MAX_TRANSCRIPT_MIN:-30}
       - REORG_THRESHOLD_DEFAULT=${REORG_THRESHOLD_DEFAULT:-15}
       - TZ=${TZ:-UTC}
+      # Phase 12.5 fix #7: residential-proxy support for outbound calls
+      # to youtube-transcript-api + the yt-dlp metadata fetcher running
+      # inside this container. WITHOUT a proxy, transcript-api gets
+      # RequestBlocked from cloud IPs. NO_PROXY excludes the internal
+      # docker hostnames + Anthropic/OpenAI APIs (those should always
+      # go direct — proxying them via residential is wasteful).
+      - HTTP_PROXY=${RESIDENTIAL_PROXY_URL:-}
+      - HTTPS_PROXY=${RESIDENTIAL_PROXY_URL:-}
+      - NO_PROXY=cobalt,ingest,mcp_ext,mcp_agent,postgres,redis,yt_session_server,yt_session_adapter,localhost,127.0.0.1,api.anthropic.com,api.openai.com
     tmpfs:
       - /tmp/ingest:size=2g
     volumes:
