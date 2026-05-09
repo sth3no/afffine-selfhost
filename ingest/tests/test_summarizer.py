@@ -119,6 +119,52 @@ async def test_summarize_uses_prompt_caching():
 
 
 @pytest.mark.asyncio
+async def test_summarize_includes_video_summary_when_present():
+    """Phase 13: when extracted.extra['video_summary'] is set, the
+    summarizer's user message includes the vision-grounded summary as
+    extra context for title generation. Helps for visually-rich content
+    where the audio transcript alone is ambiguous."""
+    fake = MagicMock()
+    fake.parsed_output = SummaryResult(title="X", summary_md="Y")
+
+    with patch("src.pipeline.summarizer.AsyncAnthropic") as Client, \
+         patch("src.pipeline.summarizer.settings") as settings_mock:
+        settings_mock.anthropic_api_key = "sk-ant-test"
+        settings_mock.summarizer_model = "claude-haiku-4-5"
+        settings_mock.summarizer_max_body_chars = 4000
+        instance = Client.return_value
+        instance.messages.parse = AsyncMock(return_value=fake)
+        await summarize(_extracted(extra={
+            "video_summary": "A demo of streaming a video to Whisper.",
+        }))
+
+    call = instance.messages.parse.await_args
+    user_msg = call.kwargs["messages"][0]["content"]
+    assert "Vision-grounded summary" in user_msg
+    assert "streaming a video to Whisper" in user_msg
+
+
+@pytest.mark.asyncio
+async def test_summarize_omits_video_summary_block_when_absent():
+    """When extra={} (or no video_summary key), no grounded block in prompt."""
+    fake = MagicMock()
+    fake.parsed_output = SummaryResult(title="X", summary_md="Y")
+
+    with patch("src.pipeline.summarizer.AsyncAnthropic") as Client, \
+         patch("src.pipeline.summarizer.settings") as settings_mock:
+        settings_mock.anthropic_api_key = "sk-ant-test"
+        settings_mock.summarizer_model = "claude-haiku-4-5"
+        settings_mock.summarizer_max_body_chars = 4000
+        instance = Client.return_value
+        instance.messages.parse = AsyncMock(return_value=fake)
+        await summarize(_extracted())  # extra={} default
+
+    call = instance.messages.parse.await_args
+    user_msg = call.kwargs["messages"][0]["content"]
+    assert "Vision-grounded summary" not in user_msg
+
+
+@pytest.mark.asyncio
 async def test_summarize_truncates_long_body():
     """summarizer_max_body_chars caps the user message body excerpt."""
     fake = MagicMock()

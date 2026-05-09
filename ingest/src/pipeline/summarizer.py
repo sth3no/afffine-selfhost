@@ -83,11 +83,28 @@ async def summarize(extracted: Extracted) -> SummaryResult:
     client = AsyncAnthropic(api_key=settings.anthropic_api_key)
 
     body_excerpt = (extracted.body_md or "")[: settings.summarizer_max_body_chars]
+
+    # Phase 13 grounded summary — when video-frame analysis ran, we have
+    # a narrative summary grounded in transcript + keyframes. Including
+    # it here helps the summarizer pick a better title for visually-rich
+    # content (UI demos, tutorials with on-screen code, recipes, etc.)
+    # where the audio transcript alone is ambiguous. The orchestrator
+    # uses video_summary directly for the doc body when present, so
+    # we're only paying for one extra signal in the cheap title call.
+    video_summary = (extracted.extra or {}).get("video_summary")
+    grounded_block = (
+        f"\nVision-grounded summary (already produced from transcript + keyframes "
+        f"— use this as primary context for title generation):\n{video_summary}\n"
+        if video_summary
+        else ""
+    )
+
     user_msg = (
         f"Captured content metadata:\n"
         f"- Original title: {extracted.title or '(none)'}\n"
         f"- Author/channel: {extracted.author or '(unknown)'}\n"
         f"- Media kind: {extracted.media_kind.value}\n"
+        f"{grounded_block}"
         f"\n"
         f"Body excerpt (truncated to first {settings.summarizer_max_body_chars} chars):\n"
         f"\n"

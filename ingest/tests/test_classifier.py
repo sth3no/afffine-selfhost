@@ -58,6 +58,47 @@ def test_build_user_message_truncates_long_body():
     assert len(msg) < 15_000
 
 
+def test_build_user_message_includes_video_summary_when_present():
+    """Phase 13: when extracted.extra['video_summary'] is set (vision call
+    succeeded), the classifier prompt includes that grounded summary as a
+    stronger classification signal than raw transcript alone."""
+    extracted = Extracted(
+        title="Cooking video",
+        body_md="(short transcript)",
+        author="@chef",
+        published_at=None,
+        media_kind=MediaKind.VIDEO,
+        extra={
+            "video_summary": (
+                "A chef demonstrates a knife-skills tutorial focused on "
+                "julienne cuts of carrots and celery, with on-screen "
+                "annotations of grip and angle."
+            ),
+        },
+    )
+    msg = build_user_message(
+        extracted=extracted,
+        platform=_platform(),
+        sibling_topics=[],
+        topic_hints=[],
+    )
+    assert "Vision-grounded summary" in msg
+    assert "julienne cuts" in msg
+    assert "knife-skills tutorial" in msg
+
+
+def test_build_user_message_omits_video_summary_block_when_absent():
+    """Regression guard: extra={} (or no key) → no grounded block in prompt.
+    Backward-compatibility with the golden file + non-video extractors."""
+    msg = build_user_message(
+        extracted=_extracted(),  # extra={} by default
+        platform=_platform(),
+        sibling_topics=[],
+        topic_hints=[],
+    )
+    assert "Vision-grounded summary" not in msg
+
+
 def test_user_message_golden(tmp_path: Path):
     """Compare the assembled prompt against a checked-in golden file."""
     golden = (Path(__file__).parent / "fixtures" / "classifier_prompt_golden.txt").read_text(encoding="utf-8")

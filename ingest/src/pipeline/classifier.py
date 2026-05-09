@@ -68,6 +68,19 @@ def build_user_message(
     hints_block = ", ".join(topic_hints) if topic_hints else "(no hints configured)"
     body_excerpt = (extracted.body_md or "")[:8000]
 
+    # Phase 13 grounded summary — when the video-frame analysis ran (audio
+    # path succeeded → keyframes extracted → Sonnet 4.6 vision call), we
+    # have a narrative summary that's grounded in BOTH the transcript AND
+    # what's visible in the keyframes. For visual-heavy content (UI demos,
+    # tutorials with code on screen, recipes, charts) this is a stronger
+    # classification signal than the raw transcript alone.
+    video_summary = (extracted.extra or {}).get("video_summary")
+    grounded_block = (
+        f"\nVision-grounded summary (transcript + keyframes):\n{video_summary}\n"
+        if video_summary
+        else ""
+    )
+
     return (
         f"Platform: {platform.id} ({platform.group}/{platform.folder_name})\n"
         f"\n"
@@ -81,6 +94,7 @@ def build_user_message(
         f"- Title: {extracted.title or '(none)'}\n"
         f"- Author: {extracted.author or '(unknown)'}\n"
         f"- Media kind: {extracted.media_kind.value}\n"
+        f"{grounded_block}"
         f"\n"
         f"Body (truncated to first 8000 chars):\n"
         f"\n"
