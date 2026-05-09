@@ -35,6 +35,47 @@ def test_markdown_to_blocks_splits_h2_heading():
     ]
 
 
+def test_markdown_to_blocks_parses_inline_link_to_inline_ops():
+    """Phase 12.5 fix #10: paragraph text containing `[label](url)` markdown
+    must be emitted as InlineOp[] with a `link` attribute, otherwise AFFiNE
+    renders the literal `[label](url)` syntax (which is what was happening
+    in the user's transcript timestamp output)."""
+    md = "[**0:42**](https://youtube.com/watch?v=abc&t=42s) Hello world."
+    blocks = _markdown_to_blocks(md)
+    assert len(blocks) == 1
+    block = blocks[0]
+    assert block["type"] == "paragraph"
+    assert block["style"] == "text"
+    # Text is now InlineOp list, not a plain string
+    text = block["text"]
+    assert isinstance(text, list)
+    assert text[0] == {
+        "text": "0:42",
+        "link": "https://youtube.com/watch?v=abc&t=42s",
+        "bold": True,
+    }
+    assert text[1]["text"] == " Hello world."
+
+
+def test_markdown_to_blocks_plain_text_unchanged():
+    """No inline links → fast path keeps plain string (no parser overhead)."""
+    md = "Just a plain paragraph with no links."
+    blocks = _markdown_to_blocks(md)
+    assert blocks[0]["text"] == "Just a plain paragraph with no links."
+
+
+def test_markdown_to_blocks_multiple_inline_links():
+    """Multiple links in one paragraph all get converted."""
+    md = "First [foo](https://foo.com) middle [bar](https://bar.com) end."
+    blocks = _markdown_to_blocks(md)
+    text = blocks[0]["text"]
+    assert isinstance(text, list)
+    # Sequence: "First " + foo-link + " middle " + bar-link + " end."
+    assert any(op.get("link") == "https://foo.com" for op in text)
+    assert any(op.get("link") == "https://bar.com" for op in text)
+    assert text[0]["text"] == "First "
+
+
 def test_markdown_to_blocks_handles_h1_to_h6():
     md = "# H1\n\n## H2\n\n### H3\n\n#### H4\n\n##### H5\n\n###### H6"
     blocks = _markdown_to_blocks(md)

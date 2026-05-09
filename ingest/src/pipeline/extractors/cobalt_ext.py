@@ -208,19 +208,46 @@ async def _maybe_run_video_analysis(
     """Best-effort video download + scene-detect + vision call.
 
     Returns (video_summary, keyframes). Both empty on disable / failure.
+
+    This function is heavily logged at each stage so when keyframes don't
+    appear in the doc, the operator can grep for `video_analysis:` and
+    immediately see WHICH stage failed (download / scenedetect / vision /
+    blob upload).
     """
     if not settings.video_analysis_enabled:
+        log.info("video_analysis: skipped — VIDEO_ANALYSIS_ENABLED=false")
         return None, []
     if mcp_client is None or capture_id is None:
-        # No way to upload blobs — skip silently. (Tests that just want
-        # audio path don't need this.)
+        log.info(
+            "video_analysis: skipped — caller missing mcp_client/capture_id "
+            "(legacy test path or shared_text capture)",
+        )
         return None, []
+
+    log.info("video_analysis: starting", extra={"url": url})
 
     try:
         from src.pipeline.extractors._video_download import download_video
         from src.pipeline.video_analysis import analyze_video
 
-        video_path = await download_video(url, workdir)
+        try:
+            video_path = await download_video(url, workdir)
+        except Exception as e:  # noqa: BLE001
+            log.warning(
+                "video_analysis: video DOWNLOAD failed (cobalt video tunnel) — %s: %s",
+                type(e).__name__, e,
+            )
+            return None, []
+
+        try:
+            video_size = video_path.stat().st_size
+        except OSError:
+            video_size = -1
+        log.info(
+            "video_analysis: video downloaded",
+            extra={"path": str(video_path), "byte_count": video_size},
+        )
+
         summary, keyframes = await analyze_video(
             video_path=video_path,
             workdir=workdir,
@@ -229,12 +256,22 @@ async def _maybe_run_video_analysis(
             mcp_client=mcp_client,
         )
         log.info(
-            "video_analysis: ok summary=%s keyframes=%d",
-            summary is not None, len(keyframes),
+            "video_analysis: complete",
+            extra={
+                "summary_chars": len(summary) if summary else 0,
+                "keyframe_count": len(keyframes),
+                "summary_present": summary is not None,
+            },
         )
+        if summary is None and not keyframes:
+            log.warning(
+                "video_analysis: produced NEITHER summary nor keyframes — "
+                "check vision call + blob upload logs above",
+            )
         return summary, keyframes
     except Exception as e:  # noqa: BLE001 — by design
-        log.warning("video_analysis skipped: %s", e)
+        log.warning("video_analysis: unexpected top-level error: %s: %s",
+                    type(e).__name__, e)
         return None, []
 
 
