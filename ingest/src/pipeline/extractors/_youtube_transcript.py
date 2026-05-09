@@ -66,28 +66,100 @@ async def fetch_youtube_transcript(
     *,
     languages: Sequence[str] = ("en", "cs"),
 ) -> str | None:
-    """Return joined transcript text for the given URL, or None on any failure.
+    """Return formatted transcript markdown for the given URL, or None.
 
-    The youtube-transcript-api lib is synchronous; we run it in a thread to
-    keep the worker's event loop responsive (transcript fetches are network
-    I/O on YouTube's caption CDN, typically 1-3s).
+    Output format: ~30-second paragraphs prefixed with a clickable
+    `[**0:42**](url&t=42s)` markdown link that jumps to that moment in
+    the YT video. Each paragraph in the doc body is independently
+    navigable — no more "one wall of text".
+
+    The youtube-transcript-api lib is synchronous; we run it in a thread
+    to keep the worker's event loop responsive (transcript fetches are
+    network I/O on YouTube's caption CDN, typically 1-3s).
     """
     video_id = extract_video_id(url)
     if not video_id:
         log.warning("youtube_transcript: no video id in URL %s", url)
         return None
 
-    return await asyncio.to_thread(_fetch_sync, video_id, tuple(languages))
+    return await asyncio.to_thread(_fetch_sync, video_id, tuple(languages), url)
 
 
-def _fetch_sync(video_id: str, languages: tuple[str, ...]) -> str | None:
+def _format_timestamp(seconds: float) -> str:
+    """Format seconds as `H:MM:SS` (only includes H when >= 1 hour)."""
+    s = int(seconds)
+    h, rem = divmod(s, 3600)
+    m, sec = divmod(rem, 60)
+    if h:
+        return f"{h}:{m:02d}:{sec:02d}"
+    return f"{m}:{sec:02d}"
+
+
+def _format_transcript_with_timestamps(
+    snippets,
+    *,
+    video_url: str,
+    chunk_seconds: int = 30,
+) -> str:
+    """Group consecutive caption snippets into ~chunk_seconds paragraphs.
+
+    Each paragraph starts with a clickable timestamp link in the form
+    `[**0:42**](https://youtube.com/watch?v=ABC&t=42s)` followed by the
+    consolidated text for that chunk. Markdown blank-line separated so
+    the orchestrator's parser emits one block per chunk.
+    """
+    chunks: list[tuple[float, list[str]]] = []  # (start_seconds, [text, ...])
+    current_start: float | None = None
+
+    for snip in snippets:
+        text = (getattr(snip, "text", "") or "").strip()
+        if not text:
+            continue
+        start = float(getattr(snip, "start", 0.0) or 0.0)
+        if current_start is None:
+            current_start = start
+            chunks.append((current_start, [text]))
+            continue
+        # Same chunk if within window AND latest chunk exists.
+        if start - current_start < chunk_seconds and chunks:
+            chunks[-1][1].append(text)
+        else:
+            current_start = start
+            chunks.append((current_start, [text]))
+
+    if not chunks:
+        return ""
+
+    # Build a clean YT URL with no trailing query state for the &t= link.
+    base = video_url.split("&t=")[0].split("#")[0]
+    sep = "&" if "?" in base else "?"
+
+    parts: list[str] = []
+    for start, lines in chunks:
+        # Dedupe consecutive duplicates inside the chunk (auto-captions
+        # often repeat the previous line on overlap).
+        deduped: list[str] = []
+        for line in lines:
+            if not deduped or deduped[-1] != line:
+                deduped.append(line)
+        text = " ".join(deduped)
+        ts = _format_timestamp(start)
+        link = f"[**{ts}**]({base}{sep}t={int(start)}s)"
+        parts.append(f"{link} {text}")
+
+    return "\n\n".join(parts)
+
+
+def _fetch_sync(video_id: str, languages: tuple[str, ...], video_url: str) -> str | None:
     """Synchronous fetch + format. Errors → None.
 
-    Phase 12: when a YouTube cookies file is present, load it into a
-    requests.Session via MozillaCookieJar and pass as `http_client=`.
-    youtube-transcript-api 1.x doesn't take a cookie file path directly
-    (its __init__ only accepts `proxy_config` and `http_client`) — the
-    earlier `cookie_path=` kwarg crashed at runtime.
+    Phase 12: cookies loaded into a requests.Session via MozillaCookieJar
+    and passed as `http_client=` (youtube-transcript-api 1.x __init__
+    only accepts `proxy_config` and `http_client`).
+
+    Output is markdown with `[**mm:ss**](url&t=Ns)` clickable timestamp
+    links per ~30-second paragraph — every paragraph jumps to that
+    moment in the source video.
     """
     try:
         from youtube_transcript_api import (
@@ -125,19 +197,14 @@ def _fetch_sync(video_id: str, languages: tuple[str, ...]) -> str | None:
         log.warning("youtube_transcript: unexpected error for %s: %s", video_id, e)
         return None
 
-    # transcript is iterable of FetchedTranscriptSnippet objects with .text.
-    parts: list[str] = []
-    for snippet in transcript:
-        text = (getattr(snippet, "text", "") or "").strip()
-        if text:
-            parts.append(text)
-
-    if not parts:
+    # transcript is iterable of FetchedTranscriptSnippet objects with .text + .start.
+    snippets = list(transcript)
+    if not snippets:
         return None
 
-    # Dedupe consecutive duplicates (auto-captions repeat lines on overlap).
-    deduped: list[str] = []
-    for line in parts:
-        if not deduped or deduped[-1] != line:
-            deduped.append(line)
-    return "\n".join(deduped)
+    formatted = _format_transcript_with_timestamps(
+        snippets,
+        video_url=video_url,
+        chunk_seconds=30,
+    )
+    return formatted or None

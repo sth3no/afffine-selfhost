@@ -59,12 +59,13 @@ def _fake_transcript(snippets: list[tuple[str, float]]) -> list[_FakeSnippet]:
 
 
 @pytest.mark.asyncio
-async def test_fetch_returns_joined_text_on_success():
-    """Mock the API to return three snippets — they should be joined with newlines."""
+async def test_fetch_returns_chunked_paragraphs_with_clickable_timestamps():
+    """Output is one paragraph per ~30s chunk, each prefixed with a
+    clickable [**mm:ss**](url&t=Ns) markdown link."""
     fake_data = _fake_transcript([
         ("Hello world", 0.0),
         ("This is a test", 1.5),
-        ("Final line", 3.0),
+        ("Final line at 3s", 3.0),
     ])
 
     class _FakeApi:
@@ -74,12 +75,44 @@ async def test_fetch_returns_joined_text_on_success():
     with patch("youtube_transcript_api.YouTubeTranscriptApi", _FakeApi):
         result = await fetch_youtube_transcript("https://youtu.be/abcdefghijk")
 
-    assert result == "Hello world\nThis is a test\nFinal line"
+    # All three snippets are within the 30s chunk window → one paragraph
+    assert result is not None
+    assert "[**0:00**](https://youtu.be/abcdefghijk?t=0s)" in result
+    assert "Hello world" in result
+    assert "This is a test" in result
+    assert "Final line at 3s" in result
+
+
+@pytest.mark.asyncio
+async def test_fetch_groups_into_30_second_chunks():
+    """Snippets spanning > 30s should produce multiple paragraphs with
+    independent timestamp links."""
+    fake_data = _fake_transcript([
+        ("Intro at 0s", 0.0),
+        ("Still intro at 25s", 25.0),
+        ("New chunk at 35s", 35.0),
+        ("Continuing at 50s", 50.0),
+        ("Far later at 90s", 90.0),
+    ])
+
+    class _FakeApi:
+        def fetch(self, video_id, languages=None):
+            return fake_data
+
+    with patch("youtube_transcript_api.YouTubeTranscriptApi", _FakeApi):
+        result = await fetch_youtube_transcript("https://youtu.be/abcdefghijk")
+
+    # Three chunks: [0-25s], [35-50s], [90s]
+    assert "[**0:00**](https://youtu.be/abcdefghijk?t=0s)" in result
+    assert "[**0:35**](https://youtu.be/abcdefghijk?t=35s)" in result
+    assert "[**1:30**](https://youtu.be/abcdefghijk?t=90s)" in result
+    # Paragraphs separated by blank line
+    assert "\n\n" in result
 
 
 @pytest.mark.asyncio
 async def test_fetch_dedupes_consecutive_duplicates():
-    """Auto-captions repeat lines on overlap — collapse them."""
+    """Auto-captions repeat lines on overlap — collapse them within a chunk."""
     fake_data = _fake_transcript([
         ("first", 0.0),
         ("first", 1.0),  # duplicate of previous
@@ -95,7 +128,12 @@ async def test_fetch_dedupes_consecutive_duplicates():
     with patch("youtube_transcript_api.YouTubeTranscriptApi", _FakeApi):
         result = await fetch_youtube_transcript("https://youtu.be/abcdefghijk")
 
-    assert result == "first\nsecond\nthird"
+    # All within first 30s chunk → one paragraph, dedupe applied within
+    assert result is not None
+    # Each unique word appears exactly once
+    assert result.count("first") == 1
+    assert result.count("second") == 1
+    assert result.count("third") == 1
 
 
 @pytest.mark.asyncio

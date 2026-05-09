@@ -38,8 +38,8 @@ class Settings(BaseSettings):
     video_analysis_enabled: bool = True
     vision_model: str = "claude-sonnet-4-6"
     cobalt_video_max_size_mb: int = 200
-    max_frames_per_video: int = 8
-    max_keyframes_in_doc: int = 4
+    max_frames_per_video: int = 12
+    max_keyframes_in_doc: int = 6
     keyframe_importance_threshold: int = 4
     frame_long_edge_px: int = 1024
     scenedetect_threshold: float = 27.0
