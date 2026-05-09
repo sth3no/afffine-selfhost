@@ -373,36 +373,44 @@ extractor clients (`web_embedded`, `tv_simply`) that don't require PO
 tokens. With both in place, cookies + PO token + a logged-in YT
 account is the working combination.
 
-**Cobalt's startup race — must be handled on first deploy:**
+**Cobalt's startup race — handled automatically by `cobalt_watchdog`:**
 
-Cobalt reads `/cookies/cobalt.json` exactly ONCE at startup, and fetches
-the PO token from `yt_session_server` exactly ONCE at startup. Neither
-reloads. On a fresh stack deploy:
+Cobalt reads `/cookies/cobalt.json` exactly ONCE at startup, and
+fetches the PO token from `yt_session_server` exactly ONCE at startup.
+Neither reloads. On a fresh stack deploy the cookies file doesn't
+exist yet (the extension syncs AFTER the stack is up), so cobalt's
+first boot is always cookieless.
 
-1. Cobalt boots → `cookies.json` doesn't exist yet (tmpfs is empty,
-   extension hasn't synced) → cobalt logs `[!] failed to load cookies.`
-2. Extension syncs → `cobalt.json` is written.
-3. Cobalt **does not** notice. It runs forever with empty cookies.
+The `cobalt_watchdog` sidecar service handles this: it polls the
+shared volume every 10s, and the first time it sees a valid
+`cobalt.json` (file present + non-empty + contains `"youtube"`), it
+runs `docker restart affine_cobalt` exactly once. The restarted cobalt
+loads both cookies and poToken cleanly.
 
-**The first-deploy ritual:**
+**On a fresh deploy you only have to:**
 
-```bash
-# 1. Stack up + healthy
-# 2. Click "Sync now" in the extension popup — verify byte_count in ingest logs
-# 3. Manually restart cobalt so it re-reads cookies + re-fetches poToken
-docker restart affine_cobalt
-# 4. Confirm:
-docker logs affine_cobalt 2>&1 | tail -20 | grep -iE 'cookies|poToken|visitor'
-# expect: [✓] cookies loaded successfully!
-#         [✓] loaded poToken successfully (or similar)
-```
+1. Wait for the stack to come up healthy.
+2. Click **Sync now** in the extension popup.
+3. Within ~10 seconds, watchdog restarts cobalt automatically. Confirm:
+   ```bash
+   docker logs affine_cobalt_watchdog 2>&1 | tail -5
+   # expect: [watchdog] cobalt.json valid; restarting affine_cobalt
+
+   docker logs affine_cobalt 2>&1 | tail -20 | grep -iE 'cookies|poToken|visitor'
+   # expect: [✓] cookies loaded successfully!
+   #         (and a successful poToken fetch — exact wording varies)
+   ```
 
 After that, cobalt's in-memory cookie state self-rotates as YouTube
-sends `Set-Cookie` headers — no more restarts needed until the stack
-itself is recreated.
+sends `Set-Cookie` headers — no more restarts. The watchdog stays
+running and only restarts cobalt again if the cookies file goes
+missing then comes back (e.g. another full stack recreate).
 
-If you see `[!] failed to load cookies` AFTER the manual restart, the
-JSON format is wrong — check the diagnostic endpoint below.
+**Security note:** the watchdog mounts `/var/run/docker.sock`. That's
+root-equivalent access on the host. Acceptable for a single-user
+self-hosted stack — the stack already holds your YT auth — but
+something to be aware of if you ever expose this stack to other
+users.
 
 **Quick verification:**
 
