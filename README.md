@@ -438,7 +438,7 @@ proxy; when empty, current direct-connection behavior is preserved.
 
 Two ways to provide that residential proxy:
 
-#### Option A: Self-hosted via Raspberry Pi at home (recommended)
+#### Option A: Self-hosted via home machine (recommended)
 
 A spare Pi (3B+, 4, or 5 — anything with ethernet) running on your
 home internet, joined to the same Tailscale network as your VPS.
@@ -446,16 +446,27 @@ Phase 13 video downloads can saturate ~750 GB/month — at $4-15/GB
 on commercial residential proxies that's $200-1500/mo, while a Pi
 costs $0 in bandwidth (it's your home plan) and $2/year in power.
 
-**One-time setup on the Pi:**
+Two host paths, same architecture:
+
+- **Raspberry Pi (production-grade always-on)** — see
+  [docs/setup/raspberry-pi-5-spec.md](docs/setup/raspberry-pi-5-spec.md)
+  for shopping list and full setup walkthrough.
+- **Windows 11 PC via WSL2 (instant testing path)** — see
+  [docs/setup/windows-residential-tunnel.md](docs/setup/windows-residential-tunnel.md).
+  Same script runs unchanged inside WSL2 Ubuntu. Caveat: tunnel
+  drops when the PC sleeps; great for testing, not for 24/7.
+
+**Quick path on a Linux box (Pi or any other always-on Linux machine):**
+
 ```bash
 sudo bash scripts/pi-residential-tunnel-setup.sh
 ```
 Installs Tailscale + gost (HTTP proxy on :8118), runs both as
 systemd services. You'll authenticate Tailscale once via a browser
-URL the script prints. The script reports the Pi's Tailscale IP
+URL the script prints. The script reports the host's Tailscale IP
 when done.
 
-**One-time setup on the VPS:**
+**On the VPS:**
 ```bash
 curl -fsSL https://tailscale.com/install.sh | sudo sh
 sudo tailscale up --hostname=affine-vps
@@ -464,7 +475,7 @@ Same Tailscale account → both machines on the same private network.
 
 **Then in your stack `.env`:**
 ```bash
-RESIDENTIAL_PROXY_URL=http://<pi-tailscale-ip>:8118
+RESIDENTIAL_PROXY_URL=http://<host-tailscale-ip>:8118
 ```
 Redeploy. All YT traffic now egresses via your home internet,
 making it indistinguishable from a real user watching from a phone.
