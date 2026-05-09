@@ -364,6 +364,32 @@ YouTube cookies via the [Affine YT Cookie Sync](browser-extension/) MV3
 extension. Install once, configure ingest URL + token, and the extension
 auto-syncs on every YT cookie change.
 
+**Important:** Cookies alone are NOT enough on cloud / VPS IPs since
+late 2024 — YouTube enforces a Proof-of-Origin (PO) token on most
+clients. The stack ships a `yt_session_server` sidecar
+([yt-session-generator](https://github.com/imputnet/yt-session-generator))
+that mints PO tokens via BotGuard for cobalt; yt-dlp uses bot-resistant
+extractor clients (`web_embedded`, `tv_simply`) that don't require PO
+tokens. With both in place, cookies + PO token + a logged-in YT
+account is the working combination.
+
+**Verify cobalt actually loaded the cookies** (not just that the file
+exists on disk):
+
+```bash
+docker logs affine_cobalt 2>&1 | grep -iE 'cookies|\[!\]'
+# expect: [✓] cookies loaded successfully!
+# if you see [!] failed to load cookies — JSON format mismatch, check the diagnostic
+```
+
+**Cookie diagnostic** (names only, never values — safe to share for debugging):
+
+```bash
+curl -H "Authorization: Bearer $INGEST_API_TOKEN" \
+  "$INGEST_BASE/youtube/cookies/diagnostic" | jq .
+```
+Look for `__Secure-3PSID`, `SID`, `LOGIN_INFO` in the cookie names list — those are the auth tokens cobalt + yt-dlp need.
+
 **Verify server-side freshness** (added in 12.5):
 
 ```bash

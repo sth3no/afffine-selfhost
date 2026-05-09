@@ -44,6 +44,67 @@ async def test_ytdlp_metadata_passes_cookies_when_file_exists(tmp_path, monkeypa
 
 
 @pytest.mark.asyncio
+async def test_ytdlp_metadata_passes_player_client_for_youtube_urls(tmp_path, monkeypatch):
+    """For YT URLs, --extractor-args youtube:player_client=web_embedded,tv_simply
+    must be included so yt-dlp uses bot-resistant clients that don't need
+    a PO token."""
+    from src.pipeline.extractors import _ytdlp_metadata
+
+    from src.config import settings
+    monkeypatch.setattr(settings, "youtube_cookies_path", str(tmp_path / "missing.txt"))
+
+    captured_args: list[str] = []
+
+    async def _fake_subprocess_exec(*args, **kwargs):
+        captured_args.extend(args)
+        proc = MagicMock()
+        proc.communicate = AsyncMock(return_value=(b"", b""))
+        proc.returncode = 1
+        return proc
+
+    monkeypatch.setattr(
+        _ytdlp_metadata.asyncio,
+        "create_subprocess_exec",
+        _fake_subprocess_exec,
+    )
+
+    await _ytdlp_metadata.fetch_metadata("https://youtube.com/watch?v=abc")
+
+    assert "--extractor-args" in captured_args
+    args_idx = captured_args.index("--extractor-args")
+    assert "player_client=web_embedded" in captured_args[args_idx + 1]
+    assert "tv_simply" in captured_args[args_idx + 1]
+
+
+@pytest.mark.asyncio
+async def test_ytdlp_metadata_omits_player_client_for_non_youtube(tmp_path, monkeypatch):
+    """The --extractor-args flag is YT-specific; non-YT URLs must not get it."""
+    from src.pipeline.extractors import _ytdlp_metadata
+
+    from src.config import settings
+    monkeypatch.setattr(settings, "youtube_cookies_path", str(tmp_path / "missing.txt"))
+
+    captured_args: list[str] = []
+
+    async def _fake_subprocess_exec(*args, **kwargs):
+        captured_args.extend(args)
+        proc = MagicMock()
+        proc.communicate = AsyncMock(return_value=(b"", b""))
+        proc.returncode = 1
+        return proc
+
+    monkeypatch.setattr(
+        _ytdlp_metadata.asyncio,
+        "create_subprocess_exec",
+        _fake_subprocess_exec,
+    )
+
+    await _ytdlp_metadata.fetch_metadata("https://vimeo.com/123456")
+
+    assert "--extractor-args" not in captured_args
+
+
+@pytest.mark.asyncio
 async def test_ytdlp_metadata_omits_cookies_when_file_missing(tmp_path, monkeypatch):
     """When no cookies file exists, --cookies must NOT be passed (yt-dlp
     errors on a missing path)."""

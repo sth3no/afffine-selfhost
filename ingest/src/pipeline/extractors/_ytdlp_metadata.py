@@ -50,6 +50,19 @@ async def fetch_metadata(url: str) -> dict | None:
         if cookie_file_exists(settings.youtube_cookies_path):
             ytdlp_args += ["--cookies", settings.youtube_cookies_path]
 
+        # Phase 12.5 fix #4: since late 2024 YT enforces a Proof-of-Origin
+        # token on most player clients. The `web_embedded` client is
+        # exempted (per yt-dlp wiki + issue #12561) and `tv_simply` is
+        # the most bot-resistant alternative. Combined with cookies this
+        # clears the bot wall on cloud IPs without us running a separate
+        # PO-token provider for yt-dlp.
+        # Reference: https://github.com/yt-dlp/yt-dlp/wiki/PO-Token-Guide
+        if "youtube.com" in url or "youtu.be" in url:
+            ytdlp_args += [
+                "--extractor-args",
+                "youtube:player_client=web_embedded,tv_simply",
+            ]
+
         ytdlp_args += [
             "-o", str(workdir / "video.%(ext)s"),
             url,
