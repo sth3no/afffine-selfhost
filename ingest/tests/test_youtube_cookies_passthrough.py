@@ -155,6 +155,41 @@ async def test_transcript_api_passes_http_client_when_file_exists(tmp_path, monk
 
 
 @pytest.mark.asyncio
+async def test_transcript_api_session_has_proxy_when_env_set(tmp_path, monkeypatch):
+    """When HTTP_PROXY env is set (residential proxy active), the
+    Session passed to transcript-api must have session.proxies populated.
+    Otherwise transcript-api would auto-detect via trust_env, which is
+    unreliable when session.cookies is replaced."""
+    import requests
+
+    from src.pipeline.extractors import _youtube_transcript
+
+    monkeypatch.setenv("HTTP_PROXY", "http://user:pass@proxy.test:8080")
+    monkeypatch.setenv("HTTPS_PROXY", "http://user:pass@proxy.test:8080")
+
+    init_kwargs: dict = {}
+
+    class _FakeApi:
+        def __init__(self, **kwargs):
+            init_kwargs.update(kwargs)
+
+        def fetch(self, video_id, languages=None):
+            class _Snip:
+                text = "hi"
+                start = 0.0
+            return [_Snip()]
+
+    with patch("youtube_transcript_api.YouTubeTranscriptApi", _FakeApi):
+        await _youtube_transcript.fetch_youtube_transcript("https://youtu.be/abcdefghijk")
+
+    assert "http_client" in init_kwargs
+    session = init_kwargs["http_client"]
+    assert isinstance(session, requests.Session)
+    assert session.proxies.get("http") == "http://user:pass@proxy.test:8080"
+    assert session.proxies.get("https") == "http://user:pass@proxy.test:8080"
+
+
+@pytest.mark.asyncio
 async def test_transcript_api_omits_http_client_when_file_missing(tmp_path, monkeypatch):
     from src.pipeline.extractors import _youtube_transcript
 
