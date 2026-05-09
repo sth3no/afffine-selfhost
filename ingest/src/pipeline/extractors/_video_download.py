@@ -1,132 +1,101 @@
-"""Cobalt video download (vs. audio-only).
+"""yt-dlp video download (Phase 13 first stage).
 
-Mirrors `cobalt_ext._download_audio` but asks cobalt for the merged
-video+audio stream at 720p (sweet spot — high enough for keyframe
-analysis, low enough to keep tmpfs usage predictable). Used by Phase 13
-video_analysis.py to feed PySceneDetect + Claude vision.
+Replaces the previous cobalt-based path. yt-dlp uses:
+  - Cookies from settings.youtube_cookies_path (when present).
+  - HTTP_PROXY/HTTPS_PROXY env vars (residential tunnel) — inherited
+    by the subprocess automatically.
+  - bgutil-ytdlp-pot-provider script mode for poToken generation. The
+    plugin's BgUtils-based JS server lives at /opt/bgutil-pot/server
+    (set up in the Dockerfile). Pure-Node — no Chromium, no proxy
+    fragility, unlike the previous yt_session_server sidecar.
 
-Returns the path to the downloaded mp4. Raises RuntimeError on cobalt
-failure or when the file would exceed `cobalt_video_max_size_mb`.
-Caller is responsible for cleanup (typically via the same workdir as
-audio download).
+Returns the path to the downloaded mp4 (`workdir/video.mp4`). Raises
+RuntimeError on yt-dlp failure or empty output. Caller (cobalt_ext's
+_maybe_run_video_analysis) is responsible for cleanup.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import os
 from pathlib import Path
 
-import httpx
-
 from src.config import settings
+from src.youtube_cookies import cookie_file_exists
 
 log = logging.getLogger(__name__)
 
 
-# Tests inject a MockTransport. Production leaves None (default httpx).
-_TEST_TRANSPORT: httpx.AsyncBaseTransport | None = None
-
-_COBALT_TIMEOUT = httpx.Timeout(connect=5.0, read=300.0, write=10.0, pool=5.0)
+_DOWNLOAD_TIMEOUT_SECONDS = 300.0
+_MIN_VIDEO_BYTES = 64 * 1024
+_BGUTIL_SERVER_HOME = "/opt/bgutil-pot/server"
 
 
 async def download_video(url: str, workdir: Path) -> Path:
-    """Download merged video+audio mp4 to `workdir/video.mp4`.
+    """Download a 720p mp4 to `workdir/video.mp4` via yt-dlp.
 
-    Mirrors `cobalt_ext._download_audio`'s empty-body guard: cobalt's
-    video tunnel can return HTTP 200 with an empty / HTML body when its
-    upstream YT fetch silently failed (typically: no poToken, stale
-    cookies, or YT serving a format URL that 403s). A 0-byte file
-    crashes PySceneDetect's OpenCV-based reader with a useless message
-    ("Failed to open video"); we raise a descriptive RuntimeError
-    pointing at the real cause instead.
+    yt-dlp picks the best video+audio under 720p and merges them. The
+    cap matches what we used for the cobalt path — high enough for
+    keyframe analysis, low enough to keep tmpfs usage predictable.
     """
-    tunnel_url = await _request_video_tunnel(url)
     out_path = workdir / "video.mp4"
-    max_bytes = settings.cobalt_video_max_size_mb * 1024 * 1024
-    total = 0
-    async with _client() as client:
-        async with client.stream("GET", tunnel_url) as resp:
-            if resp.status_code >= 400:
-                raise RuntimeError(f"cobalt video download: status={resp.status_code}")
-            with out_path.open("wb") as f:
-                async for chunk in resp.aiter_bytes():
-                    total += len(chunk)
-                    if total > max_bytes:
-                        f.close()
-                        out_path.unlink(missing_ok=True)
-                        raise RuntimeError(
-                            f"cobalt video download exceeded "
-                            f"{settings.cobalt_video_max_size_mb} MB cap",
-                        )
-                    f.write(chunk)
+    workdir.mkdir(parents=True, exist_ok=True)
 
-    # Empty-body guard. A real video at 720p is at minimum a few hundred
-    # KB even for a 10-second clip; 64 KB is well below any plausible
-    # video and well above any HTML error body.
-    _MIN_VIDEO_BYTES = 64 * 1024
-    if total < _MIN_VIDEO_BYTES:
+    ytdlp_args: list[str] = [
+        "yt-dlp",
+        "--no-warnings",
+        "--quiet",
+        "-f", "bestvideo[height<=720]+bestaudio/best[height<=720]",
+        "--merge-output-format", "mp4",
+        "--extractor-args",
+        f"youtubepot-bgutilscript:server_home={_BGUTIL_SERVER_HOME}",
+    ]
+    if cookie_file_exists(settings.youtube_cookies_path):
+        ytdlp_args += ["--cookies", settings.youtube_cookies_path]
+
+    ytdlp_args += ["-o", str(out_path), url]
+
+    proc = await asyncio.create_subprocess_exec(
+        *ytdlp_args,
+        cwd=str(workdir),
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        env=os.environ.copy(),
+    )
+    try:
+        _, stderr = await asyncio.wait_for(
+            proc.communicate(),
+            timeout=_DOWNLOAD_TIMEOUT_SECONDS,
+        )
+    except asyncio.TimeoutError:
+        proc.kill()
+        raise RuntimeError(
+            f"yt-dlp video timed out after {_DOWNLOAD_TIMEOUT_SECONDS}s"
+        ) from None
+
+    if proc.returncode != 0:
+        msg = stderr.decode(errors="replace")[:500].strip()
+        raise RuntimeError(f"yt-dlp video failed (rc={proc.returncode}): {msg}")
+
+    if not out_path.exists():
+        raise RuntimeError(
+            "yt-dlp video succeeded (rc=0) but no output file at "
+            f"{out_path} — check yt-dlp output template / permissions"
+        )
+
+    size = out_path.stat().st_size
+    if size < _MIN_VIDEO_BYTES:
         out_path.unlink(missing_ok=True)
         raise RuntimeError(
-            f"cobalt video too small: {total} bytes — cobalt's tunnel "
-            f"returned an empty / error body. Most common cause: cobalt "
-            f"is missing a working poToken from yt_session_server (check "
-            f"`docker logs affine_cobalt | grep -i potoken` for "
-            f"`[✓] loaded poToken` vs `[!] Failed loading poToken`). "
-            f"Phase 13 keyframes will be empty until cobalt's video fetch "
-            f"actually succeeds."
+            f"yt-dlp video too small: {size} bytes — most likely the "
+            f"poToken provider failed (check bgutil-pot logs) or the "
+            f"video has restrictions cookies don't unlock. Phase 13 "
+            f"keyframes will be empty."
         )
 
     log.info(
-        "cobalt video downloaded",
-        extra={"byte_count": total, "path": str(out_path)},
+        "yt-dlp video downloaded",
+        extra={"byte_count": size, "path": str(out_path)},
     )
     return out_path
-
-
-async def _request_video_tunnel(url: str) -> str:
-    """POST to cobalt for a video tunnel URL. 720p is the sweet spot."""
-    payload = {
-        "url": url,
-        "downloadMode": "auto",
-        # cobalt v11 video qualities: 144 / 240 / 360 / 480 / 720 / 1080 / max.
-        # 720 reads text on screens cleanly and stays under the size cap.
-        "videoQuality": "720",
-    }
-    async with _client() as client:
-        try:
-            resp = await client.post("/", json=payload)
-        except httpx.HTTPError as e:
-            raise RuntimeError(f"cobalt video http: {type(e).__name__}: {e}") from e
-        if resp.status_code >= 400:
-            raise RuntimeError(
-                f"cobalt video http: status={resp.status_code} body={resp.text[:200]}",
-            )
-        body = resp.json()
-
-    status = body.get("status")
-    if status in ("tunnel", "redirect"):
-        tunnel = body.get("url")
-        if not tunnel:
-            raise RuntimeError(f"cobalt video response missing url: {body}")
-        return tunnel
-    if status == "error":
-        err = body.get("error", {}) or {}
-        raise RuntimeError(f"cobalt video error: {err.get('code', 'unknown')}")
-    if status == "picker":
-        # Picker → cobalt couldn't pick one variant; bail (rare for normal videos)
-        raise RuntimeError(f"cobalt video returned picker (multiple variants): {body}")
-    raise RuntimeError(f"cobalt video unexpected status: {status}")
-
-
-def _client() -> httpx.AsyncClient:
-    kwargs: dict = {
-        "base_url": settings.cobalt_api_url.rstrip("/"),
-        "timeout": _COBALT_TIMEOUT,
-        "headers": {
-            "Accept": "application/json",
-            "Content-Type": "application/json",
-        },
-    }
-    if _TEST_TRANSPORT is not None:
-        kwargs["transport"] = _TEST_TRANSPORT
-    return httpx.AsyncClient(**kwargs)
