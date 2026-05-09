@@ -38,36 +38,49 @@ class SummaryResult(BaseModel):
         description=(
             "Short descriptive title (1-10 words). No URL, no brackets. "
             "Captures the GIST of the source (artist + song, recipe name, "
-            "talk topic). Match content language: if content is Czech, "
-            "title is Czech."
+            "talk topic). Default language ENGLISH; if the source content "
+            "is Czech or Slovak, keep the title in that language."
         ),
     )
     summary_md: str = Field(
         description=(
-            "2-3 sentence summary in plain markdown. Match content language. "
-            "Focus on WHAT the content is about and WHY it matters, not on "
-            "metadata fields like duration or author."
+            "Markdown bulleted list (3-6 items) of the most exciting, "
+            "surprising, or actionable things from the content. Each bullet "
+            "on its own line, starts with '- ', one short punchy line each. "
+            "NO intro/outro prose, NO sub-bullets. Default language ENGLISH; "
+            "if the source content is Czech or Slovak, keep bullets in that "
+            "language. Don't restate metadata (duration, author)."
         ),
     )
 
 
 SYSTEM_PROMPT = """You are a content summarizer for a personal knowledge base.
 For each captured social-media or web post, generate a concise descriptive
-title and a brief content summary.
+title and a punchy bulleted summary.
 
 Title rules:
 - 1-10 words, no URL, no enclosing brackets/quotes
 - Capture the GIST of the source (e.g. "Travis Scott — Mavericks reel",
   "Italian carbonara recipe", "GPT-4 jailbreak demo")
-- Match content language. If the transcript is Czech, the title is Czech.
-- Title Case for English; sentence case for Czech.
+- Title Case for English; sentence case for Czech/Slovak.
 
 Summary rules:
-- 2-3 sentences, plain markdown (no headings)
-- Match content language
-- Describe WHAT the content is and WHY it matters, not duration/author
-- If transcript is profane/explicit, summarize content neutrally without
-  reproducing slurs
+- Markdown BULLETED LIST (3-6 items). Each bullet starts with "- " on its
+  own line. One short punchy line per bullet.
+- Highlight the most exciting, surprising, or actionable things in the
+  content — what would catch someone's eye scanning their knowledge base?
+- NO intro sentence, NO outro, NO sub-bullets, NO headings. Just the
+  flat list.
+- Don't restate metadata (duration, author, channel name) — that's
+  rendered separately on the doc.
+- If transcript is profane/explicit, summarize neutrally without
+  reproducing slurs.
+
+Language rules:
+- Default output language is ENGLISH for both title and summary —
+  translate from any source language.
+- EXCEPTION: if the source content is Czech or Slovak, keep BOTH the
+  title and summary in the original Czech/Slovak. Don't translate.
 
 Return STRICT JSON only — no prose, no markdown code fences.
 """

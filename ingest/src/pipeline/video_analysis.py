@@ -73,8 +73,12 @@ class _VisionAnalysis(BaseModel):
 
     summary: str = Field(
         description=(
-            "3-5 sentences summarizing the video. Ground in BOTH the audio transcript "
-            "(if any) AND what the keyframes show. Match content language."
+            "Markdown bulleted list (3-6 items) of the most exciting / surprising "
+            "/ actionable things in the video. Each bullet on its own line, starts "
+            "with '- ', one short punchy line each. Ground in BOTH the audio "
+            "transcript (if any) AND what the keyframes show. Default language is "
+            "ENGLISH — translate from any other language. Exception: if the "
+            "source content is Czech or Slovak, keep bullets in the source language."
         ),
     )
     keyframes: list[_FrameCaption] = Field(
@@ -89,10 +93,13 @@ You will be given:
   - A series of N keyframes extracted from the video, numbered starting at 0
 
 Output strict JSON matching the SummaryResult schema:
-  - `summary`: 3-5 sentences. Ground in BOTH the transcript AND what the
-    frames show. If transcript is empty, rely on visual content alone. If
-    they conflict, prioritize what's visible. NEVER invent details that
-    appear in neither.
+  - `summary`: a markdown BULLETED LIST (3-6 items) of the most exciting,
+    surprising, or actionable things from the content. Each bullet on its
+    own line, starts with "- ", one short punchy line each. NO intro
+    sentence, NO outro, NO sub-bullets — just the flat list. Ground in BOTH
+    the transcript AND what the frames show. If transcript is empty, rely
+    on visual content alone. If they conflict, prioritize what's visible.
+    NEVER invent details that appear in neither.
   - `keyframes`: list of {frame_index, caption, importance} — one per
     input frame, in frame_index order. Importance 0-10 (see schema docs).
 
@@ -101,7 +108,14 @@ Caption rules:
   - Describe what's actually visible: text on screen, UI elements, faces,
     actions, colors that matter. Don't speculate beyond the frame.
 
-Match the content language. Czech transcript → Czech summary + captions.
+Language rules:
+  - Default output language is ENGLISH — translate the summary and captions
+    to English regardless of the source-content language.
+  - EXCEPTION: if the source content is Czech or Slovak, keep the summary
+    bullets and captions in the original Czech/Slovak. Don't translate
+    those.
+  - This applies to both the transcript text and any visible on-screen
+    text in the keyframes.
 """
 
 
