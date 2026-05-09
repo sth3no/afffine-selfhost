@@ -239,12 +239,15 @@ services:
       - yt_cookies:/cookies:ro
     depends_on:
       yt_session_server:
-        # service_healthy (not service_started) — cobalt fetches poToken
-        # ONCE at boot. If the session server's HTTP listener isn't ready
-        # yet, cobalt logs "Failed loading poToken & visitor_data" and
-        # runs forever without it. service_healthy waits for our wget
-        # healthcheck to pass before starting cobalt.
-        condition: service_healthy
+        # service_started, NOT service_healthy. yt-session-generator's
+        # webserver image doesn't ship wget/curl and only exposes
+        # `/token` (which generates a token via BotGuard — too expensive
+        # to hit every 30s as a healthcheck). With service_started,
+        # cobalt may race ahead and log "Failed loading poToken" on
+        # first boot — the documented manual `docker restart
+        # affine_cobalt` step after the extension first syncs catches
+        # this up.
+        condition: service_started
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://localhost:9000/"]
@@ -257,18 +260,19 @@ services:
 
   # Phase 12.5 fix #4: PO token + visitor_data generator for cobalt.
   # https://github.com/imputnet/yt-session-generator — runs YouTube's
-  # BotGuard JS in a Node sandbox to produce the auth artifacts cobalt
-  # needs alongside cookies. Stateless, no creds. ~150 MB RAM idle.
+  # BotGuard JS (headless Chromium) to produce the auth artifacts
+  # cobalt needs alongside cookies. Stateless, no creds.
+  # No healthcheck: the image has no wget/curl and the only endpoints
+  # are GET /token (expensive — generates a fresh token via BotGuard)
+  # and POST /update. Healthcheck-by-/token would burn CPU every 30s
+  # for no net benefit. Cobalt's depends_on uses service_started; if
+  # cobalt boots first and ECONNREFUSEs the session server, the
+  # documented manual `docker restart affine_cobalt` after first
+  # extension sync catches up cleanly.
   yt_session_server:
     image: ghcr.io/imputnet/yt-session-generator:webserver
     container_name: affine_yt_session_server
     restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:8080/"]
-      interval: 30s
-      timeout: 5s
-      retries: 5
-      start_period: 15s
     networks:
       - affine_net
 
