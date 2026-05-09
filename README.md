@@ -429,39 +429,84 @@ BotGuard AND from fetching auto-captions via youtube-transcript-api,
 regardless of cookie quality. From a Hetzner / AWS / Google Cloud /
 DigitalOcean IP you'll see `error.api.youtube.login` from cobalt and
 `RequestBlocked` from transcript-api on niche / age-gated / tutorial
-content. Popular content (Rick Astley etc.) still works because YT
-treats it more leniently.
+content.
 
-The fix is a residential proxy. The stack is wired to use one
-transparently — drop the URL into `.env` and **all three YT-touching
-containers** route through it:
+The stack is wired to read a single env var `RESIDENTIAL_PROXY_URL`
+and propagate it to **all three YT-touching containers** (`cobalt`,
+`yt_session_server`, `ingest`). When set, traffic egresses via the
+proxy; when empty, current direct-connection behavior is preserved.
 
+Two ways to provide that residential proxy:
+
+#### Option A: Self-hosted via Raspberry Pi at home (recommended)
+
+A spare Pi (3B+, 4, or 5 — anything with ethernet) running on your
+home internet, joined to the same Tailscale network as your VPS.
+Phase 13 video downloads can saturate ~750 GB/month — at $4-15/GB
+on commercial residential proxies that's $200-1500/mo, while a Pi
+costs $0 in bandwidth (it's your home plan) and $2/year in power.
+
+**One-time setup on the Pi:**
 ```bash
-# In .env (or Portainer stack env):
-RESIDENTIAL_PROXY_URL=http://USER:PASS@gateway.smartproxy.com:7000
+sudo bash scripts/pi-residential-tunnel-setup.sh
+```
+Installs Tailscale + gost (HTTP proxy on :8118), runs both as
+systemd services. You'll authenticate Tailscale once via a browser
+URL the script prints. The script reports the Pi's Tailscale IP
+when done.
+
+**One-time setup on the VPS:**
+```bash
+curl -fsSL https://tailscale.com/install.sh | sudo sh
+sudo tailscale up --hostname=affine-vps
+```
+Same Tailscale account → both machines on the same private network.
+
+**Then in your stack `.env`:**
+```bash
+RESIDENTIAL_PROXY_URL=http://<pi-tailscale-ip>:8118
+```
+Redeploy. All YT traffic now egresses via your home internet,
+making it indistinguishable from a real user watching from a phone.
+
+#### Option B: Commercial residential proxy
+
+If you don't have a Pi or always-on home box, sign up for a paid
+residential proxy. Recommended at personal scale:
+- **Webshare** — cheapest entry, 1 GB pay-as-you-go ~$3.50
+- **Decodo** (formerly Smartproxy) — ~$4/GB, cleaner pool, better
+  YT pass rate than Webshare
+- **DataImpulse** — pay-as-you-go, credits don't expire, ~$3/GB
+
+Audit your monthly bandwidth before picking. **Audio-only captures**
+through proxy = ~5-10 MB/video → ~30 GB/month at 100/day → cheap
+($40-120/mo). **Phase 13 video captures** = 100-500 MB/video →
+150-750 GB/month → expensive ($600-3000/mo). At video-download scale,
+self-hosted Pi is the only sustainable answer.
+
+Format:
+```bash
+RESIDENTIAL_PROXY_URL=http://USER:PASS@gateway.provider.com:PORT
 ```
 
-Then redeploy. `cobalt`, `yt_session_server` (Chromium for BotGuard)
-and `ingest` (transcript-api + yt-dlp) all pick up the `HTTP_PROXY` /
-`HTTPS_PROXY` env. Internal docker traffic stays direct via `NO_PROXY`.
-Anthropic / OpenAI API calls also stay direct (no point burning
-residential bandwidth on those).
+Don't paste these credentials into chat — set them directly in
+Portainer's stack environment or your `.env` file.
 
-**Recommended providers for personal-scale use** (~$5–15/month):
-- **Webshare** — cheapest entry point, 10-IP rotating plan ~$3-5/mo
-- **Smartproxy** — better routing, higher reliability, ~$8-15/mo
-- **Bright Data** — enterprise, overkill for personal
+#### Verify the proxy is active
 
-Sign up, generate a gateway URL, paste into `.env`, redeploy. After
-that, captures of any YT video should produce a real Whisper
-transcript instead of "Unavailable — YouTube blocked the audio
-download."
-
-**Verify the proxy is active:**
 ```bash
 docker exec affine_cobalt env | grep -i proxy
 # expect: HTTP_PROXY=http://...   HTTPS_PROXY=http://...   NO_PROXY=...
+
+docker exec affine_ingest python3 -c \
+  'import urllib.request; print(urllib.request.urlopen("https://api.ipify.org",timeout=10).read().decode())'
+# expect: your home IP (Option A) or a residential ISP IP (Option B)
+# NOT: your VPS IP
 ```
+
+If the egress IP is still your VPS, the proxy isn't being applied —
+recheck `RESIDENTIAL_PROXY_URL` in the stack env and `docker compose
+up -d` to force the containers to pick up the new env.
 
 **Cookie diagnostic** (names only, never values — safe to share for debugging):
 
