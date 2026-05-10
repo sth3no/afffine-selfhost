@@ -1,84 +1,115 @@
 /**
- * Toolbar popup — show last sync + trigger manual sync.
+ * AFFiNE Capture — toolbar popup.
+ *
+ * Mirrors the iOS Share Extension UI (spec §4.1):
+ *   - shows current page (favicon + title)
+ *   - primary "Save to AFFiNE" button
+ *   - status row swaps in place: idle → capturing → saved (with web_url) | error
+ *   - footer with cookie subsystem status + deep-link to options
+ *
+ * Auto-closes 2s after a successful capture (preserves v0.1 cookie sync UX).
  */
+import { buildPayloadFromTab } from '../capture/payload.js';
 
-const $status = document.getElementById('status');
-const $syncNow = document.getElementById('syncNow');
-const $openOptions = document.getElementById('openOptions');
+const $favicon       = document.getElementById('favicon');
+const $pageTitle     = document.getElementById('pageTitle');
+const $captureBtn    = document.getElementById('captureBtn');
+const $captureStatus = document.getElementById('captureStatus');
+const $cookieStatus  = document.getElementById('cookieStatus');
+const $openOptions   = document.getElementById('openOptions');
 
-renderLastSync();
+renderHeader();
+renderCookieStatus();
 
-$syncNow.addEventListener('click', async () => {
-  $syncNow.disabled = true;
-  $syncNow.textContent = 'Syncing…';
+$captureBtn.addEventListener('click', async () => {
+  $captureBtn.disabled = true;
+  setCaptureStatus('Capturing…', null);
+  const tab = await getActiveTab();
+  if (!tab) { $captureBtn.disabled = false; setCaptureStatus('No tab to capture', 'err'); return; }
+  const payload = buildPayloadFromTab(tab);
+  let result;
   try {
-    const result = await chrome.runtime.sendMessage({ type: 'sync-now' });
-    setStatus(result);
-    if (result?.ok) {
-      // Auto-close 2s after success.
-      setTimeout(() => window.close(), 2000);
-    }
+    result = await chrome.runtime.sendMessage({ type: 'capture', payload });
   } catch (e) {
-    $status.className = 'status err';
-    $status.textContent = `Failed: ${e?.message ?? e}`;
-  } finally {
-    $syncNow.disabled = false;
-    $syncNow.textContent = 'Sync now';
+    setCaptureStatus(`Failed: ${e?.message ?? e}`, 'err');
+    $captureBtn.disabled = false;
+    return;
+  }
+  if (result?.ok) {
+    setCaptureStatusSaved(result.web_url);
+    setTimeout(() => window.close(), 2000);
+  } else {
+    setCaptureStatusError(result?.error);
+    $captureBtn.disabled = false;
   }
 });
 
-$openOptions.addEventListener('click', () => {
-  if (chrome.runtime.openOptionsPage) {
-    chrome.runtime.openOptionsPage();
-  } else {
-    window.open(chrome.runtime.getURL('options.html'));
-  }
+$openOptions.addEventListener('click', e => {
+  e.preventDefault();
+  if (chrome.runtime.openOptionsPage) chrome.runtime.openOptionsPage();
+  else window.open(chrome.runtime.getURL('options/options.html'));
 });
 
-async function renderLastSync() {
-  const result = await chrome.runtime.sendMessage({ type: 'get-last-sync' });
-  setStatus(result);
+async function getActiveTab() {
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  return tab ?? null;
 }
 
-function setStatus(result) {
-  if (!result) {
-    $status.className = 'status';
-    $status.textContent = 'Last sync: never. Click Settings to configure.';
-    setServerStatus(null);
+async function renderHeader() {
+  const tab = await getActiveTab();
+  if (!tab) { $pageTitle.textContent = 'No active tab'; return; }
+  $pageTitle.textContent = tab.title || tab.url || 'Untitled';
+  if (tab.favIconUrl) $favicon.src = tab.favIconUrl;
+}
+
+async function renderCookieStatus() {
+  const lastSync = await chrome.runtime.sendMessage({ type: 'get-last-sync' });
+  if (!lastSync) { $cookieStatus.textContent = 'Cookies: never synced'; return; }
+  if (!lastSync.ok) {
+    $cookieStatus.textContent = `Cookies: ${lastSync.error ?? 'failed'}`;
+    $cookieStatus.classList.add('err');
     return;
   }
-  if (result.ok) {
-    const when = formatRelative(new Date(result.synced_at));
-    $status.className = 'status ok';
-    $status.textContent = `Synced ${when} — ${result.cookie_count} cookies.`;
+  const ago = formatRelative(new Date(lastSync.synced_at));
+  $cookieStatus.textContent = `Cookies: synced ${ago}`;
+  if (lastSync.verdict === 'stale') $cookieStatus.classList.add('warn');
+  if (lastSync.verdict === 'missing') $cookieStatus.classList.add('err');
+}
+
+function setCaptureStatus(text, kind) {
+  $captureStatus.hidden = false;
+  $captureStatus.className = 'capture-status' + (kind ? ` ${kind}` : '');
+  $captureStatus.textContent = text;
+}
+
+function setCaptureStatusSaved(webUrl) {
+  $captureStatus.hidden = false;
+  $captureStatus.className = 'capture-status ok';
+  $captureStatus.textContent = '✓ Saved';
+  if (webUrl) {
+    const a = document.createElement('a');
+    a.href = webUrl;
+    a.target = '_blank';
+    a.rel = 'noopener';
+    a.textContent = 'Open in AFFiNE ↗';
+    a.className = 'open-link';
+    $captureStatus.append(' ', a);
+  }
+}
+
+function setCaptureStatusError(err) {
+  $captureStatus.hidden = false;
+  $captureStatus.className = 'capture-status err';
+  if (err?.kind === 'invalid_token') {
+    $captureStatus.textContent = 'Token rejected — open Settings';
+  } else if (err?.kind === 'config') {
+    $captureStatus.textContent = 'Not configured — open Settings';
+  } else if (err?.kind === 'rate_limited') {
+    $captureStatus.textContent = `Rate limited; try again in ${err.retryAfter ?? '?'}s`;
+  } else if (err?.kind === 'network') {
+    $captureStatus.textContent = `Couldn't reach ingest`;
   } else {
-    $status.className = 'status err';
-    $status.textContent = `Failed: ${result.error ?? 'unknown'}`;
-  }
-  setServerStatus(result);
-}
-
-// Server-side verdict (phase 12.5). Disagrees with the line above when
-// the ingest container has restarted and lost the tmpfs cookies file —
-// browser thinks it synced, server has nothing.
-function setServerStatus(result) {
-  const $sv = document.getElementById('serverStatus');
-  if (!result || !result.verdict || result.verdict === 'unknown') {
-    $sv.hidden = true;
-    return;
-  }
-  $sv.hidden = false;
-  if (result.verdict === 'fresh') {
-    $sv.className = 'status server';
-    const ageMin = Math.floor((result.server_status?.age_seconds ?? 0) / 60);
-    $sv.textContent = `Server: fresh (uploaded ${ageMin} min ago)`;
-  } else if (result.verdict === 'stale') {
-    $sv.className = 'status server warn';
-    const ageH = Math.floor((result.server_status?.age_seconds ?? 0) / 3600);
-    $sv.textContent = `Server: stale (cookies ${ageH}h old). Open YouTube + click Sync now.`;
-  } else if (result.verdict === 'missing') {
-    $sv.className = 'status server err';
-    $sv.textContent = `Server: cookies missing. Likely an ingest restart — click Sync now.`;
+    $captureStatus.textContent = err?.message ?? 'Failed';
   }
 }
 

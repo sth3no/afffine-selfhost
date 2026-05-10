@@ -2,55 +2,25 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>YT Cookie Sync</title>
-  <style>
-    body {
-      font-family: -apple-system, system-ui, "Segoe UI", sans-serif;
-      width: 280px;
-      margin: 0;
-      padding: 12px;
-      color: #1d1d1f;
-    }
-    h1 { font-size: 14px; margin: 0 0 8px; }
-    .status {
-      font-size: 12px;
-      padding: 8px 10px;
-      border-radius: 6px;
-      background: #f0f0f0;
-      color: #444;
-      margin-bottom: 10px;
-    }
-    .status.ok { background: #e7f5e7; color: #1a6e1a; }
-    .status.err { background: #fde7e7; color: #a02020; }
-    .status.server { font-size: 11px; opacity: 0.85; margin-top: 6px; }
-    .status.server.warn { background: #fff3cd; color: #856404; opacity: 1; }
-    .status.server.err  { background: #fde7e7; color: #a02020; opacity: 1; }
-    .row { display: flex; gap: 6px; }
-    button {
-      flex: 1;
-      padding: 6px 10px;
-      font-size: 12px;
-      border: 1px solid #0070f3;
-      background: #0070f3;
-      color: #fff;
-      border-radius: 6px;
-      cursor: pointer;
-    }
-    button.secondary {
-      background: #fff;
-      color: #0070f3;
-    }
-    button:disabled { opacity: 0.5; cursor: default; }
-  </style>
+  <title>AFFiNE Capture</title>
+  <link rel="stylesheet" href="../lib/design-tokens.css">
+  <link rel="stylesheet" href="popup.css">
 </head>
 <body>
-  <h1>Affine YT Cookie Sync</h1>
-  <div id="status" class="status">Loading…</div>
-  <div id="serverStatus" class="status server" hidden>Server: …</div>
-  <div class="row">
-    <button id="syncNow">Sync now</button>
-    <button id="openOptions" class="secondary">Settings</button>
-  </div>
-  <script src="popup.js"></script>
+  <header class="page-header">
+    <img id="favicon" alt="" width="16" height="16">
+    <span id="pageTitle" class="page-title">Loading…</span>
+  </header>
+
+  <button id="captureBtn" class="primary" type="button">Save to AFFiNE</button>
+
+  <div id="captureStatus" class="capture-status" hidden></div>
+
+  <footer class="footer">
+    <div id="cookieStatus" class="cookie-status">Cookies: …</div>
+    <a id="openOptions" class="link" href="#">Open AFFiNE Capture →</a>
+  </footer>
+
+  <script type="module" src="popup.js"></script>
 </body>
 </html>
