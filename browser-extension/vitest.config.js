@@ -1,0 +1,10 @@
+import { defineConfig } from 'vitest/config';
+
+export default defineConfig({
+  test: {
+    include: ['**/__tests__/**/*.test.js'],
+    environment: 'node',          // override per-file via /** @vitest-environment jsdom */
+    globals: false,
+    setupFiles: ['./test/setup.js'],
+  },
+});
