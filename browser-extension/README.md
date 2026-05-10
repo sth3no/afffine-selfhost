@@ -1,11 +1,21 @@
-# Affine YT Cookie Sync — browser extension
+# AFFiNE Capture — browser extension
 
-A tiny MV3 extension (Chrome 88+ / Firefox 109+) that pushes your current
-YouTube cookies to a self-hosted Affine ingest service. Once installed,
-it works in the background — `cobalt`, `yt-dlp`, and `youtube-transcript-api`
-on the server side then bypass YouTube's bot detection (no more
-`error.api.youtube.login` / "sign in to confirm you're not a bot" /
-cloud-IP-blocked transcript fetches).
+A multitool extension for your self-hosted AFFiNE ingest service. Two
+subsystems share one extension:
+
+1. **Capture** — send any web content (page URL, link, selected text, image,
+   per-post pills on YouTube/Instagram/X/TikTok/Reddit) to your AFFiNE
+   workspace via `POST /capture`. *Coming in Phase 2 — popup capture today
+   (v0.2.x dev).*
+2. **Cookie sync** — keep YouTube cookies fresh on the server so cobalt +
+   yt-dlp can fetch authenticated content (the entire v0.1 feature, preserved
+   verbatim).
+
+> **v0.2.0 dev note:** The Phase 1 refactor (this version) reorganizes the
+> code into the multitool layout but ships **only** the v0.1 cookie-sync
+> behavior — no popup capture, no context menu, no pills. Each Phase 2–9
+> feature lights up incrementally. See
+> [`docs/plans/2026-05-10-browser-extension-multitool-macro-plan.md`](../docs/plans/2026-05-10-browser-extension-multitool-macro-plan.md).
 
 ## What it does
 
@@ -41,7 +51,7 @@ Triggers:
 1. Go to `chrome://extensions/`
 2. Top-right toggle: **Developer mode** ON
 3. **Load unpacked** → select this `browser-extension/` folder
-4. Click the puzzle-piece icon in the toolbar, pin "Affine YT Cookie Sync"
+4. Click the puzzle-piece icon in the toolbar, pin "AFFiNE Capture"
 5. Click the extension icon → **Settings** → fill in:
    - **Ingest base URL**: e.g. `https://ingest.example.com:3200`
      (use HTTPS for anything other than localhost)
@@ -52,7 +62,7 @@ Triggers:
 
 1. Go to `about:debugging#/runtime/this-firefox`
 2. **Load Temporary Add-on…** → select `manifest.json` from this folder
-3. Open a new tab, go to `about:addons` → find "Affine YT Cookie Sync"
+3. Open a new tab, go to `about:addons` → find "AFFiNE Capture"
    → **Preferences**, fill in URL + token (same as above)
 4. Note: Firefox temporary add-ons are unloaded on browser restart.
    For persistent install, package + sign via `web-ext sign` — out of
@@ -124,7 +134,7 @@ that scope from the options page:
 Untick the checkbox to revoke. The extension calls
 `chrome.permissions.remove`, so site access is genuinely removed —
 not just hidden in the UI. Verify in `chrome://extensions/` →
-Affine YT Cookie Sync → Details → "Site access".
+AFFiNE Capture → Details → "Site access".
 
 ## Security notes
 
