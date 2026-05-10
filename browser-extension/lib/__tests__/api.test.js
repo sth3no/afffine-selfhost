@@ -1,6 +1,6 @@
 /** @vitest-environment node */
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { request, IngestError } from '../api.js';
+import { request, IngestError, health } from '../api.js';
 import * as storage from '../storage.js';
 
 describe('lib/api.request', () => {
@@ -81,5 +81,24 @@ describe('lib/api.request', () => {
   it('throws IngestError config when ingestUrl unset', async () => {
     storage.getConfig.mockResolvedValue({ingestUrl: null, ingestToken: null, extendedScope: false});
     await expect(request('GET', '/health')).rejects.toMatchObject({ kind: 'config' });
+  });
+});
+
+describe('lib/api.health', () => {
+  beforeEach(() => {
+    vi.spyOn(storage, 'getConfig').mockResolvedValue({
+      ingestUrl: 'https://ingest.test',
+      ingestToken: 'tok',
+      extendedScope: false,
+    });
+    globalThis.fetch = vi.fn();
+  });
+
+  it('GET /health returns parsed body', async () => {
+    fetch.mockResolvedValue(new Response(JSON.stringify({
+      ok: true, queue_depth: 2, worker_alive: true, version: '0.1.0',
+    }), { status: 200, headers: { 'content-type': 'application/json' } }));
+    const result = await health();
+    expect(result).toEqual({ ok: true, queue_depth: 2, worker_alive: true, version: '0.1.0' });
   });
 });

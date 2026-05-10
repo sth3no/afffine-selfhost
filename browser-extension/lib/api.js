@@ -82,3 +82,12 @@ export async function request(method, path, opts = {}) {
   if (ct.includes('application/json')) return await resp.json();
   return await resp.text();
 }
+
+/**
+ * Convenience wrapper for the health probe. Returns
+ * `{ok: bool, queue_depth: int, worker_alive: bool, version: string}`.
+ * Throws IngestError on auth/network errors.
+ */
+export async function health() {
+  return await request('GET', '/health');
+}
