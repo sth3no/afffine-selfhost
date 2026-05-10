@@ -155,3 +155,102 @@ describe('<af-card>', () => {
     expect(el.shadowRoot.querySelector('slot')).toBeTruthy();
   });
 });
+
+import '../af-history-row.js';
+import '../af-status-timeline.js';
+import '../af-breadcrumb.js';
+
+describe('<af-history-row>', () => {
+  function makeRow(props = {}) {
+    const el = document.createElement('af-history-row');
+    el.data = {
+      capture_id: '01ABC',
+      platform: 'youtube',
+      status: 'done',
+      shared_title: 'My video',
+      topic_path: 'Sources/Videos/YouTube',
+      created_at: new Date().toISOString(),
+      web_url: 'https://example.com/doc',
+      ...props,
+    };
+    document.body.appendChild(el);
+    return el;
+  }
+
+  it('registers', () => {
+    expect(customElements.get('af-history-row')).toBeTypeOf('function');
+  });
+
+  it('renders title from data', () => {
+    const el = makeRow({ shared_title: 'Hello world' });
+    expect(el.shadowRoot.querySelector('.title')?.textContent).toBe('Hello world');
+  });
+
+  it('renders topic_path subtle below title', () => {
+    const el = makeRow({ topic_path: 'Sources/X/Y' });
+    expect(el.shadowRoot.querySelector('.path')?.textContent).toBe('Sources/X/Y');
+  });
+
+  it('emits "open" custom event on body click', () => {
+    const el = makeRow();
+    let received = null;
+    el.addEventListener('open', e => { received = e.detail; });
+    el.shadowRoot.querySelector('.body').click();
+    expect(received?.capture_id).toBe('01ABC');
+  });
+
+  it('emits "retry" on retry button click', () => {
+    const el = makeRow({ status: 'failed' });
+    let received = null;
+    el.addEventListener('retry', e => { received = e.detail; });
+    el.shadowRoot.querySelector('button.retry')?.click();
+    expect(received?.capture_id).toBe('01ABC');
+  });
+
+  it('emits "delete" on delete button click', () => {
+    const el = makeRow();
+    let received = null;
+    el.addEventListener('delete', e => { received = e.detail; });
+    el.shadowRoot.querySelector('button.delete')?.click();
+    expect(received?.capture_id).toBe('01ABC');
+  });
+});
+
+describe('<af-status-timeline>', () => {
+  it('registers', () => {
+    expect(customElements.get('af-status-timeline')).toBeTypeOf('function');
+  });
+
+  it('marks current step as active', () => {
+    const el = document.createElement('af-status-timeline');
+    el.setAttribute('status', 'classifying');
+    document.body.appendChild(el);
+    const steps = el.shadowRoot.querySelectorAll('.step');
+    expect(steps.length).toBe(5);
+    const active = el.shadowRoot.querySelector('.step.current');
+    expect(active?.dataset.step).toBe('classifying');
+  });
+
+  it('marks failed status with error step', () => {
+    const el = document.createElement('af-status-timeline');
+    el.setAttribute('status', 'failed');
+    document.body.appendChild(el);
+    expect(el.shadowRoot.querySelector('.failed')).toBeTruthy();
+  });
+});
+
+describe('<af-breadcrumb>', () => {
+  it('registers', () => {
+    expect(customElements.get('af-breadcrumb')).toBeTypeOf('function');
+  });
+
+  it('splits path into segments', () => {
+    const el = document.createElement('af-breadcrumb');
+    el.setAttribute('path', 'Sources/Socials/Instagram/Recipes');
+    document.body.appendChild(el);
+    const segments = el.shadowRoot.querySelectorAll('.segment');
+    expect(segments.length).toBe(4);
+    expect(segments[0].textContent).toBe('Sources');
+    expect(segments[3].textContent).toBe('Recipes');
+  });
+});
