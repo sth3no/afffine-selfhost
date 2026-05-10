@@ -26,6 +26,26 @@
     "*://*.google.com/*",
     "*://accounts.google.com/*"
   ],
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "content/_shared/canonicalizers.js",
+        "content/_shared/pill.js",
+        "content/_shared/dispatch.js",
+        "lib/design-tokens.css"
+      ],
+      "matches": [
+        "*://*.youtube.com/*",
+        "*://*.instagram.com/*",
+        "*://x.com/*",
+        "*://*.x.com/*",
+        "*://twitter.com/*",
+        "*://*.twitter.com/*",
+        "*://*.tiktok.com/*",
+        "*://*.reddit.com/*"
+      ]
+    }
+  ],
   "content_scripts": [
     { "matches": ["*://*.youtube.com/*"], "js": ["content/youtube.js"], "run_at": "document_idle" },
     { "matches": ["*://*.instagram.com/*"], "js": ["content/instagram.js"], "run_at": "document_idle" },
