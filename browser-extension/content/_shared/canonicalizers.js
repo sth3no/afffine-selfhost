@@ -22,9 +22,13 @@ export function instagramUrl(rawUrl) {
   let u;
   try { u = new URL(rawUrl); } catch { return null; }
   if (!/(?:^|\.)instagram\.com$/.test(u.hostname)) return null;
-  const m = u.pathname.match(/^\/(p|reel)\/([^/]+)\/?/);
+  // Match /p/<id>/, /reel/<id>/, or /reels/<id>/. Normalize "reels" → "reel"
+  // for canonical output. Reject /reels/audio/<id>/ (audio permalinks aren't reels).
+  const m = u.pathname.match(/^\/(p|reel|reels)\/([^/]+)\/?/);
   if (!m) return null;
-  return `https://www.instagram.com/${m[1]}/${m[2]}/`;
+  if (m[1] === 'reels' && m[2] === 'audio') return null;
+  const kind = m[1] === 'reels' ? 'reel' : m[1];
+  return `https://www.instagram.com/${kind}/${m[2]}/`;
 }
 
 export function twitterUrl(rawUrl) {

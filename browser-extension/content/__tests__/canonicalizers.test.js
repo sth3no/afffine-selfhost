@@ -45,6 +45,14 @@ describe('canonicalizers/instagramUrl', () => {
   it('returns null for stories', () => {
     expect(instagramUrl('https://www.instagram.com/stories/some_user/123/')).toBeNull();
   });
+  it('normalizes /reels/<id>/ → /reel/<id>/', () => {
+    expect(instagramUrl('https://www.instagram.com/reels/AbC123/'))
+      .toBe('https://www.instagram.com/reel/AbC123/');
+  });
+  it('returns null for /reels/audio/<id>/ (audio permalink)', () => {
+    expect(instagramUrl('https://www.instagram.com/reels/audio/207009109985651/'))
+      .toBeNull();
+  });
 });
 
 describe('canonicalizers/twitterUrl', () => {
