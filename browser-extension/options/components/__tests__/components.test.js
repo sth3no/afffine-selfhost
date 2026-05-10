@@ -47,3 +47,50 @@ describe('<af-button>', () => {
     expect(clicks).toBe(1);
   });
 });
+
+import '../af-input.js';
+
+describe('<af-input>', () => {
+  it('registers the custom element', () => {
+    expect(customElements.get('af-input')).toBeTypeOf('function');
+  });
+
+  it('renders an input inside Shadow DOM', () => {
+    const el = document.createElement('af-input');
+    document.body.appendChild(el);
+    expect(el.shadowRoot.querySelector('input')).toBeTruthy();
+  });
+
+  it('reflects type=password attribute', () => {
+    const el = document.createElement('af-input');
+    el.setAttribute('type', 'password');
+    document.body.appendChild(el);
+    expect(el.shadowRoot.querySelector('input').type).toBe('password');
+  });
+
+  it('value getter/setter round-trip', () => {
+    const el = document.createElement('af-input');
+    document.body.appendChild(el);
+    el.value = 'hello';
+    expect(el.value).toBe('hello');
+    expect(el.shadowRoot.querySelector('input').value).toBe('hello');
+  });
+
+  it('paste-button attribute renders a paste button', () => {
+    const el = document.createElement('af-input');
+    el.setAttribute('paste-button', '');
+    document.body.appendChild(el);
+    expect(el.shadowRoot.querySelector('button.paste')).toBeTruthy();
+  });
+
+  it('emits change event when input changes', () => {
+    const el = document.createElement('af-input');
+    document.body.appendChild(el);
+    let received = null;
+    el.addEventListener('change', e => { received = e.target.value; });
+    const inner = el.shadowRoot.querySelector('input');
+    inner.value = 'new';
+    inner.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
+    expect(received).toBe('new');
+  });
+});
