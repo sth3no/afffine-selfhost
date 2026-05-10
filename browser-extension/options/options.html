@@ -40,12 +40,25 @@
         </af-card>
       </section>
 
-      <!-- History panel — placeholder until Phase 6 -->
+      <!-- History panel -->
       <section id="panel-history" class="panel" role="tabpanel" data-panel="history" hidden>
-        <af-card>
-          <h2>History</h2>
-          <p class="hint">Recent captures appear here. Coming in Phase 6.</p>
-        </af-card>
+        <div class="filter-pills">
+          <button class="filter-pill active" data-filter="all">All</button>
+          <button class="filter-pill" data-filter="done">Done</button>
+          <button class="filter-pill" data-filter="failed">Failed</button>
+          <button class="filter-pill" data-filter="in-progress">In progress</button>
+        </div>
+
+        <div id="historyList" class="history-list"></div>
+
+        <div id="historyEmpty" class="history-empty" hidden>
+          <af-card>
+            <p class="hint">No captures yet — try sharing something from a supported site or right-clicking on this page.</p>
+          </af-card>
+        </div>
+
+        <!-- Detail sub-view; toggled by hash route -->
+        <div id="historyDetail" class="history-detail" hidden></div>
       </section>
 
       <!-- Cookies panel — placeholder until Phase 7 -->

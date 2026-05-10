@@ -110,3 +110,90 @@ body {
   pointer-events: none;
 }
 .toast.visible { opacity: 1; }
+
+/* History tab */
+
+.filter-pills {
+  display: flex;
+  gap: var(--af-space-1);
+  margin-bottom: var(--af-space-3);
+}
+.filter-pill {
+  padding: var(--af-space-1) var(--af-space-3);
+  font: var(--af-small);
+  font-weight: 500;
+  color: var(--af-text-body);
+  background: var(--af-surface);
+  border: 1px solid var(--af-border);
+  border-radius: var(--af-radius-pill);
+  cursor: pointer;
+  transition: background .15s ease, color .15s ease;
+}
+.filter-pill:hover { color: var(--af-navy); }
+.filter-pill.active {
+  background: var(--af-blue);
+  color: var(--af-surface);
+  border-color: var(--af-blue);
+}
+
+.history-list {
+  display: flex;
+  flex-direction: column;
+}
+
+.history-empty {
+  margin-top: var(--af-space-3);
+  text-align: center;
+}
+
+.history-detail {
+  background: var(--af-surface);
+  border: 1px solid var(--af-border);
+  border-radius: var(--af-radius-card);
+  padding: var(--af-space-4);
+  box-shadow: var(--af-shadow-card);
+}
+.history-detail .back-btn {
+  background: transparent;
+  border: none;
+  color: var(--af-blue);
+  cursor: pointer;
+  font: var(--af-small);
+  padding: 0;
+  margin-bottom: var(--af-space-3);
+}
+.history-detail .back-btn:hover { text-decoration: underline; }
+.history-detail .title {
+  font: var(--af-h3);
+  margin: 0 0 var(--af-space-1);
+  color: var(--af-navy);
+}
+.history-detail .web-url {
+  font: var(--af-small);
+  color: var(--af-blue);
+  text-decoration: none;
+  word-break: break-all;
+}
+.history-detail .web-url:hover { text-decoration: underline; }
+.history-detail .reasoning {
+  background: var(--af-bg-soft);
+  border-radius: var(--af-radius-button);
+  padding: var(--af-space-3);
+  margin: var(--af-space-3) 0;
+  font: var(--af-small);
+  color: var(--af-text-body);
+  white-space: pre-wrap;
+}
+.history-detail .error-block {
+  background: #FDE7E7;
+  border-radius: var(--af-radius-button);
+  padding: var(--af-space-3);
+  margin: var(--af-space-3) 0;
+  font: var(--af-small);
+  color: var(--af-error);
+}
+.history-detail .detail-actions {
+  display: flex;
+  gap: var(--af-space-2);
+  margin-top: var(--af-space-4);
+}
