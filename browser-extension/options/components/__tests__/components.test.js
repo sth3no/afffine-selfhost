@@ -134,3 +134,24 @@ describe('<af-status-badge>', () => {
     expect(el.shadowRoot.querySelector('.unknown')).toBeTruthy();
   });
 });
+
+import '../af-card.js';
+
+describe('<af-card>', () => {
+  it('registers', () => {
+    expect(customElements.get('af-card')).toBeTypeOf('function');
+  });
+
+  it('slots arbitrary content', () => {
+    const el = document.createElement('af-card');
+    el.innerHTML = '<p>hello</p>';
+    document.body.appendChild(el);
+    expect(el.querySelector('p')?.textContent).toBe('hello');
+  });
+
+  it('has a slot inside the shadow root', () => {
+    const el = document.createElement('af-card');
+    document.body.appendChild(el);
+    expect(el.shadowRoot.querySelector('slot')).toBeTruthy();
+  });
+});
