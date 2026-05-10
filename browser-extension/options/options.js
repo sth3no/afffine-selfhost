@@ -12,7 +12,7 @@ import '../options/components/af-card.js';
 import '../options/components/af-history-row.js';
 import '../options/components/af-status-timeline.js';
 import '../options/components/af-breadcrumb.js';
-import { getConfig, setConfig, getRecentCaptures } from '../lib/storage.js';
+import { getConfig, setConfig, getRecentCaptures, getLastSync } from '../lib/storage.js';
 import { health, IngestError } from '../lib/api.js';
 import { listCaptures, getCapture, retryCapture, deleteCapture } from '../capture/client.js';
 
@@ -54,9 +54,8 @@ function routeFromHash() {
   for (const panel of $panels) {
     panel.hidden = panel.dataset.panel !== target;
   }
-  if (target === 'history') {
-    renderHistoryView();
-  }
+  if (target === 'history') renderHistoryView();
+  if (target === 'cookies') renderCookiesView();
 }
 
 async function loadSettings() {
@@ -280,4 +279,87 @@ function escapeText(s) {
 }
 function escapeAttr(s) {
   return String(s ?? '').replace(/"/g, '&quot;').replace(/&/g, '&amp;');
+}
+
+// ── Cookies tab ──────────────────────────────────────────────────────────────
+
+const $cookieLastSync = document.getElementById('cookieLastSync');
+const $cookieServerStatus = document.getElementById('cookieServerStatus');
+const $syncNow = document.getElementById('syncNow');
+const $syncResult = document.getElementById('syncResult');
+const $extendedScope = document.getElementById('extendedScope');
+
+$syncNow.addEventListener('click', async () => {
+  $syncResult.hidden = false;
+  $syncResult.className = 'test-result';
+  $syncResult.textContent = 'Syncing…';
+  const result = await chrome.runtime.sendMessage({ type: 'sync-now' });
+  if (result?.ok) {
+    $syncResult.classList.add('ok');
+    $syncResult.textContent = `Synced — ${result.cookie_count} cookies`;
+  } else {
+    $syncResult.classList.add('err');
+    $syncResult.textContent = `Failed: ${result?.error ?? 'unknown'}`;
+  }
+  await renderCookiesView();
+});
+
+$extendedScope.addEventListener('change', async () => {
+  if ($extendedScope.checked) {
+    const granted = await chrome.permissions.request({
+      origins: ['*://accounts.google.com/*', '*://*.google.com/*'],
+    });
+    if (!granted) {
+      $extendedScope.checked = false;
+      return;
+    }
+    await setConfig({ extendedScope: true });
+  } else {
+    await chrome.permissions.remove({
+      origins: ['*://accounts.google.com/*', '*://*.google.com/*'],
+    });
+    await setConfig({ extendedScope: false });
+  }
+});
+
+async function renderCookiesView() {
+  const lastSync = await getLastSync();
+  if (!lastSync) {
+    $cookieLastSync.textContent = 'never';
+    $cookieServerStatus.textContent = 'unknown';
+    $cookieServerStatus.className = 'cookie-verdict';
+  } else if (!lastSync.ok) {
+    $cookieLastSync.textContent = 'failed';
+    $cookieServerStatus.textContent = lastSync.error ?? 'failed';
+    $cookieServerStatus.className = 'cookie-verdict error';
+  } else {
+    const ago = formatRelativeOptions(new Date(lastSync.synced_at));
+    $cookieLastSync.textContent = `${ago} (${lastSync.cookie_count} cookies)`;
+    const verdict = lastSync.verdict ?? 'unknown';
+    $cookieServerStatus.textContent = verdictLabel(verdict, lastSync.server_status);
+    $cookieServerStatus.className = `cookie-verdict ${verdict}`;
+  }
+  const cfg = await getConfig();
+  $extendedScope.checked = !!cfg.extendedScope;
+}
+
+function verdictLabel(verdict, serverStatus) {
+  if (verdict === 'fresh') {
+    const ageMin = Math.floor((serverStatus?.age_seconds ?? 0) / 60);
+    return `fresh (uploaded ${ageMin} min ago)`;
+  }
+  if (verdict === 'stale') {
+    const ageH = Math.floor((serverStatus?.age_seconds ?? 0) / 3600);
+    return `stale (cookies ${ageH}h old)`;
+  }
+  if (verdict === 'missing') return 'cookies missing on server';
+  return 'unknown';
+}
+
+function formatRelativeOptions(date) {
+  const sec = Math.floor((Date.now() - date.getTime()) / 1000);
+  if (sec < 60) return `${sec}s ago`;
+  if (sec < 3600) return `${Math.floor(sec / 60)}m ago`;
+  if (sec < 86400) return `${Math.floor(sec / 3600)}h ago`;
+  return `${Math.floor(sec / 86400)}d ago`;
 }

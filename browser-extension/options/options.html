@@ -61,15 +61,39 @@
         <div id="historyDetail" class="history-detail" hidden></div>
       </section>
 
-      <!-- Cookies panel — placeholder until Phase 7 -->
+      <!-- Cookies panel -->
       <section id="panel-cookies" class="panel" role="tabpanel" data-panel="cookies" hidden>
         <af-card>
-          <h2>YouTube cookies</h2>
-          <p class="hint">Cookie sync status and controls. Coming in Phase 7.</p>
-          <p class="hint" style="margin-top: var(--af-space-2);">
-            Until Phase 7, the v0.1 options page (now superseded) was the only place
-            to trigger a manual sync. Auto-sync still runs on cookie change + daily.
+          <h2>YouTube cookie sync</h2>
+          <p class="hint">
+            Pushes your YouTube cookies (from this browser) to the ingest service so
+            cobalt + yt-dlp can fetch authenticated content. Auto-syncs on cookie change
+            and once a day; click "Sync now" to force.
           </p>
+
+          <div id="cookieStatusCard" class="cookie-status-card">
+            <div class="cookie-status-row">
+              <span class="cookie-status-label">Last sync (browser):</span>
+              <span id="cookieLastSync">never</span>
+            </div>
+            <div class="cookie-status-row">
+              <span class="cookie-status-label">Server verdict:</span>
+              <span id="cookieServerStatus" class="cookie-verdict">unknown</span>
+            </div>
+          </div>
+
+          <div class="actions">
+            <af-button id="syncNow" variant="primary">Sync now</af-button>
+            <span id="syncResult" class="test-result" hidden></span>
+          </div>
+
+          <label class="checkbox-row">
+            <input type="checkbox" id="extendedScope">
+            <span>
+              Also include <code>accounts.google.com</code> cookies
+              <span class="hint">— helps with age-gated and members-only videos. Browser will prompt for permission.</span>
+            </span>
+          </label>
         </af-card>
       </section>
     </main>
