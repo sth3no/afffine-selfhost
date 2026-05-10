@@ -7,8 +7,8 @@ subsystems share one extension:
    `POST /capture`:
    - **Toolbar popup** — one-click "Save to AFFiNE" on any tab.
    - **Right-click menu** — Save page / link / selection / image to AFFiNE.
-   - **In-page pills** — hover a post on YouTube, Instagram, X (Twitter),
-     TikTok, or Reddit to get a "Save to AFFiNE" button on each item.
+   - **In-page pills** — hover a post on YouTube, X (Twitter), TikTok,
+     or Reddit to get a "Save to AFFiNE" button on each item.
 2. **YouTube cookie sync** — keeps YouTube cookies fresh on the server so
    cobalt + yt-dlp can fetch authenticated content (the v0.1 feature,
    preserved verbatim).
@@ -56,12 +56,11 @@ On any page, right-click → 4 context-aware items:
 A native `chrome.notifications` toast appears with the result. Click the
 toast body to open the AFFiNE doc.
 
-### In-page pills (5 sites)
+### In-page pills (4 sites)
 
 | Site | Anchor | Capture URL |
 |---|---|---|
 | YouTube | inline next to native Save/Share row on a watch page | `youtube.com/watch?v=<id>` (no playlist params) |
-| Instagram | per post on hover (top-right corner) | `instagram.com/p/<id>/` or `/reel/<id>/` |
 | Twitter / X | per tweet on hover | `x.com/<user>/status/<id>` |
 | TikTok | per FYP card on hover | `tiktok.com/@<user>/video/<id>` |
 | Reddit | per post on hover | `reddit.com/r/<sub>/comments/<id>/<slug>/` |
@@ -155,10 +154,9 @@ browser-extension/
 │   ├── handler.js                # performCapture — used by popup + context-menu
 │   ├── context-menu.js           # 4 right-click items + notifications
 │   └── payload.js                # Tab → CaptureRequest builder
-├── content/                      # Content scripts (5 sites)
+├── content/                      # Content scripts (4 sites)
 │   ├── _shared/                  # <af-pill> + canonicalizers + dispatch
 │   ├── youtube.js
-│   ├── instagram.js
 │   ├── twitter.js
 │   ├── tiktok.js
 │   └── reddit.js
