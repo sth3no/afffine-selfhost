@@ -25,9 +25,14 @@ the same `/capture` API contract.
 2. **Chrome / Edge / Brave / Arc**: `chrome://extensions/` → toggle
    **Developer mode** ON → **Load unpacked** → select this
    `browser-extension/` folder. Pin the extension from the puzzle-piece menu.
-3. **Firefox**: `about:debugging#/runtime/this-firefox` → **Load Temporary
-   Add-on…** → select `manifest.json`. (Firefox: temporary add-ons unload on
-   restart; for persistent install, sign with `web-ext` — out of scope here.)
+3. **Firefox / Zen / LibreWolf** (any Firefox fork): use the sibling
+   `browser-extension-firefox/` folder instead — same code, but the manifest
+   uses `background.scripts` instead of MV3 `service_worker` (some Firefox
+   builds, including current Zen, ship with `service_worker` disabled).
+   Open `about:debugging#/runtime/this-firefox` → **Load Temporary Add-on…**
+   → select `browser-extension-firefox/manifest.json`. Temporary add-ons
+   unload on restart; for persistent install, sign with `web-ext` — out
+   of scope here.
 4. Click the extension icon → "Open AFFiNE Capture →" in the popup footer
    → fills the URL + token under **Settings**:
    - **Ingest base URL**: `https://ingest.example.com:3200` (HTTPS required

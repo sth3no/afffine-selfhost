@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>AFFiNE Capture — Settings</title>
+  <link rel="stylesheet" href="../lib/design-tokens.css">
+  <link rel="stylesheet" href="options.css">
+</head>
+<body>
+  <div class="page">
+    <header class="page-head">
+      <h1>AFFiNE Capture</h1>
+      <p class="subtitle">Browser extension for your self-hosted ingest service</p>
+    </header>
+
+    <nav class="tabs" role="tablist">
+      <a href="#settings" class="tab" data-tab="settings" role="tab">Settings</a>
+      <a href="#history"  class="tab" data-tab="history"  role="tab">History</a>
+      <a href="#cookies"  class="tab" data-tab="cookies"  role="tab">Cookies</a>
+    </nav>
+
+    <main class="panels">
+      <!-- Settings panel -->
+      <section id="panel-settings" class="panel" role="tabpanel" data-panel="settings">
+        <af-card>
+          <h2>Server</h2>
+          <p class="hint">Where AFFiNE Capture sends your captures.</p>
+
+          <label class="field-label" for="ingestUrl">Ingest base URL</label>
+          <af-input id="ingestUrl" type="url" placeholder="https://ingest.example.com:3200"></af-input>
+
+          <label class="field-label" for="ingestToken">Bearer token</label>
+          <af-input id="ingestToken" type="password" placeholder="ut_… (your INGEST_API_TOKEN)" paste-button></af-input>
+
+          <div class="actions">
+            <af-button id="testConnection" variant="secondary">Test connection</af-button>
+            <af-button id="save" variant="primary">Save</af-button>
+            <span id="testResult" class="test-result" hidden></span>
+          </div>
+        </af-card>
+      </section>
+
+      <!-- History panel -->
+      <section id="panel-history" class="panel" role="tabpanel" data-panel="history" hidden>
+        <div class="filter-pills">
+          <button class="filter-pill active" data-filter="all">All</button>
+          <button class="filter-pill" data-filter="done">Done</button>
+          <button class="filter-pill" data-filter="failed">Failed</button>
+          <button class="filter-pill" data-filter="in-progress">In progress</button>
+        </div>
+
+        <div id="historyList" class="history-list"></div>
+
+        <div id="historyEmpty" class="history-empty" hidden>
+          <af-card>
+            <p class="hint">No captures yet — try sharing something from a supported site or right-clicking on this page.</p>
+          </af-card>
+        </div>
+
+        <!-- Detail sub-view; toggled by hash route -->
+        <div id="historyDetail" class="history-detail" hidden></div>
+      </section>
+
+      <!-- Cookies panel -->
+      <section id="panel-cookies" class="panel" role="tabpanel" data-panel="cookies" hidden>
+        <af-card>
+          <h2>YouTube cookie sync</h2>
+          <p class="hint">
+            Pushes your YouTube cookies (from this browser) to the ingest service so
+            cobalt + yt-dlp can fetch authenticated content. Auto-syncs on cookie change
+            and once a day; click "Sync now" to force.
+          </p>
+
+          <div id="cookieStatusCard" class="cookie-status-card">
+            <div class="cookie-status-row">
+              <span class="cookie-status-label">Last sync (browser):</span>
+              <span id="cookieLastSync">never</span>
+            </div>
+            <div class="cookie-status-row">
+              <span class="cookie-status-label">Server verdict:</span>
+              <span id="cookieServerStatus" class="cookie-verdict">unknown</span>
+            </div>
+          </div>
+
+          <div class="actions">
+            <af-button id="syncNow" variant="primary">Sync now</af-button>
+            <span id="syncResult" class="test-result" hidden></span>
+          </div>
+
+          <label class="checkbox-row">
+            <input type="checkbox" id="extendedScope">
+            <span>
+              Also include <code>accounts.google.com</code> cookies
+              <span class="hint">— helps with age-gated and members-only videos. Browser will prompt for permission.</span>
+            </span>
+          </label>
+        </af-card>
+      </section>
+    </main>
+  </div>
+
+  <script type="module" src="options.js"></script>
+</body>
+</html>
