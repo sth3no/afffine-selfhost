@@ -1,0 +1,112 @@
+/* AFFiNE Capture — options page (spec §4.2) */
+
+body {
+  margin: 0;
+  background: var(--af-gray-50);
+  color: var(--af-navy);
+  font: var(--af-body);
+  font-family: var(--af-font);
+}
+
+.page {
+  max-width: 960px;
+  margin: 0 auto;
+  padding: var(--af-space-5) var(--af-space-4);
+}
+
+.page-head {
+  margin-bottom: var(--af-space-4);
+}
+.page-head h1 {
+  font: var(--af-h2);
+  margin: 0 0 var(--af-space-1);
+}
+.page-head .subtitle {
+  margin: 0;
+  color: var(--af-text-body);
+  font: var(--af-small);
+}
+
+.tabs {
+  display: flex;
+  gap: var(--af-space-1);
+  margin-bottom: var(--af-space-4);
+  border-bottom: 1px solid var(--af-border);
+}
+.tab {
+  padding: var(--af-space-2) var(--af-space-3);
+  font: var(--af-small);
+  font-weight: 600;
+  color: var(--af-text-body);
+  text-decoration: none;
+  border-bottom: 2px solid transparent;
+  transition: color .15s ease, border-color .15s ease;
+}
+.tab:hover { color: var(--af-navy); }
+.tab.active {
+  color: var(--af-blue);
+  border-bottom-color: var(--af-blue);
+}
+
+.panel {
+  display: block;
+}
+.panel[hidden] { display: none; }
+
+.panel h2 {
+  font: var(--af-h3);
+  margin: 0 0 var(--af-space-2);
+}
+.panel .hint {
+  margin: 0 0 var(--af-space-3);
+  color: var(--af-text-body);
+  font: var(--af-small);
+}
+
+.field-label {
+  display: block;
+  margin-top: var(--af-space-3);
+  margin-bottom: var(--af-space-1);
+  font: var(--af-small);
+  font-weight: 600;
+  color: var(--af-navy);
+}
+
+.actions {
+  display: flex;
+  align-items: center;
+  gap: var(--af-space-2);
+  margin-top: var(--af-space-4);
+}
+
+.test-result {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--af-space-1);
+  font: var(--af-small);
+}
+.test-result.ok    { color: var(--af-success); }
+.test-result.err   { color: var(--af-error); }
+.test-result::before {
+  content: '';
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.toast {
+  position: fixed;
+  bottom: var(--af-space-4);
+  left: 50%;
+  transform: translateX(-50%);
+  padding: var(--af-space-2) var(--af-space-4);
+  background: var(--af-navy);
+  color: var(--af-surface);
+  border-radius: var(--af-radius-button);
+  font: var(--af-small);
+  box-shadow: var(--af-shadow-card);
+  opacity: 0;
+  transition: opacity .2s ease;
+  pointer-events: none;
+}
+.toast.visible { opacity: 1; }

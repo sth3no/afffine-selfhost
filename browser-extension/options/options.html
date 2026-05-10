@@ -2,73 +2,66 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <title>Affine YT Cookie Sync — Settings</title>
-  <style>
-    body {
-      font-family: -apple-system, system-ui, "Segoe UI", sans-serif;
-      max-width: 480px;
-      margin: 16px auto;
-      padding: 0 16px;
-      color: #1d1d1f;
-      background: #fafafa;
-    }
-    h1 { font-size: 18px; margin: 0 0 8px; }
-    p.hint { font-size: 13px; color: #555; margin: 0 0 16px; }
-    label { display: block; margin-top: 12px; font-size: 13px; font-weight: 600; }
-    input[type=text], input[type=password] {
-      width: 100%;
-      box-sizing: border-box;
-      padding: 8px 10px;
-      border: 1px solid #ccc;
-      border-radius: 6px;
-      font-size: 13px;
-    }
-    .row { display: flex; gap: 8px; align-items: center; margin-top: 16px; }
-    button {
-      padding: 8px 16px;
-      font-size: 13px;
-      border: 1px solid #0070f3;
-      background: #0070f3;
-      color: #fff;
-      border-radius: 6px;
-      cursor: pointer;
-    }
-    button.secondary { background: #fff; color: #0070f3; }
-    button:disabled { opacity: 0.5; cursor: default; }
-    .status {
-      margin-top: 16px;
-      padding: 10px 12px;
-      border-radius: 6px;
-      font-size: 13px;
-      background: #f0f0f0;
-      color: #444;
-    }
-    .status.ok { background: #e7f5e7; color: #1a6e1a; }
-    .status.err { background: #fde7e7; color: #a02020; }
-  </style>
+  <title>AFFiNE Capture — Settings</title>
+  <link rel="stylesheet" href="../lib/design-tokens.css">
+  <link rel="stylesheet" href="options.css">
 </head>
 <body>
-  <h1>Affine YT Cookie Sync</h1>
-  <p class="hint">Send your YouTube cookies to a self-hosted Affine ingest endpoint so cobalt + yt-dlp can fetch authenticated content. Cookies are written atomically to a tmpfs volume; never logged.</p>
+  <div class="page">
+    <header class="page-head">
+      <h1>AFFiNE Capture</h1>
+      <p class="subtitle">Browser extension for your self-hosted ingest service</p>
+    </header>
 
-  <label for="ingestUrl">Ingest base URL</label>
-  <input type="text" id="ingestUrl" placeholder="https://ingest.example.com:3200" autocomplete="url">
+    <nav class="tabs" role="tablist">
+      <a href="#settings" class="tab" data-tab="settings" role="tab">Settings</a>
+      <a href="#history"  class="tab" data-tab="history"  role="tab">History</a>
+      <a href="#cookies"  class="tab" data-tab="cookies"  role="tab">Cookies</a>
+    </nav>
 
-  <label for="ingestToken">Bearer token</label>
-  <input type="password" id="ingestToken" placeholder="ut_… (from your stack's INGEST_API_TOKEN)" autocomplete="off">
+    <main class="panels">
+      <!-- Settings panel -->
+      <section id="panel-settings" class="panel" role="tabpanel" data-panel="settings">
+        <af-card>
+          <h2>Server</h2>
+          <p class="hint">Where AFFiNE Capture sends your captures.</p>
 
-  <label class="row" style="margin-top: 16px; font-weight: normal; align-items: flex-start;">
-    <input type="checkbox" id="extendedScope" style="margin-top: 3px;">
-    <span style="font-size: 12px; line-height: 1.4;">Also include <code>accounts.google.com</code> cookies (helps with age-gated &amp; members-only videos). Browser will prompt for permission.</span>
-  </label>
+          <label class="field-label" for="ingestUrl">Ingest base URL</label>
+          <af-input id="ingestUrl" type="url" placeholder="https://ingest.example.com:3200"></af-input>
 
-  <div class="row">
-    <button id="save">Save</button>
-    <button id="syncNow" class="secondary">Sync now</button>
+          <label class="field-label" for="ingestToken">Bearer token</label>
+          <af-input id="ingestToken" type="password" placeholder="ut_… (your INGEST_API_TOKEN)" paste-button></af-input>
+
+          <div class="actions">
+            <af-button id="testConnection" variant="secondary">Test connection</af-button>
+            <af-button id="save" variant="primary">Save</af-button>
+            <span id="testResult" class="test-result" hidden></span>
+          </div>
+        </af-card>
+      </section>
+
+      <!-- History panel — placeholder until Phase 6 -->
+      <section id="panel-history" class="panel" role="tabpanel" data-panel="history" hidden>
+        <af-card>
+          <h2>History</h2>
+          <p class="hint">Recent captures appear here. Coming in Phase 6.</p>
+        </af-card>
+      </section>
+
+      <!-- Cookies panel — placeholder until Phase 7 -->
+      <section id="panel-cookies" class="panel" role="tabpanel" data-panel="cookies" hidden>
+        <af-card>
+          <h2>YouTube cookies</h2>
+          <p class="hint">Cookie sync status and controls. Coming in Phase 7.</p>
+          <p class="hint" style="margin-top: var(--af-space-2);">
+            Until Phase 7, the v0.1 options page (now superseded) was the only place
+            to trigger a manual sync. Auto-sync still runs on cookie change + daily.
+          </p>
+        </af-card>
+      </section>
+    </main>
   </div>
 
-  <div id="status" class="status">Last sync: never.</div>
-
-  <script src="options.js"></script>
+  <script type="module" src="options.js"></script>
 </body>
 </html>
