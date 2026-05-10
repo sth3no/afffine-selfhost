@@ -94,3 +94,43 @@ describe('<af-input>', () => {
     expect(received).toBe('new');
   });
 });
+
+import '../af-status-badge.js';
+
+describe('<af-status-badge>', () => {
+  it('registers', () => {
+    expect(customElements.get('af-status-badge')).toBeTypeOf('function');
+  });
+
+  it('renders done with green check', () => {
+    const el = document.createElement('af-status-badge');
+    el.setAttribute('status', 'done');
+    document.body.appendChild(el);
+    const root = el.shadowRoot;
+    expect(root.querySelector('.done')).toBeTruthy();
+    expect(root.innerHTML).toContain('<polyline');  // checkIcon
+  });
+
+  it('renders failed with red x', () => {
+    const el = document.createElement('af-status-badge');
+    el.setAttribute('status', 'failed');
+    document.body.appendChild(el);
+    expect(el.shadowRoot.querySelector('.failed')).toBeTruthy();
+  });
+
+  it('renders queued/extracting/classifying/filing as in-progress', () => {
+    for (const s of ['queued', 'extracting', 'classifying', 'filing']) {
+      const el = document.createElement('af-status-badge');
+      el.setAttribute('status', s);
+      document.body.appendChild(el);
+      expect(el.shadowRoot.querySelector('.in-progress'), s).toBeTruthy();
+    }
+  });
+
+  it('renders fallback for unknown status', () => {
+    const el = document.createElement('af-status-badge');
+    el.setAttribute('status', 'mystery');
+    document.body.appendChild(el);
+    expect(el.shadowRoot.querySelector('.unknown')).toBeTruthy();
+  });
+});
