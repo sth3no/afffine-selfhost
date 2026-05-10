@@ -1,101 +1,109 @@
 /**
- * Options page — read/write extension config and trigger manual sync.
+ * AFFiNE Capture — options page.
+ *
+ * Three tabs: Settings (this phase) · History (Phase 6) · Cookies (Phase 7).
+ * URL hash routes drive tab visibility. The Settings tab persists URL + token
+ * to chrome.storage.local via lib/storage.js, and Test connection hits the
+ * health endpoint via lib/api.js.
  */
+import '../options/components/af-button.js';
+import '../options/components/af-input.js';
+import '../options/components/af-card.js';
+import { getConfig, setConfig } from '../lib/storage.js';
+import { health, IngestError } from '../lib/api.js';
 
+const VALID_TABS = ['settings', 'history', 'cookies'];
+
+const $tabs = document.querySelectorAll('.tab');
+const $panels = document.querySelectorAll('.panel');
 const $url = document.getElementById('ingestUrl');
 const $token = document.getElementById('ingestToken');
+const $test = document.getElementById('testConnection');
 const $save = document.getElementById('save');
-const $syncNow = document.getElementById('syncNow');
-const $status = document.getElementById('status');
-const $extendedScope = document.getElementById('extendedScope');
+const $testResult = document.getElementById('testResult');
 
-// Phase 12.5: optional cookie scope (covers age-gated / members-only).
-const EXTENDED_ORIGINS = ['*://accounts.google.com/*', '*://*.google.com/*'];
+routeFromHash();
+window.addEventListener('hashchange', routeFromHash);
 
-// Load existing values + last-sync status.
-chrome.storage.local.get(['ingestUrl', 'ingestToken', 'lastSync', 'extendedScope']).then(data => {
-  if (data.ingestUrl) $url.value = data.ingestUrl;
-  if (data.ingestToken) $token.value = data.ingestToken;
-  $extendedScope.checked = Boolean(data.extendedScope);
-  renderStatus(data.lastSync ?? null);
-});
+loadSettings();
 
-$extendedScope.addEventListener('change', async () => {
-  if ($extendedScope.checked) {
-    const granted = await chrome.permissions.request({ origins: EXTENDED_ORIGINS });
-    if (!granted) {
-      $extendedScope.checked = false;
-      setStatus('err', 'Permission denied — extended scope disabled.');
-      return;
-    }
-    await chrome.storage.local.set({ extendedScope: true });
-    setStatus('ok', 'Extended scope enabled. Click Sync now to push the broader cookie set.');
-  } else {
-    await chrome.permissions.remove({ origins: EXTENDED_ORIGINS });
-    await chrome.storage.local.set({ extendedScope: false });
-    setStatus('ok', 'Extended scope disabled.');
+$test.addEventListener('click', testConnection);
+$save.addEventListener('click', saveSettings);
+
+function currentTab() {
+  const hash = window.location.hash.replace('#', '');
+  return VALID_TABS.includes(hash) ? hash : 'settings';
+}
+
+function routeFromHash() {
+  const target = currentTab();
+  for (const tab of $tabs) {
+    tab.classList.toggle('active', tab.dataset.tab === target);
   }
-});
-
-$save.addEventListener('click', async () => {
-  const ingestUrl = $url.value.trim();
-  const ingestToken = $token.value.trim();
-
-  if (!ingestUrl) {
-    setStatus('err', 'Ingest URL is required.');
-    return;
-  }
-  // Reject HTTP unless it's localhost — extension cookies are sensitive.
-  try {
-    const u = new URL(ingestUrl);
-    if (u.protocol !== 'https:' && u.hostname !== 'localhost' && u.hostname !== '127.0.0.1') {
-      setStatus('err', 'Use HTTPS (or localhost). Plain HTTP is blocked for safety.');
-      return;
-    }
-  } catch {
-    setStatus('err', 'Ingest URL is not valid.');
-    return;
-  }
-  if (!ingestToken) {
-    setStatus('err', 'Bearer token is required.');
-    return;
-  }
-
-  await chrome.storage.local.set({ ingestUrl, ingestToken });
-  setStatus('ok', 'Saved. Click "Sync now" to push cookies immediately.');
-});
-
-$syncNow.addEventListener('click', async () => {
-  $syncNow.disabled = true;
-  $syncNow.textContent = 'Syncing…';
-  try {
-    const result = await chrome.runtime.sendMessage({ type: 'sync-now' });
-    renderStatus(result);
-  } catch (e) {
-    setStatus('err', `Sync failed: ${e?.message ?? e}`);
-  } finally {
-    $syncNow.disabled = false;
-    $syncNow.textContent = 'Sync now';
-  }
-});
-
-function renderStatus(lastSync) {
-  if (!lastSync) {
-    setStatus('', 'Last sync: never.');
-    return;
-  }
-  if (lastSync.ok) {
-    const when = new Date(lastSync.synced_at).toLocaleString();
-    setStatus(
-      'ok',
-      `Synced ${when}. ${lastSync.cookie_count} cookies, ${lastSync.byte_count} bytes.`,
-    );
-  } else {
-    setStatus('err', `Sync failed: ${lastSync.error ?? 'unknown'}`);
+  for (const panel of $panels) {
+    panel.hidden = panel.dataset.panel !== target;
   }
 }
 
-function setStatus(kind, msg) {
-  $status.className = `status ${kind}`;
-  $status.textContent = msg;
+async function loadSettings() {
+  const cfg = await getConfig();
+  // Wait a microtask so the Web Components have wired their value setters.
+  await new Promise(r => requestAnimationFrame(r));
+  $url.value = cfg.ingestUrl ?? '';
+  $token.value = cfg.ingestToken ?? '';
+}
+
+async function testConnection() {
+  $testResult.hidden = false;
+  $testResult.className = 'test-result';
+  $testResult.textContent = 'Testing…';
+  // Save current values first so health() reads them via storage.
+  await setConfig({ ingestUrl: $url.value.trim(), ingestToken: $token.value.trim() });
+  try {
+    const res = await health();
+    if (res?.ok) {
+      $testResult.classList.add('ok');
+      $testResult.textContent = `OK · v${res.version ?? '?'} · queue ${res.queue_depth ?? 0}`;
+    } else {
+      $testResult.classList.add('err');
+      $testResult.textContent = 'Server replied not-ok';
+    }
+  } catch (e) {
+    $testResult.classList.add('err');
+    if (e instanceof IngestError) {
+      $testResult.textContent = errorLabel(e);
+    } else {
+      $testResult.textContent = e?.message ?? 'Failed';
+    }
+  }
+}
+
+async function saveSettings() {
+  const url = $url.value.trim();
+  const token = $token.value.trim();
+  await setConfig({ ingestUrl: url || null, ingestToken: token || null });
+  showToast('Saved');
+}
+
+function errorLabel(err) {
+  switch (err.kind) {
+    case 'invalid_token':  return 'Token rejected';
+    case 'config':         return 'URL / token not configured';
+    case 'rate_limited':   return `Rate limited (${err.retryAfter ?? '?'}s)`;
+    case 'network':        return `Couldn't reach server`;
+    case 'server':         return `Server error ${err.status ?? ''}`.trim();
+    default:               return err.message ?? 'Failed';
+  }
+}
+
+function showToast(text) {
+  let toast = document.querySelector('.toast');
+  if (!toast) {
+    toast = document.createElement('div');
+    toast.className = 'toast';
+    document.body.appendChild(toast);
+  }
+  toast.textContent = text;
+  toast.classList.add('visible');
+  setTimeout(() => toast.classList.remove('visible'), 2000);
 }
