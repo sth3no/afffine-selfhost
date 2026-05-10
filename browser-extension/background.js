@@ -8,6 +8,11 @@
 import { syncCookies } from './cookies/sync.js';
 import { refreshBadge } from './lib/badge.js';
 import { performCapture } from './capture/handler.js';
+import {
+  registerContextMenus,
+  handleContextMenuClick,
+  registerNotificationHandlers,
+} from './capture/context-menu.js';
 
 const ALARM_DAILY_SYNC = 'yt-cookie-daily-sync';
 const ALARM_DEBOUNCE_SYNC = 'yt-cookie-debounce-sync';
@@ -18,6 +23,7 @@ const DEBOUNCE_MINUTES = 0.5;
 chrome.runtime.onInstalled.addListener(() => {
   syncCookies();
   chrome.alarms.create(ALARM_DAILY_SYNC, { periodInMinutes: 60 * 24 });
+  registerContextMenus();
 });
 
 // Restore badge state from storage when the worker wakes up.
@@ -30,6 +36,12 @@ chrome.cookies.onChanged.addListener(({ cookie }) => {
   if (!cookie?.domain?.includes('youtube.com')) return;
   chrome.alarms.create(ALARM_DEBOUNCE_SYNC, { delayInMinutes: DEBOUNCE_MINUTES });
 });
+
+chrome.contextMenus.onClicked.addListener((info, tab) => {
+  handleContextMenuClick(info, tab);
+});
+
+registerNotificationHandlers();
 
 chrome.alarms.onAlarm.addListener(alarm => {
   if (alarm.name === ALARM_DAILY_SYNC || alarm.name === ALARM_DEBOUNCE_SYNC) {
