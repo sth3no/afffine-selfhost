@@ -1,0 +1,79 @@
+{
+  "manifest_version": 3,
+  "name": "AFFiNE Capture",
+  "version": "0.2.0",
+  "description": "Save any web content to your self-hosted AFFiNE workspace via the ingest service. Also keeps YouTube cookies synced so cobalt + yt-dlp can fetch authenticated content.",
+  "permissions": [
+    "cookies",
+    "storage",
+    "alarms",
+    "contextMenus",
+    "scripting",
+    "activeTab",
+    "notifications"
+  ],
+  "host_permissions": [
+    "*://*.youtube.com/*",
+    "*://*.instagram.com/*",
+    "*://*.x.com/*",
+    "*://*.twitter.com/*",
+    "*://*.tiktok.com/*",
+    "*://*.reddit.com/*",
+    "https://*/*",
+    "http://*/*"
+  ],
+  "optional_host_permissions": [
+    "*://*.google.com/*",
+    "*://accounts.google.com/*"
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "content/_shared/canonicalizers.js",
+        "content/_shared/pill.js",
+        "content/_shared/dispatch.js",
+        "lib/design-tokens.css"
+      ],
+      "matches": [
+        "*://*.youtube.com/*",
+        "*://*.instagram.com/*",
+        "*://x.com/*",
+        "*://*.x.com/*",
+        "*://twitter.com/*",
+        "*://*.twitter.com/*",
+        "*://*.tiktok.com/*",
+        "*://*.reddit.com/*"
+      ]
+    }
+  ],
+  "content_scripts": [
+    { "matches": ["*://*.youtube.com/*"], "js": ["content/youtube.js"], "run_at": "document_idle" },
+    { "matches": ["*://x.com/*", "*://*.x.com/*", "*://twitter.com/*", "*://*.twitter.com/*"], "js": ["content/twitter.js"], "run_at": "document_idle" },
+    { "matches": ["*://*.tiktok.com/*"], "js": ["content/tiktok.js"], "run_at": "document_idle" },
+    { "matches": ["*://*.reddit.com/*"], "js": ["content/reddit.js"], "run_at": "document_idle" }
+  ],
+  "background": {
+    "scripts": ["background.js"],
+    "type": "module"
+  },
+  "options_ui": {
+    "page": "options/options.html",
+    "open_in_tab": false
+  },
+  "action": {
+    "default_popup": "popup/popup.html",
+    "default_title": "AFFiNE Capture"
+  },
+  "icons": {
+    "16": "icons/icon-16.png",
+    "32": "icons/icon-32.png",
+    "48": "icons/icon-48.png",
+    "128": "icons/icon-128.png"
+  },
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "affine-capture@affine.local",
+      "strict_min_version": "109.0"
+    }
+  }
+}

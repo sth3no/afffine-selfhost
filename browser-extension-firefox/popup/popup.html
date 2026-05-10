@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>AFFiNE Capture</title>
+  <link rel="stylesheet" href="../lib/design-tokens.css">
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <header class="page-header">
+    <img id="favicon" alt="" width="16" height="16">
+    <span id="pageTitle" class="page-title">Loading…</span>
+  </header>
+
+  <button id="captureBtn" class="primary" type="button">Save to AFFiNE</button>
+
+  <div id="captureStatus" class="capture-status" hidden></div>
+
+  <footer class="footer">
+    <div id="cookieStatus" class="cookie-status">Cookies: …</div>
+    <a id="openOptions" class="link" href="#">Open AFFiNE Capture →</a>
+  </footer>
+
+  <script type="module" src="popup.js"></script>
+</body>
+</html>

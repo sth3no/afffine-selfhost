@@ -1,0 +1,44 @@
+/**
+ * Capture API client. Thin wrappers over lib/api.js for the five capture-side
+ * endpoints:
+ *
+ *   POST   /capture
+ *   GET    /captures?limit=&status=&cursor=
+ *   GET    /captures/{id}
+ *   POST   /captures/{id}/retry
+ *   DELETE /captures/{id}
+ *
+ * Each method returns the parsed JSON; lib/api.js maps non-2xx into IngestError.
+ */
+import { request } from '../lib/api.js';
+
+/**
+ * @param {{url?: string, source_app?: string|null, shared_title?: string,
+ *           shared_text?: string}} payload
+ * @returns {Promise<{capture_id: string, doc_id: string, web_url: string,
+ *           status: string, platform: string, initial_path: string,
+ *           created_at: string}>}
+ */
+export async function captureUrl(payload) {
+  return await request('POST', '/capture', { body: payload });
+}
+
+export async function listCaptures({ limit = 50, status, cursor } = {}) {
+  const params = new URLSearchParams();
+  params.set('limit', String(limit));
+  if (status) params.set('status', status);
+  if (cursor) params.set('cursor', cursor);
+  return await request('GET', `/captures?${params}`);
+}
+
+export async function getCapture(id) {
+  return await request('GET', `/captures/${encodeURIComponent(id)}`);
+}
+
+export async function retryCapture(id) {
+  return await request('POST', `/captures/${encodeURIComponent(id)}/retry`);
+}
+
+export async function deleteCapture(id) {
+  return await request('DELETE', `/captures/${encodeURIComponent(id)}`);
+}

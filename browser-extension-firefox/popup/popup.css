@@ -1,0 +1,80 @@
+/* AFFiNE Capture — popup styles (share-sheet style; spec §4.1) */
+
+body {
+  font-family: var(--af-font);
+  width: 360px;
+  margin: 0;
+  padding: var(--af-space-3);
+  color: var(--af-navy);
+  background: var(--af-surface);
+  font: var(--af-body);
+}
+
+.page-header {
+  display: flex;
+  align-items: center;
+  gap: var(--af-space-2);
+  margin-bottom: var(--af-space-3);
+  min-height: 20px;
+}
+
+.page-title {
+  font: var(--af-small);
+  color: var(--af-text-body);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex: 1;
+}
+
+button.primary {
+  width: 100%;
+  padding: var(--af-space-2) var(--af-space-3);
+  font: var(--af-body);
+  font-weight: 600;
+  color: var(--af-surface);
+  background: var(--af-blue);
+  border: none;
+  border-radius: var(--af-radius-button);
+  cursor: pointer;
+  transition: transform .15s ease, filter .15s ease;
+}
+button.primary:hover { transform: translateY(-1px); }
+button.primary:active { filter: brightness(0.92); transform: none; }
+button.primary:disabled { opacity: .5; cursor: default; transform: none; }
+
+.capture-status {
+  margin-top: var(--af-space-3);
+  padding: var(--af-space-2) var(--af-space-3);
+  font: var(--af-small);
+  border-radius: var(--af-radius-button);
+  background: var(--af-bg-soft);
+  color: var(--af-navy);
+}
+.capture-status.ok    { background: #E7F5E7; color: #1A6E1A; }
+.capture-status.err   { background: #FDE7E7; color: #A02020; }
+.capture-status .open-link {
+  color: inherit;
+  text-decoration: underline;
+  margin-left: var(--af-space-2);
+}
+
+.footer {
+  margin-top: var(--af-space-3);
+  padding-top: var(--af-space-2);
+  border-top: 1px solid var(--af-border);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: var(--af-space-2);
+  font: var(--af-small);
+  color: var(--af-text-body);
+}
+.footer .link {
+  color: var(--af-blue);
+  text-decoration: none;
+}
+.footer .link:hover { text-decoration: underline; }
+
+.cookie-status.warn { color: #856404; }
+.cookie-status.err  { color: var(--af-error); }
