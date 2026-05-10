@@ -3,6 +3,10 @@
  * Source: portainer-stack/docs/specs/2026-05-10-browser-extension-multitool-design.md §5
  *
  * Imported by every UI surface (popup, options, Web Component Shadow DOMs).
+ *
+ * Selector is :root for popup / options / regular pages. Shadow DOM consumers
+ * (Phase 4 Web Components) must re-target to :host or load this sheet via
+ * adoptedStyleSheets — see spec §5.
  */
 :root {
   /* Color */
