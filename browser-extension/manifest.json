@@ -26,6 +26,13 @@
     "*://*.google.com/*",
     "*://accounts.google.com/*"
   ],
+  "content_scripts": [
+    { "matches": ["*://*.youtube.com/*"], "js": ["content/youtube.js"], "run_at": "document_idle" },
+    { "matches": ["*://*.instagram.com/*"], "js": ["content/instagram.js"], "run_at": "document_idle" },
+    { "matches": ["*://x.com/*", "*://*.x.com/*", "*://twitter.com/*", "*://*.twitter.com/*"], "js": ["content/twitter.js"], "run_at": "document_idle" },
+    { "matches": ["*://*.tiktok.com/*"], "js": ["content/tiktok.js"], "run_at": "document_idle" },
+    { "matches": ["*://*.reddit.com/*"], "js": ["content/reddit.js"], "run_at": "document_idle" }
+  ],
   "background": {
     "service_worker": "background.js",
     "type": "module"
