@@ -226,7 +226,7 @@ async def _replace_doc_body_templated(
 
     blocks: list[dict[str, Any]] = []
     if url:
-        blocks.append(_url_embed_block(url))
+        blocks.append(url_embed_block(url))
 
     if rendered is None:
         # Render failed (no API key / Claude error / parse fail). The capture
@@ -275,7 +275,7 @@ async def _delete_stub_block(*, filer: Filer, doc_id: str) -> None:
             return
 
 
-def _url_embed_block(url: str) -> dict[str, Any]:
+def url_embed_block(url: str) -> dict[str, Any]:
     """Pick the right AFFiNE embed block type for a given URL.
 
     AFFiNE has dedicated rich-preview embed flavours for a few platforms

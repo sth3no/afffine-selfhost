@@ -346,3 +346,26 @@ def test_rerender_400_when_no_snapshot_and_no_reextract_flag(client, monkeypatch
     r = c.post("/captures/cap1/rerender", headers=HEADERS)
     assert r.status_code == 400
     assert "reextract" in r.text.lower()
+
+
+def test_rerender_501_when_reextract_requested(client, monkeypatch):
+    c, repo = client
+    from src.db import CaptureRow
+
+    row = CaptureRow(
+        id="cap1", url="https://example.com", url_hash="h",
+        source_app=None, shared_title=None, shared_text=None,
+        platform="youtube", status="done", doc_id=None,
+        web_url=None, topic_path=None,
+        extracted_snapshot=None,
+    )
+
+    fake_get_by_id = AsyncMock(return_value=row)
+    monkeypatch.setattr("src.db.CaptureRepository.get_by_id", fake_get_by_id, raising=False)
+
+    fake_pool, _ = _make_fake_pool(row)
+    monkeypatch.setattr(app_state, "pool", fake_pool, raising=False)
+
+    r = c.post("/captures/cap1/rerender?reextract=true", headers=HEADERS)
+    assert r.status_code == 501
+    assert "reextract" in r.text.lower()

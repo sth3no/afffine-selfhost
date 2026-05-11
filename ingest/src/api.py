@@ -7,6 +7,7 @@ endpoints land in Phase 7. Worker loop in Phase 6.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 from contextlib import asynccontextmanager
@@ -39,6 +40,7 @@ from src.models import (
     normalized_url,
     url_hash,
 )
+from src.pipeline.extracted import Extracted, MediaKind
 from src.pipeline.template_synth import synthesize_template
 from src.pipeline.templates import ContentTemplate, TemplatesRepository
 from src.pipeline.templated_render import render as templated_render
@@ -635,6 +637,22 @@ async def synth_endpoint(
     return _template_to_view(tmpl, 0)
 
 
+def _snapshot_to_extracted(snap) -> Extracted:
+    """Deserialize a JSONB extracted_snapshot (dict or JSON string) to an
+    Extracted record. Returns a fresh dataclass instance."""
+    if isinstance(snap, str):
+        snap = json.loads(snap)
+    published_at = snap.get("published_at")
+    return Extracted(
+        title=snap.get("title"),
+        body_md=snap.get("body_md", ""),
+        author=snap.get("author"),
+        published_at=datetime.fromisoformat(published_at) if published_at else None,
+        media_kind=MediaKind(snap.get("media_kind", "video")),
+        extra=snap.get("extra") or {},
+    )
+
+
 async def _load_sample_extracted(
     *,
     sample_capture_id: str | None,
@@ -644,7 +662,6 @@ async def _load_sample_extracted(
     """Load the most recent capture's extracted_snapshot for the given scope,
     or the specific row if sample_capture_id is provided. Returns an Extracted
     record or None."""
-    from src.pipeline.extracted import Extracted, MediaKind
     if app_state.pool is None:
         return None
     async with app_state.pool.acquire() as conn:
@@ -665,19 +682,7 @@ async def _load_sample_extracted(
             )
     if row is None or row["extracted_snapshot"] is None:
         return None
-    import json
-    snap = row["extracted_snapshot"]
-    if isinstance(snap, str):
-        snap = json.loads(snap)
-    published_at = snap.get("published_at")
-    return Extracted(
-        title=snap.get("title"),
-        body_md=snap.get("body_md", ""),
-        author=snap.get("author"),
-        published_at=datetime.fromisoformat(published_at) if published_at else None,
-        media_kind=MediaKind(snap.get("media_kind", "video")),
-        extra=snap.get("extra") or {},
-    )
+    return _snapshot_to_extracted(row["extracted_snapshot"])
 
 
 @app.post("/captures/{capture_id}/rerender", response_model=CaptureDetail)
@@ -687,8 +692,18 @@ async def rerender_capture(
     _: str = require_token,
 ):
     """Re-run the currently-resolved template against the capture's stored
-    extracted_snapshot. With ?reextract=true, fall back to re-fetching the
-    URL if no snapshot exists (older pre-template captures).
+    extracted_snapshot.
+
+    With ?reextract=true, fall back to re-fetching the URL if no snapshot
+    exists (older pre-template captures). Not yet implemented in v1.
+
+    v1 caveats:
+    - **Append-only.** Blocks are appended to the existing doc body — calling
+      this multiple times for the same capture will accumulate duplicate
+      Summary / body sections. Replace/diff semantics are planned for v2.
+    - **No concurrency lock.** Two simultaneous rerenders of the same capture
+      will both succeed; blocks will be duplicated in the AFFiNE doc. For
+      single-user self-hosted deployments this is acceptable.
     """
     repo_t = _require_templates_repo()
     if app_state.pool is None:
@@ -700,7 +715,7 @@ async def rerender_capture(
         if row is None:
             raise HTTPException(status_code=404)
 
-        snapshot = getattr(row, "extracted_snapshot", None)
+        snapshot = row.extracted_snapshot
         if snapshot is None and not reextract:
             raise HTTPException(
                 status_code=400,
@@ -711,24 +726,15 @@ async def rerender_capture(
         if snapshot is None:
             raise HTTPException(
                 status_code=501,
-                detail="reextract=true not implemented for v1 — coming in v2.",
+                detail=(
+                    "reextract=true is not yet supported. Captures processed before "
+                    "Phase 14 (no extracted_snapshot) cannot be rerendered. Workaround: "
+                    "POST /capture again with the original URL to create a new processed "
+                    "capture, then rerender that."
+                ),
             )
 
-        from src.pipeline.extracted import Extracted, MediaKind
-        import json
-        if isinstance(snapshot, str):
-            snapshot = json.loads(snapshot)
-        published_at_raw = snapshot.get("published_at")
-        extracted = Extracted(
-            title=snapshot.get("title"),
-            body_md=snapshot.get("body_md", ""),
-            author=snapshot.get("author"),
-            published_at=(
-                datetime.fromisoformat(published_at_raw) if published_at_raw else None
-            ),
-            media_kind=MediaKind(snapshot.get("media_kind", "video")),
-            extra=snapshot.get("extra") or {},
-        )
+        extracted = _snapshot_to_extracted(snapshot)
 
         # Resolve current template for this capture's (platform, topic).
         topic = getattr(row, "classifier_topic", None) or "*"
@@ -762,10 +768,10 @@ async def rerender_capture(
             )
         else:
             from src.pipeline.markdown_render import markdown_to_blocks
-            from src.pipeline.orchestrator import _url_embed_block
+            from src.pipeline.orchestrator import url_embed_block
             blocks: list[dict] = []
             if row.url:
-                blocks.append(_url_embed_block(row.url))
+                blocks.append(url_embed_block(row.url))
             if rendered.lede:
                 blocks.append({"type": "callout", "text": rendered.lede})
             if rendered.summary_md:
