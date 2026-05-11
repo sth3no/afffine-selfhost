@@ -90,7 +90,8 @@ mechanisms.
 
 **Effort:** ~2-4 hours. Single PR.
 
-**Detailed plan:** `docs/plans/2026-05-12-phase-15-keyframes-appear.md` (TBD when phase starts)
+**Status:** ✅ Shipped (commit `0882ec7`).
+**Detailed plan:** [`2026-05-12-phase-15-keyframes-appear.md`](2026-05-12-phase-15-keyframes-appear.md)
 
 ---
 
