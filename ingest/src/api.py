@@ -53,6 +53,7 @@ class AppState:
     router: PlatformRouter | None = None
     worker: Worker | None = None
     worker_task: asyncio.Task | None = None
+    templates_repo: object | None = None
 
 
 app_state = AppState()
@@ -89,6 +90,10 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     if settings.database_url and "placeholder" not in settings.database_url:
         app_state.pool = await create_pool(settings.database_url)
 
+    if app_state.pool is not None:
+        from src.pipeline.templates import TemplatesRepository
+        app_state.templates_repo = TemplatesRepository(app_state.pool)
+
     # Filer needs the pool + an embed function for topic-folder dedup
     # (Phase 5). Without these, every confident-classified capture
     # raises "move_to_topic_folder requires embeddings_repo, ..." at
@@ -108,8 +113,9 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
             if n > 0:
                 log.info("crash recovery: reset %d in-flight rows to queued", n)
 
-    # Start the worker (only when pool, filer, and router are available).
-    if app_state.pool is not None and app_state.filer is not None and app_state.router is not None:
+    # Start the worker (only when pool, filer, router, and templates_repo are available).
+    if app_state.pool is not None and app_state.filer is not None \
+           and app_state.router is not None and app_state.templates_repo is not None:
         from src.pipeline.orchestrator import process_capture
         from src.pipeline.classifier import classify
         from src.pipeline.extractors import get_extractor
@@ -124,6 +130,7 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
                 filer=app_state.filer,
                 extract_fn=extractor,
                 classify_fn=classify,
+                templates_repo=app_state.templates_repo,
             )
 
         def _platform_for(row):

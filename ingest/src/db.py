@@ -160,6 +160,46 @@ class CaptureRepository:
             capture_id,
         )
 
+    async def save_template_run(
+        self,
+        *,
+        capture_id: str,
+        template_id: str,
+        prompt_used: str,
+        output_raw: str,
+    ) -> None:
+        """Persist which template ran for this capture, plus the prompt and body
+        snapshots needed for audit and replay."""
+        await self._conn.execute(
+            """
+            UPDATE captures
+            SET template_id = $2,
+                template_prompt_used = $3,
+                template_output_raw = $4,
+                updated_at = NOW()
+            WHERE id = $1
+            """,
+            capture_id, template_id, prompt_used, output_raw,
+        )
+
+    async def save_extracted_snapshot(
+        self,
+        *,
+        capture_id: str,
+        snapshot: dict,
+    ) -> None:
+        """Persist the Extracted record as JSONB so /captures/{id}/rerender
+        can replay against the same inputs without re-fetching the source."""
+        import json
+        await self._conn.execute(
+            """
+            UPDATE captures
+            SET extracted_snapshot = $2::jsonb, updated_at = NOW()
+            WHERE id = $1
+            """,
+            capture_id, json.dumps(snapshot),
+        )
+
     async def mark_failed(
         self,
         *,
