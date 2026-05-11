@@ -337,10 +337,10 @@ async def test_orchestrator_renders_failure_callout_when_render_fails(deps):
 
 
 @pytest.mark.asyncio
-async def test_orchestrator_no_hardcoded_keyframes_section(deps):
-    """Keyframes are passed to the template via render_fn; the orchestrator
-    must NOT append a hardcoded `## Keyframes` heading anymore.
-    They only appear via kf:<n> refs inside body_md, handled by markdown_render."""
+async def test_orchestrator_skips_keyframes_appendix_when_template_uses_kf_refs(deps):
+    """When the template's `body_md` already embeds `kf:N` references,
+    the orchestrator must NOT append a fallback `## Keyframes` heading
+    (the template surfaced the keyframes inline already)."""
     plat = _platform()
     deps["filer"].move_to_topic_folder.return_value = "f-tech"
 
@@ -348,11 +348,14 @@ async def test_orchestrator_no_hardcoded_keyframes_section(deps):
         title="Hello", body_md="Body.", author="a", published_at=None,
         media_kind=MediaKind.VIDEO,
         extra={"keyframes": [
-            {"timestamp_seconds": 1.0, "caption": "x", "blob_source_id": "blob1"},
+            {"timestamp_seconds": 1.0, "caption": "frame zero", "blob_source_id": "blob0"},
+            {"timestamp_seconds": 2.0, "caption": "frame one", "blob_source_id": "blob1"},
         ]},
     )
+    # Template's body_md DOES use kf:0 — so the fallback should be skipped.
     deps["render_fn"].return_value = TemplatedOutput(
-        title="T", lede=None, summary_md="- a", body_md="body without kf refs",
+        title="T", lede=None, summary_md="- a",
+        body_md="## Section\n\n![the frame](kf:0)\n\nMore text.",
     )
 
     await process_capture(
@@ -362,11 +365,102 @@ async def test_orchestrator_no_hardcoded_keyframes_section(deps):
         templates_repo=deps["templates_repo"], render_fn=deps["render_fn"],
     )
 
-    # render_fn received the keyframes list as a context input:
-    rkw = deps["render_fn"].await_args.kwargs
-    assert len(rkw["keyframes"]) == 1
+    blocks = deps["filer"]._mcp.append_blocks.await_args.args[1]
+    keyframes_headings = [
+        b for b in blocks
+        if b.get("type") == "paragraph" and b.get("style") == "h2"
+        and b.get("text") == "Keyframes"
+    ]
+    assert len(keyframes_headings) == 0, \
+        "Fallback ## Keyframes section must not appear when template uses kf:N"
 
-    # No "## Keyframes" heading appears anywhere in append_blocks payload:
+
+@pytest.mark.asyncio
+async def test_orchestrator_emits_keyframes_appendix_when_template_does_not_use_kf_refs(deps):
+    """Fallback path: when keyframes exist but template's body_md doesn't
+    reference any, orchestrator appends a `## Keyframes` h2 + image blocks
+    backed by the keyframes' blob_source_ids."""
+    plat = _platform()
+    deps["filer"].move_to_topic_folder.return_value = "f-tech"
+
+    deps["extract_fn"].return_value = Extracted(
+        title="Hello", body_md="Body.", author="a", published_at=None,
+        media_kind=MediaKind.VIDEO,
+        extra={"keyframes": [
+            {"timestamp_seconds": 1.0, "caption": "IDE", "blob_source_id": "blob0"},
+            {"timestamp_seconds": 2.5, "caption": "Network panel", "blob_source_id": "blob1"},
+            {"timestamp_seconds": 4.0, "caption": "Final result", "blob_source_id": "blob2"},
+            {"timestamp_seconds": 6.0, "caption": "Outro", "blob_source_id": "blob3"},
+        ]},
+    )
+    # Template's body_md does NOT reference any kf:N — fallback kicks in.
+    deps["render_fn"].return_value = TemplatedOutput(
+        title="T", lede=None, summary_md="- a",
+        body_md="## Section\n\nNo keyframe references at all.",
+    )
+
+    await process_capture(
+        _row(), platform=plat, topics=_topics(plat),
+        repo=deps["repo"], filer=deps["filer"],
+        extract_fn=deps["extract_fn"], classify_fn=deps["classify_fn"],
+        templates_repo=deps["templates_repo"], render_fn=deps["render_fn"],
+    )
+
+    blocks = deps["filer"]._mcp.append_blocks.await_args.args[1]
+    # Exactly one ## Keyframes h2 heading appears.
+    keyframes_heading_indices = [
+        i for i, b in enumerate(blocks)
+        if b.get("type") == "paragraph" and b.get("style") == "h2"
+        and b.get("text") == "Keyframes"
+    ]
+    assert len(keyframes_heading_indices) == 1
+    # The blocks AFTER the heading include affine:image blocks for the keyframes.
+    after_heading = blocks[keyframes_heading_indices[0] + 1:]
+    image_blocks = [b for b in after_heading if b.get("type") == "image"]
+    # All available keyframes (up to cap) get an image block in the fallback.
+    assert len(image_blocks) == 4
+    source_ids = [b.get("sourceId") for b in image_blocks]
+    assert source_ids == ["blob0", "blob1", "blob2", "blob3"]
+    # Captions land on the image blocks.
+    captions = [b.get("caption") for b in image_blocks]
+    assert "IDE" in captions
+    assert "Network panel" in captions
+    # The fallback appears AFTER the body_md content but BEFORE the Source: footer.
+    source_indices = [
+        i for i, b in enumerate(blocks)
+        if b.get("type") == "paragraph" and b.get("style") == "text"
+        and isinstance(b.get("text"), list)
+        and any(
+            isinstance(op, dict) and op.get("text") == "Source: "
+            for op in b["text"]
+        )
+    ]
+    assert source_indices and keyframes_heading_indices[0] < source_indices[0]
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_does_not_emit_keyframes_appendix_when_no_keyframes(deps):
+    """When the source has no keyframes at all (e.g. text-only article,
+    or video where vision analysis returned no frames), no fallback
+    section should appear."""
+    plat = _platform()
+    deps["filer"].move_to_topic_folder.return_value = "f-tech"
+    # No keyframes in extra.
+    deps["extract_fn"].return_value = Extracted(
+        title="x", body_md="Body.", author=None, published_at=None,
+        media_kind=MediaKind.TEXT, extra={},
+    )
+    deps["render_fn"].return_value = TemplatedOutput(
+        title="T", lede=None, summary_md="- a", body_md="b",
+    )
+
+    await process_capture(
+        _row(), platform=plat, topics=_topics(plat),
+        repo=deps["repo"], filer=deps["filer"],
+        extract_fn=deps["extract_fn"], classify_fn=deps["classify_fn"],
+        templates_repo=deps["templates_repo"], render_fn=deps["render_fn"],
+    )
+
     blocks = deps["filer"]._mcp.append_blocks.await_args.args[1]
     keyframes_headings = [
         b for b in blocks

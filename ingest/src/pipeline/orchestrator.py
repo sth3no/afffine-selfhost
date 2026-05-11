@@ -20,7 +20,7 @@ from src.db import CaptureRepository, CaptureRow
 from src.pipeline.classification import ClassificationResult
 from src.pipeline.extracted import Extracted
 from src.pipeline.filer import Filer
-from src.pipeline.markdown_render import markdown_to_blocks
+from src.pipeline.markdown_render import count_keyframe_refs, markdown_to_blocks
 from src.pipeline.chunked_render import chunked_render
 from src.pipeline.templated_render import TemplatedOutput, fallback_title, render as templated_render
 from src.pipeline.template_synth import synthesize_template
@@ -233,11 +233,14 @@ async def _replace_doc_body_templated(
 ) -> None:
     """Delete the stub block and append the templated layout:
         [embed url]
-        [callout: lede]    (when lede != None)
+        [callout: lede]           (when rendered.lede is non-empty)
         ## Summary
         - bullets
-        <body_md tree>           ← template's structured analysis
-        ## Transcript            ← raw extracted body (always preserved)
+        <body_md tree>             ← template's structured analysis
+        ## Keyframes              (when body_md referenced zero kf:N refs
+                                    AND keyframes are available — fallback)
+        <image blocks>             ← one per keyframe
+        ## Transcript             (when extracted.body_md is non-empty)
         <extracted.body_md tree>
         Source: <url>
 
@@ -275,6 +278,27 @@ async def _replace_doc_body_templated(
             blocks.extend(
                 await markdown_to_blocks(rendered.body_md, keyframes=keyframes, mcp_client=filer._mcp)
             )
+
+    # Phase 15 fallback: when keyframes are available but body_md referenced
+    # zero of them, surface them as a `## Keyframes` appendix so the
+    # vision-call cost wasn't wasted. Templates that DO reference keyframes
+    # inline via `kf:N` skip this fallback.
+    if (
+        rendered is not None
+        and rendered.body_md
+        and keyframes
+        and not count_keyframe_refs(rendered.body_md)
+    ):
+        blocks.append({"type": "paragraph", "style": "h2", "text": "Keyframes"})
+        for kf in keyframes:
+            source_id = kf.get("blob_source_id")
+            if not source_id:
+                continue
+            blocks.append({
+                "type": "image",
+                "sourceId": source_id,
+                "caption": kf.get("caption") or "",
+            })
 
     # Always append the raw transcript/body extracted from the source.
     # The template's body_md is a summary view; this is the verbatim source
