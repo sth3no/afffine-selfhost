@@ -38,11 +38,15 @@ _INSERT_SQL = """
         ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
 """
 
-_BASE_SELECT = """
-    SELECT id, url, url_hash, source_app, shared_title, shared_text,
-           platform, status, doc_id, web_url, topic_path,
-           classifier_topic, classifier_conf, classifier_reasoning,
-           retry_count, created_at, extracted_snapshot
+_CAPTURE_COLS = (
+    "id, url, url_hash, source_app, shared_title, shared_text, "
+    "platform, status, doc_id, web_url, topic_path, "
+    "classifier_topic, classifier_conf, classifier_reasoning, "
+    "retry_count, created_at, extracted_snapshot"
+)
+
+_BASE_SELECT = f"""
+    SELECT {_CAPTURE_COLS}
     FROM captures
 """
 
@@ -89,7 +93,7 @@ class CaptureRepository:
 
     async def claim_next_queued(self) -> CaptureRow | None:
         """Atomically claim the oldest queued row, transitioning to 'extracting'."""
-        sql = """
+        sql = f"""
             UPDATE captures SET status='extracting', updated_at=NOW()
             WHERE id = (
                 SELECT id FROM captures
@@ -98,17 +102,14 @@ class CaptureRepository:
                 LIMIT 1
                 FOR UPDATE SKIP LOCKED
             )
-            RETURNING id, url, url_hash, source_app, shared_title, shared_text,
-                      platform, status, doc_id, web_url, topic_path,
-                      classifier_topic, classifier_conf, classifier_reasoning,
-                      retry_count, created_at, extracted_snapshot
+            RETURNING {_CAPTURE_COLS}
         """
         rec = await self._conn.fetchrow(sql)
         return None if rec is None else CaptureRow(**dict(rec))
 
     async def claim_due_failed(self) -> CaptureRow | None:
         """Atomically claim the oldest failed row whose retry window has opened."""
-        sql = """
+        sql = f"""
             UPDATE captures SET status = 'extracting', updated_at = NOW()
             WHERE id = (
                 SELECT id FROM captures
@@ -117,10 +118,7 @@ class CaptureRepository:
                 LIMIT 1
                 FOR UPDATE SKIP LOCKED
             )
-            RETURNING id, url, url_hash, source_app, shared_title, shared_text,
-                      platform, status, doc_id, web_url, topic_path,
-                      classifier_topic, classifier_conf, classifier_reasoning,
-                      retry_count, created_at, extracted_snapshot
+            RETURNING {_CAPTURE_COLS}
         """
         rec = await self._conn.fetchrow(sql)
         return None if rec is None else CaptureRow(**dict(rec))
@@ -281,10 +279,7 @@ class CaptureRepository:
         where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
         args.append(limit)
         sql = f"""
-            SELECT id, url, url_hash, source_app, shared_title, shared_text,
-                   platform, status, doc_id, web_url, topic_path,
-                   classifier_topic, classifier_conf, classifier_reasoning,
-                   retry_count, created_at, extracted_snapshot
+            SELECT {_CAPTURE_COLS}
             FROM captures
             {where}
             ORDER BY created_at DESC
@@ -300,7 +295,7 @@ class CaptureRepository:
         sets status back to 'queued'. Soft-deleted rows are NOT retried — the
         WHERE clause excludes them.
         """
-        sql = """
+        sql = f"""
             UPDATE captures
             SET status = 'queued',
                 retry_count = 0,
@@ -311,24 +306,18 @@ class CaptureRepository:
                 error = NULL,
                 updated_at = NOW()
             WHERE id = $1 AND status <> 'deleted'
-            RETURNING id, url, url_hash, source_app, shared_title, shared_text,
-                      platform, status, doc_id, web_url, topic_path,
-                      classifier_topic, classifier_conf, classifier_reasoning,
-                      retry_count, created_at, extracted_snapshot
+            RETURNING {_CAPTURE_COLS}
         """
         rec = await self._conn.fetchrow(sql, capture_id)
         return None if rec is None else CaptureRow(**dict(rec))
 
     async def mark_deleted(self, capture_id: str) -> "CaptureRow | None":
         """Soft-delete: status='deleted' but the row remains for audit + GET 404."""
-        sql = """
+        sql = f"""
             UPDATE captures
             SET status = 'deleted', updated_at = NOW()
             WHERE id = $1
-            RETURNING id, url, url_hash, source_app, shared_title, shared_text,
-                      platform, status, doc_id, web_url, topic_path,
-                      classifier_topic, classifier_conf, classifier_reasoning,
-                      retry_count, created_at, extracted_snapshot
+            RETURNING {_CAPTURE_COLS}
         """
         rec = await self._conn.fetchrow(sql, capture_id)
         return None if rec is None else CaptureRow(**dict(rec))

@@ -181,6 +181,7 @@ async def process_capture(
         rendered=rendered,
         keyframes=keyframes,
         url=row.url,
+        extracted=extracted,
     )
 
     await repo.mark_done(row.id)
@@ -210,14 +211,20 @@ async def _replace_doc_body_templated(
     rendered: TemplatedOutput | None,
     keyframes: list[dict[str, Any]],
     url: str | None,
+    extracted: Extracted | None = None,
 ) -> None:
     """Delete the stub block and append the templated layout:
         [embed url]
         [callout: lede]    (when lede != None)
         ## Summary
         - bullets
-        <body_md tree>
+        <body_md tree>           ← template's structured analysis
+        ## Transcript            ← raw extracted body (always preserved)
+        <extracted.body_md tree>
         Source: <url>
+
+    The transcript appendix is the user's primary signal — LLM summaries
+    are useful but the raw source must be preserved so nothing is lost.
     """
     try:
         await _delete_stub_block(filer=filer, doc_id=doc_id)
@@ -250,6 +257,15 @@ async def _replace_doc_body_templated(
             blocks.extend(
                 await markdown_to_blocks(rendered.body_md, keyframes=keyframes, mcp_client=filer._mcp)
             )
+
+    # Always append the raw transcript/body extracted from the source.
+    # The template's body_md is a summary view; this is the verbatim source
+    # so detail/timestamps/citations are never lost to LLM compression.
+    if extracted is not None and extracted.body_md and extracted.body_md.strip():
+        blocks.append({"type": "paragraph", "style": "h2", "text": "Transcript"})
+        blocks.extend(
+            await markdown_to_blocks(extracted.body_md, keyframes=keyframes, mcp_client=filer._mcp)
+        )
 
     if url:
         blocks.append({
