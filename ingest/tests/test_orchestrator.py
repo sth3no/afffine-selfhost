@@ -428,6 +428,63 @@ async def test_orchestrator_appends_raw_transcript_as_separate_section(deps):
 
 
 @pytest.mark.asyncio
+async def test_orchestrator_routes_long_body_to_chunked_render(deps, monkeypatch):
+    """Body length exceeding settings.chunked_render_threshold_chars must
+    route through chunked_render, not the single-call render_fn."""
+    from src.config import settings as cfg
+    monkeypatch.setattr(cfg, "chunked_render_threshold_chars", 100)
+
+    plat = _platform()
+    deps["filer"].move_to_topic_folder.return_value = "f-tech"
+    long_body = "x" * 500
+    deps["extract_fn"].return_value = Extracted(
+        title="Long", body_md=long_body, author="a", published_at=None,
+        media_kind=MediaKind.VIDEO, extra={},
+    )
+
+    chunked_mock = AsyncMock(return_value=TemplatedOutput(
+        title="From chunked", lede=None, summary_md="- a", body_md="b",
+    ))
+    monkeypatch.setattr("src.pipeline.orchestrator.chunked_render", chunked_mock)
+
+    await process_capture(
+        _row(), platform=plat, topics=_topics(plat),
+        repo=deps["repo"], filer=deps["filer"],
+        extract_fn=deps["extract_fn"], classify_fn=deps["classify_fn"],
+        templates_repo=deps["templates_repo"], render_fn=deps["render_fn"],
+    )
+
+    chunked_mock.assert_awaited_once()
+    deps["render_fn"].assert_not_awaited()
+    # Title surfaced from chunked path.
+    deps["filer"]._mcp.set_doc_title.assert_awaited_with("d-1", "From chunked")
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_routes_short_body_to_single_call(deps, monkeypatch):
+    """Body length under threshold uses the existing single-call render_fn."""
+    from src.config import settings as cfg
+    monkeypatch.setattr(cfg, "chunked_render_threshold_chars", 100_000)
+
+    plat = _platform()
+    deps["filer"].move_to_topic_folder.return_value = "f-tech"
+    # The default _extracted() body is ~25 chars, well under 100k threshold.
+
+    chunked_mock = AsyncMock()
+    monkeypatch.setattr("src.pipeline.orchestrator.chunked_render", chunked_mock)
+
+    await process_capture(
+        _row(), platform=plat, topics=_topics(plat),
+        repo=deps["repo"], filer=deps["filer"],
+        extract_fn=deps["extract_fn"], classify_fn=deps["classify_fn"],
+        templates_repo=deps["templates_repo"], render_fn=deps["render_fn"],
+    )
+
+    chunked_mock.assert_not_awaited()
+    deps["render_fn"].assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_orchestrator_omits_transcript_when_extracted_body_is_empty(deps):
     """If the source has no body (e.g. shared_text-only or stub capture),
     the renderer must not emit an empty `## Transcript` section."""

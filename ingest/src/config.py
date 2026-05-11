@@ -28,8 +28,24 @@ class Settings(BaseSettings):
     openai_api_key: str = ""
     anthropic_api_key: str = ""
     classifier_model: str = "claude-haiku-4-5-20251001"
-    summarizer_model: str = "claude-haiku-4-5"
+    # Sonnet 4.6 for the rendering pipeline: quality matters more than
+    # cost since we now map-reduce long transcripts, and the lede /
+    # structured-analysis output is the load-bearing artifact.
+    summarizer_model: str = "claude-sonnet-4-6"
     summarizer_max_body_chars: int = 12000
+    # Map-reduce thresholds for long transcripts. If extracted.body_md
+    # exceeds chunked_render_threshold_chars, we split into chunks
+    # of chunk_size_chars (with chunk_overlap_chars overlap), summarize
+    # each chunk via a single Sonnet call, then reduce all chunk
+    # summaries into the final TemplatedOutput via one more Sonnet call.
+    # Cost: ~N+1 Sonnet calls for an N-chunk transcript.
+    chunked_render_threshold_chars: int = 12000
+    chunk_size_chars: int = 8000
+    chunk_overlap_chars: int = 500
+    # Maximum chunks we'll process per capture. Caps cost on extreme
+    # outliers (e.g. a 3-hour podcast transcript). Beyond this we
+    # truncate and emit a note in the rendered doc.
+    max_chunks_per_capture: int = 16
     embedding_model: str = "text-embedding-3-small"
     confidence_floor: float = 0.6
     similarity_threshold: float = 0.85
