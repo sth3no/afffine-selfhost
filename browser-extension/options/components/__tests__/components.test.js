@@ -255,6 +255,80 @@ describe('<af-breadcrumb>', () => {
   });
 });
 
+import '../af-template-row.js';
+
+describe('<af-template-row>', () => {
+  function makeRow(props = {}) {
+    const el = document.createElement('af-template-row');
+    el.data = {
+      id: '01TPL',
+      platform_id: 'youtube',
+      topic: 'Tutorials',
+      name: 'YouTube Tutorial v1',
+      system_prompt: '...',
+      status: 'edited',
+      generator_meta: null,
+      created_by: 'user',
+      created_at: '2026-05-11T14:32:00Z',
+      updated_at: '2026-05-11T15:00:00Z',
+      usage_count: 14,
+      ...props,
+    };
+    document.body.appendChild(el);
+    return el;
+  }
+
+  it('registers', () => {
+    expect(customElements.get('af-template-row')).toBeTypeOf('function');
+  });
+
+  it('renders the template name', () => {
+    const el = makeRow({ name: 'My Template' });
+    expect(el.shadowRoot.querySelector('.name')?.textContent).toBe('My Template');
+  });
+
+  it('renders scope as platform · topic', () => {
+    const el = makeRow({ platform_id: 'youtube', topic: 'Tutorials' });
+    expect(el.shadowRoot.querySelector('.scope')?.textContent).toBe('youtube · Tutorials');
+  });
+
+  it('renders scope (*, *) with a "global default" label', () => {
+    const el = makeRow({ platform_id: '*', topic: '*' });
+    expect(el.shadowRoot.querySelector('.scope')?.textContent).toContain('global default');
+  });
+
+  it('renders the status pill class', () => {
+    const el = makeRow({ status: 'auto' });
+    expect(el.shadowRoot.querySelector('.pill.auto')).toBeTruthy();
+  });
+
+  it('renders usage count', () => {
+    const el = makeRow({ usage_count: 14 });
+    expect(el.shadowRoot.textContent).toContain('14');
+  });
+
+  it('emits "open" event on body click', () => {
+    const el = makeRow();
+    let received = null;
+    el.addEventListener('open', e => { received = e.detail; });
+    el.shadowRoot.querySelector('.body').click();
+    expect(received?.id).toBe('01TPL');
+  });
+
+  it('emits "archive" event on archive button click', () => {
+    const el = makeRow();
+    let received = null;
+    el.addEventListener('archive', e => { received = e.detail; });
+    el.shadowRoot.querySelector('button.archive')?.click();
+    expect(received?.id).toBe('01TPL');
+  });
+
+  it('hides the archive button for status=archived', () => {
+    const el = makeRow({ status: 'archived' });
+    expect(el.shadowRoot.querySelector('button.archive')).toBeFalsy();
+  });
+});
+
 import '../af-prompt-textarea.js';
 
 describe('<af-prompt-textarea>', () => {
