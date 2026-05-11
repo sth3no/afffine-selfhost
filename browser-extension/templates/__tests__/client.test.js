@@ -105,3 +105,30 @@ describe('templates/client', () => {
     expect('sample_capture_id' in body).toBe(false);
   });
 });
+
+import { rerenderCapture } from '../../capture/client.js';
+
+describe('capture/client.rerenderCapture', () => {
+  beforeEach(() => {
+    vi.spyOn(storage, 'getConfig').mockResolvedValue({
+      ingestUrl: 'https://ingest.test',
+      ingestToken: 'tok',
+      extendedScope: false,
+    });
+    globalThis.fetch = vi.fn().mockResolvedValue(
+      new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } }),
+    );
+  });
+
+  it('POSTs /captures/{id}/rerender', async () => {
+    await rerenderCapture('01ABC');
+    const [url, opts] = fetch.mock.calls[0];
+    expect(url).toBe('https://ingest.test/captures/01ABC/rerender');
+    expect(opts.method).toBe('POST');
+  });
+
+  it('appends ?reextract=true when requested', async () => {
+    await rerenderCapture('01ABC', { reextract: true });
+    expect(fetch.mock.calls[0][0]).toBe('https://ingest.test/captures/01ABC/rerender?reextract=true');
+  });
+});
