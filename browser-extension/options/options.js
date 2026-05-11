@@ -657,3 +657,27 @@ function formatPickerTime(iso) {
   if (sec < 86400) return `${Math.floor(sec / 3600)}h ago`;
   return `${Math.floor(sec / 86400)}d ago`;
 }
+
+// ── Server-version footer ────────────────────────────────────────────────────
+
+const EXTENSION_API_MAJOR = 0;  // bump when this code targets a new ingest major
+
+(async function renderServerVersion() {
+  const $v = document.getElementById('serverVersion');
+  if (!$v) return;
+  try {
+    const res = await health();
+    const v = res?.version ?? '?';
+    const serverMajor = Number(String(v).split('.')[0]);
+    const mismatch = Number.isFinite(serverMajor) && serverMajor !== EXTENSION_API_MAJOR;
+    if (mismatch) {
+      $v.classList.add('version-warn');
+      $v.textContent = `Server v${v} — extension targets v${EXTENSION_API_MAJOR}.x. Some features may not work.`;
+    } else {
+      $v.classList.remove('version-warn');
+      $v.textContent = `Server v${v}`;
+    }
+  } catch {
+    $v.textContent = `Server unreachable`;
+  }
+})();
