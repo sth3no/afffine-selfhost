@@ -252,3 +252,125 @@ async def test_analyze_video_caps_kept_frames_at_max_keyframes_in_doc(tmp_path, 
     )
     assert len(keyframes) == 4
     assert mcp_client.upload_blob.await_count == 4
+
+
+@pytest.mark.asyncio
+async def test_analyze_video_calls_quality_filter_between_detect_and_vision(tmp_path, monkeypatch):
+    """The Phase 16 frame-quality pre-filter runs after scene detection and
+    before the vision call. Verify it's called and that the vision call
+    receives the FILTERED (smaller) frame list."""
+    workdir = tmp_path / "wd"
+    workdir.mkdir()
+    video_path = workdir / "video.mp4"
+    video_path.write_bytes(b"fake mp4")
+
+    # Three raw frames out of scene detection ...
+    raw_frames = [
+        _ExtractedFrame(path=workdir / f"frame-{i:02d}.jpg", timestamp_seconds=float(i), index=i)
+        for i in range(3)
+    ]
+    for f in raw_frames:
+        f.path.write_bytes(b"\xff\xd8\xff\xe0fake jpeg")
+
+    monkeypatch.setattr(
+        "src.pipeline.video_analysis._detect_and_extract_frames",
+        lambda *a, **k: raw_frames,
+    )
+    monkeypatch.setattr(
+        "src.pipeline.video_analysis._resize_frames_in_place",
+        lambda *a, **k: None,
+    )
+
+    # The filter pretends to drop the middle frame and renumber the rest.
+    filter_calls: list = []
+
+    def _fake_filter(frames):
+        filter_calls.append(list(frames))
+        kept = [frames[0], frames[2]]
+        kept[0].index = 0
+        kept[1].index = 1
+        return kept
+
+    monkeypatch.setattr(
+        "src.pipeline.video_analysis.filter_low_quality_frames",
+        _fake_filter,
+    )
+
+    # Capture what frames the vision call receives.
+    vision_inputs: list = []
+
+    async def _fake_vision_call(*, transcript, frames):
+        vision_inputs.append(list(frames))
+        return _VisionAnalysis(
+            summary="ok",
+            keyframes=[_FrameCaption(frame_index=i, caption=f"frame {i}", importance=8)
+                       for i in range(len(frames))],
+        )
+
+    monkeypatch.setattr(
+        "src.pipeline.video_analysis._vision_call",
+        _fake_vision_call,
+    )
+
+    mcp_client = MagicMock()
+    mcp_client.upload_blob = AsyncMock(return_value={"sourceId": "blob"})
+
+    summary, keyframes = await analyze_video(
+        video_path=video_path,
+        workdir=workdir,
+        transcript="t",
+        capture_id="01J",
+        mcp_client=mcp_client,
+    )
+
+    # The filter was called once with the raw 3-frame list.
+    assert len(filter_calls) == 1
+    assert len(filter_calls[0]) == 3
+
+    # The vision call was called with the filtered 2-frame list.
+    assert len(vision_inputs) == 1
+    assert len(vision_inputs[0]) == 2
+    assert [f.index for f in vision_inputs[0]] == [0, 1]
+
+    assert summary == "ok"
+    assert len(keyframes) == 2
+
+
+@pytest.mark.asyncio
+async def test_analyze_video_returns_empty_when_filter_drops_all_frames(tmp_path, monkeypatch):
+    """If the quality filter drops every frame, skip the vision call entirely."""
+    workdir = tmp_path / "wd"
+    workdir.mkdir()
+    video_path = workdir / "video.mp4"
+    video_path.write_bytes(b"x")
+
+    raw_frames = [_ExtractedFrame(path=workdir / "f.jpg", timestamp_seconds=0.0, index=0)]
+    raw_frames[0].path.write_bytes(b"jpeg")
+
+    monkeypatch.setattr(
+        "src.pipeline.video_analysis._detect_and_extract_frames",
+        lambda *a, **k: raw_frames,
+    )
+    monkeypatch.setattr(
+        "src.pipeline.video_analysis.filter_low_quality_frames",
+        lambda frames: [],
+    )
+
+    vision_mock = AsyncMock()
+    monkeypatch.setattr("src.pipeline.video_analysis._vision_call", vision_mock)
+
+    mcp_client = MagicMock()
+    mcp_client.upload_blob = AsyncMock()
+
+    summary, keyframes = await analyze_video(
+        video_path=video_path,
+        workdir=workdir,
+        transcript="",
+        capture_id="01J",
+        mcp_client=mcp_client,
+    )
+
+    assert summary is None
+    assert keyframes == []
+    vision_mock.assert_not_called()
+    mcp_client.upload_blob.assert_not_awaited()
