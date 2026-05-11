@@ -27,6 +27,7 @@ class CaptureRow:
     classifier_conf: float | None = None
     classifier_reasoning: str | None = None
     retry_count: int = 0
+    extracted_snapshot: Any | None = None
 
 
 _INSERT_SQL = """
@@ -41,7 +42,7 @@ _BASE_SELECT = """
     SELECT id, url, url_hash, source_app, shared_title, shared_text,
            platform, status, doc_id, web_url, topic_path,
            classifier_topic, classifier_conf, classifier_reasoning,
-           retry_count, created_at
+           retry_count, created_at, extracted_snapshot
     FROM captures
 """
 
@@ -100,7 +101,7 @@ class CaptureRepository:
             RETURNING id, url, url_hash, source_app, shared_title, shared_text,
                       platform, status, doc_id, web_url, topic_path,
                       classifier_topic, classifier_conf, classifier_reasoning,
-                      retry_count, created_at
+                      retry_count, created_at, extracted_snapshot
         """
         rec = await self._conn.fetchrow(sql)
         return None if rec is None else CaptureRow(**dict(rec))
@@ -119,7 +120,7 @@ class CaptureRepository:
             RETURNING id, url, url_hash, source_app, shared_title, shared_text,
                       platform, status, doc_id, web_url, topic_path,
                       classifier_topic, classifier_conf, classifier_reasoning,
-                      retry_count, created_at
+                      retry_count, created_at, extracted_snapshot
         """
         rec = await self._conn.fetchrow(sql)
         return None if rec is None else CaptureRow(**dict(rec))
@@ -276,7 +277,7 @@ class CaptureRepository:
             SELECT id, url, url_hash, source_app, shared_title, shared_text,
                    platform, status, doc_id, web_url, topic_path,
                    classifier_topic, classifier_conf, classifier_reasoning,
-                   retry_count, created_at
+                   retry_count, created_at, extracted_snapshot
             FROM captures
             {where}
             ORDER BY created_at DESC
@@ -306,7 +307,7 @@ class CaptureRepository:
             RETURNING id, url, url_hash, source_app, shared_title, shared_text,
                       platform, status, doc_id, web_url, topic_path,
                       classifier_topic, classifier_conf, classifier_reasoning,
-                      retry_count, created_at
+                      retry_count, created_at, extracted_snapshot
         """
         rec = await self._conn.fetchrow(sql, capture_id)
         return None if rec is None else CaptureRow(**dict(rec))
@@ -320,7 +321,7 @@ class CaptureRepository:
             RETURNING id, url, url_hash, source_app, shared_title, shared_text,
                       platform, status, doc_id, web_url, topic_path,
                       classifier_topic, classifier_conf, classifier_reasoning,
-                      retry_count, created_at
+                      retry_count, created_at, extracted_snapshot
         """
         rec = await self._conn.fetchrow(sql, capture_id)
         return None if rec is None else CaptureRow(**dict(rec))

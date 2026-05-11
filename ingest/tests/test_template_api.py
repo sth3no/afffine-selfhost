@@ -230,3 +230,119 @@ def test_synthesize_409_when_active_template_exists(client):
     })
 
     assert r.status_code == 409
+
+
+# ── Rerender tests ────────────────────────────────────────────────────
+
+
+def _make_fake_pool(captures_row):
+    """Return a fake pool whose conn.fetchrow returns captures_row wrapped
+    in a dict (mimicking asyncpg record -> CaptureRow(**dict(rec)) path),
+    and whose conn methods are AsyncMocks for save_template_run etc.
+    The pool is used twice: once in get_by_id and once in get_by_id
+    (the final refresh). We use the same row for both calls."""
+    from unittest.mock import MagicMock, AsyncMock
+
+    fake_conn = AsyncMock()
+
+    # get_by_id calls conn.fetchrow which returns a record that CaptureRow(**dict(rec)) unpacks.
+    # We provide a dict-like object that supports **dict(rec) via dict().
+    # The cleanest way: make fetchrow return the MagicMock row itself, which
+    # the endpoint passes to CaptureRow(**dict(rec)). But CaptureRow(**dict(row))
+    # requires dict(row) to produce the right keys.
+    # Simpler: patch CaptureRepository directly via pool.
+
+    fake_pool = MagicMock()
+    fake_pool.acquire = MagicMock()
+    fake_pool.acquire.return_value.__aenter__ = AsyncMock(return_value=fake_conn)
+    fake_pool.acquire.return_value.__aexit__ = AsyncMock(return_value=None)
+    return fake_pool, fake_conn
+
+
+@pytest.mark.asyncio
+async def test_rerender_runs_current_template_against_snapshot(client, monkeypatch):
+    c, repo = client
+
+    repo.resolve = AsyncMock(return_value=_tmpl(id="t_current"))
+
+    # We patch CaptureRepository.get_by_id and save_template_run at the class level
+    # so the endpoint's `async with pool.acquire() as conn: CaptureRepository(conn)`
+    # pattern works — we give it a real-ish pool but mock the repo methods.
+    from src.db import CaptureRow
+    from datetime import datetime, timezone
+
+    snap = {
+        "title": "T", "body_md": "B", "author": None,
+        "media_kind": "video", "extra": {}, "published_at": None,
+    }
+    row = CaptureRow(
+        id="cap1", url="https://example.com", url_hash="h",
+        source_app=None, shared_title=None, shared_text=None,
+        platform="youtube", status="done", doc_id="doc1",
+        web_url=None, topic_path=None,
+        classifier_topic="Tutorials",
+        extracted_snapshot=snap,
+    )
+
+    fake_get_by_id = AsyncMock(return_value=row)
+    fake_save_template_run = AsyncMock()
+    monkeypatch.setattr("src.db.CaptureRepository.get_by_id", fake_get_by_id, raising=False)
+    monkeypatch.setattr("src.db.CaptureRepository.save_template_run", fake_save_template_run, raising=False)
+
+    # Set up a fake pool so the endpoint's pool.acquire() works.
+    fake_pool, fake_conn = _make_fake_pool(row)
+    monkeypatch.setattr(app_state, "pool", fake_pool, raising=False)
+
+    # Mock the render call.
+    from src.pipeline.templated_render import TemplatedOutput
+    fake_render = AsyncMock(return_value=TemplatedOutput(
+        title="New Title", lede="The answer.",
+        summary_md="- a", body_md="## Body\nContent.",
+    ))
+    monkeypatch.setattr("src.api.templated_render", fake_render, raising=False)
+
+    # Mock the mcp client for block replacement.
+    mcp = AsyncMock()
+    monkeypatch.setattr(app_state, "mcp", mcp, raising=False)
+
+    r = c.post("/captures/cap1/rerender", headers=HEADERS)
+
+    assert r.status_code == 200
+    fake_render.assert_awaited_once()
+    fake_save_template_run.assert_awaited_once()
+
+
+def test_rerender_404_when_capture_missing(client, monkeypatch):
+    c, repo = client
+
+    fake_get_by_id = AsyncMock(return_value=None)
+    monkeypatch.setattr("src.db.CaptureRepository.get_by_id", fake_get_by_id, raising=False)
+
+    fake_pool, _ = _make_fake_pool(None)
+    monkeypatch.setattr(app_state, "pool", fake_pool, raising=False)
+
+    r = c.post("/captures/missing/rerender", headers=HEADERS)
+    assert r.status_code == 404
+
+
+def test_rerender_400_when_no_snapshot_and_no_reextract_flag(client, monkeypatch):
+    c, repo = client
+
+    from src.db import CaptureRow
+    row = CaptureRow(
+        id="cap1", url="https://example.com", url_hash="h",
+        source_app=None, shared_title=None, shared_text=None,
+        platform="youtube", status="done", doc_id=None,
+        web_url=None, topic_path=None,
+        extracted_snapshot=None,
+    )
+
+    fake_get_by_id = AsyncMock(return_value=row)
+    monkeypatch.setattr("src.db.CaptureRepository.get_by_id", fake_get_by_id, raising=False)
+
+    fake_pool, _ = _make_fake_pool(row)
+    monkeypatch.setattr(app_state, "pool", fake_pool, raising=False)
+
+    r = c.post("/captures/cap1/rerender", headers=HEADERS)
+    assert r.status_code == 400
+    assert "reextract" in r.text.lower()

@@ -41,6 +41,7 @@ from src.models import (
 )
 from src.pipeline.template_synth import synthesize_template
 from src.pipeline.templates import ContentTemplate, TemplatesRepository
+from src.pipeline.templated_render import render as templated_render
 from src.pipeline.filer import Filer
 from src.pipeline.router import PlatformRouter
 from src.worker import Worker
@@ -677,6 +678,129 @@ async def _load_sample_extracted(
         media_kind=MediaKind(snap.get("media_kind", "video")),
         extra=snap.get("extra") or {},
     )
+
+
+@app.post("/captures/{capture_id}/rerender", response_model=CaptureDetail)
+async def rerender_capture(
+    capture_id: str,
+    reextract: bool = False,
+    _: str = require_token,
+):
+    """Re-run the currently-resolved template against the capture's stored
+    extracted_snapshot. With ?reextract=true, fall back to re-fetching the
+    URL if no snapshot exists (older pre-template captures).
+    """
+    repo_t = _require_templates_repo()
+    if app_state.pool is None:
+        raise HTTPException(status_code=503, detail="DB pool not initialized")
+
+    async with app_state.pool.acquire() as conn:
+        captures_repo = CaptureRepository(conn)
+        row = await captures_repo.get_by_id(capture_id)
+        if row is None:
+            raise HTTPException(status_code=404)
+
+        snapshot = getattr(row, "extracted_snapshot", None)
+        if snapshot is None and not reextract:
+            raise HTTPException(
+                status_code=400,
+                detail="No extracted_snapshot for this capture. Pass "
+                       "?reextract=true to refetch the source URL.",
+            )
+
+        if snapshot is None:
+            raise HTTPException(
+                status_code=501,
+                detail="reextract=true not implemented for v1 — coming in v2.",
+            )
+
+        from src.pipeline.extracted import Extracted, MediaKind
+        import json
+        if isinstance(snapshot, str):
+            snapshot = json.loads(snapshot)
+        published_at_raw = snapshot.get("published_at")
+        extracted = Extracted(
+            title=snapshot.get("title"),
+            body_md=snapshot.get("body_md", ""),
+            author=snapshot.get("author"),
+            published_at=(
+                datetime.fromisoformat(published_at_raw) if published_at_raw else None
+            ),
+            media_kind=MediaKind(snapshot.get("media_kind", "video")),
+            extra=snapshot.get("extra") or {},
+        )
+
+        # Resolve current template for this capture's (platform, topic).
+        topic = getattr(row, "classifier_topic", None) or "*"
+        template = await repo_t.resolve(platform_id=row.platform, topic=topic)
+        if template is None:
+            template = await repo_t.resolve(platform_id="*", topic="*")
+            if template is None:
+                raise HTTPException(
+                    status_code=503,
+                    detail="No template available — seed (*, *) is missing.",
+                )
+
+        # Run the render.
+        keyframes = (extracted.extra or {}).get("keyframes") or []
+        rendered = await templated_render(
+            template=template, extracted=extracted, keyframes=keyframes,
+        )
+
+        # Persist the new template_run.
+        await captures_repo.save_template_run(
+            capture_id=row.id,
+            template_id=template.id,
+            prompt_used=template.system_prompt,
+            output_raw=rendered.body_md,
+        )
+
+        # Replace blocks in the AFFiNE doc.
+        if app_state.mcp is None or row.doc_id is None:
+            log.warning(
+                "rerender: MCP unavailable or doc_id missing; skipped block update"
+            )
+        else:
+            from src.pipeline.markdown_render import markdown_to_blocks
+            from src.pipeline.orchestrator import _url_embed_block
+            blocks: list[dict] = []
+            if row.url:
+                blocks.append(_url_embed_block(row.url))
+            if rendered.lede:
+                blocks.append({"type": "callout", "text": rendered.lede})
+            if rendered.summary_md:
+                blocks.append({"type": "paragraph", "style": "h2", "text": "Summary"})
+                blocks.extend(
+                    await markdown_to_blocks(
+                        rendered.summary_md,
+                        keyframes=keyframes,
+                        mcp_client=app_state.mcp,
+                    )
+                )
+            if rendered.body_md:
+                blocks.extend(
+                    await markdown_to_blocks(
+                        rendered.body_md,
+                        keyframes=keyframes,
+                        mcp_client=app_state.mcp,
+                    )
+                )
+            if row.url:
+                blocks.append({
+                    "type": "paragraph", "style": "text",
+                    "text": [
+                        {"text": "Source: "},
+                        {"text": row.url, "italic": True, "link": row.url},
+                    ],
+                })
+            # Naive: append blocks after existing ones (v2 will diff/replace).
+            await app_state.mcp.append_blocks(row.doc_id, blocks)
+
+        # Refetch + return CaptureDetail.
+        refreshed = await captures_repo.get_by_id(capture_id)
+        if refreshed is None:
+            raise HTTPException(status_code=404)
+        return _row_to_detail(refreshed)
 
 
 # ── Routes ── Phase 12: YouTube cookies ──────────────────────────────
