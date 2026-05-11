@@ -202,3 +202,186 @@ async def test_blockquote_renders_as_quote_paragraph():
     assert blocks[0]["type"] == "paragraph"
     assert blocks[0]["style"] == "quote"
     assert "quoted sentence" in str(blocks[0]["text"])
+
+
+# ── Inline rich text (Phase 14.3 fix) ────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_bold_renders_as_inline_op_not_literal_asterisks():
+    """Pre-fix: `**bold**` rendered with literal `**` in AFFiNE. Post-fix:
+    becomes an InlineOp with `bold: true`."""
+    blocks = await markdown_to_blocks(
+        "Hello **important word** there.", keyframes=[], mcp_client=None,
+    )
+    assert len(blocks) == 1
+    ops = blocks[0]["text"]
+    assert isinstance(ops, list), "rich text must produce inline-op list, not bare string"
+    bold_ops = [op for op in ops if isinstance(op, dict) and op.get("bold")]
+    assert len(bold_ops) == 1
+    assert bold_ops[0]["text"] == "important word"
+    # No literal asterisks survive anywhere.
+    flat = "".join(op.get("text", "") for op in ops if isinstance(op, dict))
+    assert "**" not in flat
+
+
+@pytest.mark.asyncio
+async def test_italic_underscore_renders_as_inline_op():
+    blocks = await markdown_to_blocks(
+        "Wrote _by Author Name_ in the byline.", keyframes=[], mcp_client=None,
+    )
+    ops = blocks[0]["text"]
+    assert isinstance(ops, list)
+    italic_ops = [op for op in ops if isinstance(op, dict) and op.get("italic")]
+    assert len(italic_ops) == 1
+    assert italic_ops[0]["text"] == "by Author Name"
+    flat = "".join(op.get("text", "") for op in ops if isinstance(op, dict))
+    assert "_by" not in flat  # underscores should be stripped
+
+
+@pytest.mark.asyncio
+async def test_inline_code_renders_with_code_attribute():
+    blocks = await markdown_to_blocks(
+        "Use `border-image` for the panels.", keyframes=[], mcp_client=None,
+    )
+    ops = blocks[0]["text"]
+    assert isinstance(ops, list)
+    code_ops = [op for op in ops if isinstance(op, dict) and op.get("code")]
+    assert len(code_ops) == 1
+    assert code_ops[0]["text"] == "border-image"
+    flat = "".join(op.get("text", "") for op in ops if isinstance(op, dict))
+    assert "`" not in flat
+
+
+@pytest.mark.asyncio
+async def test_combined_bold_and_code_in_list_item():
+    """Bullet `**ChatGPT Image 2 (GPT-4o image generation)** — preferred...`
+    should produce bold-attributed text on the term, plain text on the rest.
+    This is the exact case the user reported."""
+    blocks = await markdown_to_blocks(
+        "- **ChatGPT Image 2 (GPT-4o image generation)** — preferred for "
+        "iterative UI component work\n",
+        keyframes=[], mcp_client=None,
+    )
+    assert len(blocks) == 1
+    assert blocks[0]["type"] == "list"
+    ops = blocks[0]["text"]
+    assert isinstance(ops, list)
+    bold_ops = [op for op in ops if isinstance(op, dict) and op.get("bold")]
+    assert len(bold_ops) == 1
+    assert "ChatGPT Image 2" in bold_ops[0]["text"]
+    flat = "".join(op.get("text", "") for op in ops if isinstance(op, dict))
+    assert "**" not in flat
+
+
+@pytest.mark.asyncio
+async def test_bold_in_heading():
+    blocks = await markdown_to_blocks(
+        "## **Important** topic\n", keyframes=[], mcp_client=None,
+    )
+    assert blocks[0]["style"] == "h2"
+    ops = blocks[0]["text"]
+    assert isinstance(ops, list)
+    bold_ops = [op for op in ops if isinstance(op, dict) and op.get("bold")]
+    assert len(bold_ops) == 1
+    assert bold_ops[0]["text"] == "Important"
+
+
+@pytest.mark.asyncio
+async def test_link_in_paragraph_uses_walker_not_regex():
+    """The new walker handles links via markdown-it; this test confirms
+    the link attribute survives the inline-op path."""
+    blocks = await markdown_to_blocks(
+        "See [the paper](https://example.com/paper.pdf) for context.",
+        keyframes=[], mcp_client=None,
+    )
+    ops = blocks[0]["text"]
+    assert isinstance(ops, list)
+    linked = [op for op in ops if isinstance(op, dict) and op.get("link")]
+    assert len(linked) == 1
+    assert linked[0]["link"] == "https://example.com/paper.pdf"
+    assert linked[0]["text"] == "the paper"
+
+
+# ── Callout edge cases (Phase 14.3 fix) ──────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_empty_callout_is_dropped_not_emitted_with_empty_body():
+    """Production showed empty callout boxes with a default emoji and no
+    text. The renderer must drop callouts whose body strips to empty."""
+    blocks = await markdown_to_blocks(
+        "## A heading\n\n> [!callout]\n\nMore content.\n",
+        keyframes=[], mcp_client=None,
+    )
+    # No callout block emitted.
+    assert all(b.get("type") != "callout" for b in blocks)
+    # Heading and the "More content." paragraph survive.
+    assert any(b.get("style") == "h2" for b in blocks)
+    flat = " ".join(
+        str(b.get("text", "")) for b in blocks
+    )
+    assert "More content." in flat
+
+
+@pytest.mark.asyncio
+async def test_multi_line_callout_with_body_on_continuation_lines():
+    """`> [!callout]\n> Body line 1\n> Body line 2` is parsed as one
+    callout with both lines as the body."""
+    md = "> [!callout]\n> First line of body.\n> Second line.\n"
+    blocks = await markdown_to_blocks(md, keyframes=[], mcp_client=None)
+    callouts = [b for b in blocks if b.get("type") == "callout"]
+    assert len(callouts) == 1
+    body = callouts[0]["text"]
+    flat = body if isinstance(body, str) else "".join(
+        op.get("text", "") for op in body if isinstance(op, dict)
+    )
+    assert "First line of body" in flat
+    assert "Second line" in flat
+
+
+@pytest.mark.asyncio
+async def test_single_line_callout_with_inline_bold():
+    """`> [!callout] **Important**: key insight` produces a callout whose
+    body contains a bold inline op."""
+    md = "> [!callout] **Important**: this is the key insight.\n"
+    blocks = await markdown_to_blocks(md, keyframes=[], mcp_client=None)
+    callouts = [b for b in blocks if b.get("type") == "callout"]
+    assert len(callouts) == 1
+    body = callouts[0]["text"]
+    assert isinstance(body, list), "callout body with bold should be inline-op list"
+    bold_ops = [op for op in body if isinstance(op, dict) and op.get("bold")]
+    assert len(bold_ops) == 1
+    assert bold_ops[0]["text"] == "Important"
+
+
+# ── strip_extractor_metadata helper ──────────────────────────────────
+
+
+def test_strip_extractor_metadata_removes_title_author_source_and_inner_heading():
+    """Cobalt extractor body prefix: `**Title**`, `_by Author_`, `Source:`,
+    `## Transcript (...)` — all must be stripped before the orchestrator
+    appends its own `## Transcript` wrapper."""
+    from src.pipeline.orchestrator import strip_extractor_metadata
+
+    body = (
+        "**Why Can't We Build UIs Like Blizzard?**\n\n"
+        "_by Web Dev Cody_\n\n"
+        "Source: https://www.youtube.com/watch?v=ceXRl1OaFhc\n\n"
+        "## Transcript (YouTube captions)\n\n"
+        "[0:00] So recently there was a trend on X...\n"
+    )
+    out = strip_extractor_metadata(body)
+    assert out.startswith("[0:00]")
+    assert "Why Can't We Build" not in out
+    assert "Web Dev Cody" not in out
+    assert "Source:" not in out
+    assert "## Transcript" not in out
+
+
+def test_strip_extractor_metadata_passthrough_when_no_prefix():
+    """If body_md has no extractor prefix, strip is a no-op."""
+    from src.pipeline.orchestrator import strip_extractor_metadata
+
+    body = "Regular content without the cobalt prefix.\nMore stuff."
+    assert strip_extractor_metadata(body) == body

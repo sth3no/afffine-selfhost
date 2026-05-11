@@ -793,16 +793,20 @@ async def rerender_capture(
                 )
             # Always append the raw transcript/body as a separate section so
             # the source signal is preserved even when the template's body_md
-            # is a compressed summary.
+            # is a compressed summary. Strip extractor metadata first so we
+            # don't get duplicate Title/Source/## Transcript blocks.
             if extracted.body_md and extracted.body_md.strip():
-                blocks.append({"type": "paragraph", "style": "h2", "text": "Transcript"})
-                blocks.extend(
-                    await markdown_to_blocks(
-                        extracted.body_md,
-                        keyframes=keyframes,
-                        mcp_client=app_state.mcp,
+                from src.pipeline.orchestrator import strip_extractor_metadata
+                transcript_md = strip_extractor_metadata(extracted.body_md)
+                if transcript_md.strip():
+                    blocks.append({"type": "paragraph", "style": "h2", "text": "Transcript"})
+                    blocks.extend(
+                        await markdown_to_blocks(
+                            transcript_md,
+                            keyframes=keyframes,
+                            mcp_client=app_state.mcp,
+                        )
                     )
-                )
             if row.url:
                 blocks.append({
                     "type": "paragraph", "style": "text",

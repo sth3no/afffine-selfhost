@@ -280,10 +280,12 @@ async def _replace_doc_body_templated(
     # The template's body_md is a summary view; this is the verbatim source
     # so detail/timestamps/citations are never lost to LLM compression.
     if extracted is not None and extracted.body_md and extracted.body_md.strip():
-        blocks.append({"type": "paragraph", "style": "h2", "text": "Transcript"})
-        blocks.extend(
-            await markdown_to_blocks(extracted.body_md, keyframes=keyframes, mcp_client=filer._mcp)
-        )
+        transcript_md = strip_extractor_metadata(extracted.body_md)
+        if transcript_md.strip():
+            blocks.append({"type": "paragraph", "style": "h2", "text": "Transcript"})
+            blocks.extend(
+                await markdown_to_blocks(transcript_md, keyframes=keyframes, mcp_client=filer._mcp)
+            )
 
     if url:
         blocks.append({
@@ -307,6 +309,39 @@ async def _delete_stub_block(*, filer: Filer, doc_id: str) -> None:
         if flavour == "affine:paragraph" and text.startswith("> Capturing..."):
             await filer._mcp.delete_block(doc_id, block.get("id"))
             return
+
+
+def strip_extractor_metadata(body_md: str) -> str:
+    """Strip the leading bold-title / `_by author_` / `Source:` lines AND the
+    inner `## Transcript` heading that the cobalt extractor (and similar)
+    prepends to body_md.
+
+    The orchestrator wraps body_md in its own `## Transcript` section + adds
+    a `Source: <url>` footer block, so the duplicates that come from the
+    extractor are visual noise. This helper strips them.
+
+    Returns the body_md with leading prefix lines removed. If body_md has
+    no recognizable prefix, returns the input unchanged.
+    """
+    lines = body_md.splitlines()
+    out_start = 0
+    for i, raw in enumerate(lines):
+        stripped = raw.strip()
+        if not stripped:
+            # Blank line within the prefix block — keep skipping until
+            # we hit a non-prefix line.
+            continue
+        if (
+            (stripped.startswith("**") and stripped.endswith("**"))
+            or (stripped.startswith("_") and stripped.endswith("_"))
+            or stripped.lower().startswith("source:")
+            or stripped.lower().startswith("## transcript")
+        ):
+            out_start = i + 1
+            continue
+        # First real content line — stop stripping.
+        break
+    return "\n".join(lines[out_start:]).lstrip("\n")
 
 
 def url_embed_block(url: str) -> dict[str, Any]:
