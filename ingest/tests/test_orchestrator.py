@@ -428,6 +428,34 @@ async def test_orchestrator_appends_raw_transcript_as_separate_section(deps):
 
 
 @pytest.mark.asyncio
+async def test_orchestrator_does_not_emit_callout_for_whitespace_only_lede(deps):
+    """Empty-ish ledes (Sonnet sometimes returns `' '` or `'\\n'`) must not
+    produce a callout block. Production was showing icon-only empty callouts
+    between the URL embed and Summary heading from this exact case."""
+    plat = _platform()
+    deps["filer"].move_to_topic_folder.return_value = "f-tech"
+
+    for lede_value in (None, "", "   ", "\n  \n"):
+        deps["filer"]._mcp.append_blocks.reset_mock()
+        deps["render_fn"].return_value = TemplatedOutput(
+            title="T", lede=lede_value,
+            summary_md="- a", body_md="b",
+        )
+
+        await process_capture(
+            _row(), platform=plat, topics=_topics(plat),
+            repo=deps["repo"], filer=deps["filer"],
+            extract_fn=deps["extract_fn"], classify_fn=deps["classify_fn"],
+            templates_repo=deps["templates_repo"], render_fn=deps["render_fn"],
+        )
+
+        blocks = deps["filer"]._mcp.append_blocks.await_args.args[1]
+        callouts = [b for b in blocks if b.get("type") == "callout"]
+        assert len(callouts) == 0, \
+            f"no callout expected for lede={lede_value!r}, got: {callouts}"
+
+
+@pytest.mark.asyncio
 async def test_orchestrator_routes_long_body_to_chunked_render(deps, monkeypatch):
     """Body length exceeding settings.chunked_render_threshold_chars must
     route through chunked_render, not the single-call render_fn."""

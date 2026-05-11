@@ -209,7 +209,30 @@ async def markdown_to_blocks(
         i += 1
 
     # Drop any blocks marked _drop (empty callouts, missing keyframes, etc.)
-    return [b for b in blocks if not b.get("_drop")]
+    # Also defensively drop any callout that ended up with empty text — they
+    # render as confusing icon-only bars in AFFiNE.
+    return [
+        b for b in blocks
+        if not b.get("_drop") and not _is_empty_callout(b)
+    ]
+
+
+def _is_empty_callout(block: dict[str, Any]) -> bool:
+    """A callout block with no meaningful text — should not be emitted."""
+    if block.get("type") != "callout":
+        return False
+    text = block.get("text")
+    if text is None:
+        return True
+    if isinstance(text, str):
+        return not text.strip()
+    if isinstance(text, list):
+        # InlineOp[] — empty if no op has any non-whitespace text.
+        return not any(
+            isinstance(op, dict) and (op.get("text") or "").strip()
+            for op in text
+        )
+    return False
 
 
 # ── Callout extraction ──────────────────────────────────────────────
