@@ -1,6 +1,6 @@
 """Per-row pipeline orchestrator.
 
-State machine: extracting → summarizing → classifying → filing → done.
+State machine: extracting → classifying → filing → done.
 Per-step idempotency: skips work whose result is already persisted on
 the row (e.g., classifier_topic populated → don't re-classify).
 
@@ -188,7 +188,11 @@ async def process_capture(
 
 
 def _extracted_to_dict(extracted: Extracted) -> dict:
-    """Serialize an Extracted record to a JSON-able dict for snapshotting."""
+    """Serialize an Extracted record to a JSON-able dict for snapshotting.
+
+    `url` is intentionally omitted — it lives on the parent capture row,
+    not on Extracted, so the rerender endpoint reads it from row.url.
+    """
     return {
         "title": extracted.title,
         "body_md": extracted.body_md,
@@ -201,7 +205,7 @@ def _extracted_to_dict(extracted: Extracted) -> dict:
 
 async def _replace_doc_body_templated(
     *,
-    filer,
+    filer: Filer,
     doc_id: str,
     rendered: TemplatedOutput | None,
     keyframes: list[dict[str, Any]],
@@ -223,6 +227,16 @@ async def _replace_doc_body_templated(
     blocks: list[dict[str, Any]] = []
     if url:
         blocks.append(_url_embed_block(url))
+
+    if rendered is None:
+        # Render failed (no API key / Claude error / parse fail). The capture
+        # still completes (worker mark_done is called by the caller), but
+        # surface the degraded state so the user knows the doc isn't fully
+        # processed.
+        blocks.append({
+            "type": "callout",
+            "text": "Render failed — see server logs. Use POST /captures/{id}/rerender to retry.",
+        })
 
     if rendered is not None:
         if rendered.lede:

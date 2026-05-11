@@ -138,11 +138,8 @@ async def render(
 
 
 def fallback_title(extracted: Extracted, *, url: str | None) -> str:
-    """Deterministic title when no API key / parse fails.
-
-    Duplicates summarizer.fallback_title for now; summarizer.py is deleted
-    in Task 7 of this phase. Keep this and summarizer's copy in sync until then.
-    """
+    """Deterministic title used when no API key is present or the LLM call
+    fails to parse. Pure function — no I/O, no LLM."""
     if extracted.title:
         return extracted.title.strip()
     if extracted.author:

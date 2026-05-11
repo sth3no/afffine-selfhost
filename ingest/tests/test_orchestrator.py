@@ -313,6 +313,30 @@ async def test_orchestrator_renders_lede_as_callout_block(deps):
 
 
 @pytest.mark.asyncio
+async def test_orchestrator_renders_failure_callout_when_render_fails(deps):
+    """If render_fn raises, the doc body still has a clear failure indicator."""
+    plat = _platform()
+    deps["filer"].move_to_topic_folder.return_value = "f-tech"
+    deps["render_fn"].side_effect = RuntimeError("anthropic broke")
+
+    await process_capture(
+        _row(), platform=plat, topics=_topics(plat),
+        repo=deps["repo"], filer=deps["filer"],
+        extract_fn=deps["extract_fn"], classify_fn=deps["classify_fn"],
+        templates_repo=deps["templates_repo"], render_fn=deps["render_fn"],
+    )
+
+    # Capture still completes (mark_done called) but with a clear callout.
+    deps["repo"].mark_done.assert_awaited_once()
+    blocks = deps["filer"]._mcp.append_blocks.await_args.args[1]
+    callout_indices = [i for i, b in enumerate(blocks) if b.get("type") == "callout"]
+    assert len(callout_indices) == 1
+    assert "render failed" in str(blocks[callout_indices[0]]["text"]).lower()
+    # save_template_run is NOT called when render failed.
+    deps["repo"].save_template_run.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_orchestrator_no_hardcoded_keyframes_section(deps):
     """Keyframes are passed to the template via render_fn; the orchestrator
     must NOT append a hardcoded `## Keyframes` heading anymore.

@@ -189,15 +189,18 @@ class CaptureRepository:
         snapshot: dict,
     ) -> None:
         """Persist the Extracted record as JSONB so /captures/{id}/rerender
-        can replay against the same inputs without re-fetching the source."""
-        import json
+        can replay against the same inputs without re-fetching the source.
+
+        The snapshot's `url` field is intentionally absent — url lives on the
+        capture row, not on the Extracted record.
+        """
         await self._conn.execute(
             """
             UPDATE captures
-            SET extracted_snapshot = $2::jsonb, updated_at = NOW()
+            SET extracted_snapshot = $2, updated_at = NOW()
             WHERE id = $1
             """,
-            capture_id, json.dumps(snapshot),
+            capture_id, snapshot,
         )
 
     async def mark_failed(

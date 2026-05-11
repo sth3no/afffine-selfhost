@@ -11,7 +11,10 @@ import logging
 import os
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
-from typing import AsyncIterator
+from typing import TYPE_CHECKING, AsyncIterator
+
+if TYPE_CHECKING:
+    from src.pipeline.templates import TemplatesRepository
 
 import asyncpg
 import httpx
@@ -53,7 +56,7 @@ class AppState:
     router: PlatformRouter | None = None
     worker: Worker | None = None
     worker_task: asyncio.Task | None = None
-    templates_repo: object | None = None
+    templates_repo: "TemplatesRepository | None" = None
 
 
 app_state = AppState()
@@ -114,6 +117,9 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
                 log.info("crash recovery: reset %d in-flight rows to queued", n)
 
     # Start the worker (only when pool, filer, router, and templates_repo are available).
+    # All four conditions must hold to start the worker. templates_repo is
+    # initialized together with pool, so it's never None when pool is set;
+    # the explicit check is defensive against future lifespan refactors.
     if app_state.pool is not None and app_state.filer is not None \
            and app_state.router is not None and app_state.templates_repo is not None:
         from src.pipeline.orchestrator import process_capture
