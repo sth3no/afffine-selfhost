@@ -235,10 +235,8 @@ class TemplatesRepository:
 def _row_to_model(record: Any) -> ContentTemplate:
     """Map an asyncpg.Record (or dict from tests) to ContentTemplate."""
     d = dict(record)
-    # asyncpg's default JSONB codec decodes to dict automatically, so the
-    # isinstance check here is defensive — guards against custom codec
-    # configurations and the test path which passes a JSON string for
-    # fidelity with the on-disk JSONB shape.
+    # asyncpg's default JSONB codec returns the column value as a JSON string.
+    # We deserialize defensively here. Test fixtures pass a dict directly.
     meta = d.get("generator_meta")
     if isinstance(meta, str):
         meta = json.loads(meta)

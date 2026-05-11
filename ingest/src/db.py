@@ -194,14 +194,21 @@ class CaptureRepository:
 
         The snapshot's `url` field is intentionally absent — url lives on the
         capture row, not on the Extracted record.
+
+        JSONB encoding: asyncpg's default JSONB codec is text-format, so we
+        json.dumps + $::jsonb cast manually. Matches the pattern in
+        templates.py:insert_if_absent. Custom codec registration could be
+        added in db.create_pool() to make this transparent, but for two
+        write sites it's not worth the indirection yet.
         """
+        import json
         await self._conn.execute(
             """
             UPDATE captures
-            SET extracted_snapshot = $2, updated_at = NOW()
+            SET extracted_snapshot = $2::jsonb, updated_at = NOW()
             WHERE id = $1
             """,
-            capture_id, snapshot,
+            capture_id, json.dumps(snapshot),
         )
 
     async def mark_failed(
