@@ -374,3 +374,84 @@ async def test_orchestrator_no_hardcoded_keyframes_section(deps):
         and b.get("text") == "Keyframes"
     ]
     assert len(keyframes_headings) == 0
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_appends_raw_transcript_as_separate_section(deps):
+    """Raw extracted.body_md must always render under `## Transcript` so the
+    source signal is preserved even when the template's body_md is a
+    summary. Production bug: Phase 14 v1 dropped the transcript entirely."""
+    plat = _platform()
+    deps["filer"].move_to_topic_folder.return_value = "f-tech"
+    deps["extract_fn"].return_value = Extracted(
+        title="Hello",
+        body_md="**Travis Scott:** I built this in one day...\n\nMore words.",
+        author="a", published_at=None, media_kind=MediaKind.VIDEO, extra={},
+    )
+    deps["render_fn"].return_value = TemplatedOutput(
+        title="T", lede=None, summary_md="- a", body_md="## Analysis\nStructured view.",
+    )
+
+    await process_capture(
+        _row(), platform=plat, topics=_topics(plat),
+        repo=deps["repo"], filer=deps["filer"],
+        extract_fn=deps["extract_fn"], classify_fn=deps["classify_fn"],
+        templates_repo=deps["templates_repo"], render_fn=deps["render_fn"],
+    )
+
+    blocks = deps["filer"]._mcp.append_blocks.await_args.args[1]
+    transcript_heading_indices = [
+        i for i, b in enumerate(blocks)
+        if b.get("type") == "paragraph" and b.get("style") == "h2"
+        and b.get("text") == "Transcript"
+    ]
+    assert len(transcript_heading_indices) == 1, \
+        "exactly one ## Transcript heading expected"
+
+    # Transcript section comes AFTER the body_md analysis, BEFORE the Source: footer.
+    transcript_idx = transcript_heading_indices[0]
+    source_indices = [
+        i for i, b in enumerate(blocks)
+        if b.get("type") == "paragraph" and b.get("style") == "text"
+        and isinstance(b.get("text"), list)
+        and any(op.get("text") == "Source: " for op in b["text"] if isinstance(op, dict))
+    ]
+    assert source_indices and transcript_idx < source_indices[0]
+
+    # The transcript content (rendered blocks) appears immediately after the heading.
+    # At minimum, the source text "Travis Scott" survives into one of the trailing blocks.
+    after_transcript = blocks[transcript_idx + 1:]
+    flat = " ".join(
+        str(b.get("text", "")) for b in after_transcript
+    )
+    assert "Travis Scott" in flat
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_omits_transcript_when_extracted_body_is_empty(deps):
+    """If the source has no body (e.g. shared_text-only or stub capture),
+    the renderer must not emit an empty `## Transcript` section."""
+    plat = _platform()
+    deps["filer"].move_to_topic_folder.return_value = "f-tech"
+    deps["extract_fn"].return_value = Extracted(
+        title="x", body_md="", author=None, published_at=None,
+        media_kind=MediaKind.TEXT, extra={},
+    )
+    deps["render_fn"].return_value = TemplatedOutput(
+        title="T", lede=None, summary_md="- a", body_md="b",
+    )
+
+    await process_capture(
+        _row(), platform=plat, topics=_topics(plat),
+        repo=deps["repo"], filer=deps["filer"],
+        extract_fn=deps["extract_fn"], classify_fn=deps["classify_fn"],
+        templates_repo=deps["templates_repo"], render_fn=deps["render_fn"],
+    )
+
+    blocks = deps["filer"]._mcp.append_blocks.await_args.args[1]
+    transcript_headings = [
+        b for b in blocks
+        if b.get("type") == "paragraph" and b.get("style") == "h2"
+        and b.get("text") == "Transcript"
+    ]
+    assert len(transcript_headings) == 0

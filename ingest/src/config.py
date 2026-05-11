@@ -29,7 +29,7 @@ class Settings(BaseSettings):
     anthropic_api_key: str = ""
     classifier_model: str = "claude-haiku-4-5-20251001"
     summarizer_model: str = "claude-haiku-4-5"
-    summarizer_max_body_chars: int = 4000
+    summarizer_max_body_chars: int = 12000
     embedding_model: str = "text-embedding-3-small"
     confidence_floor: float = 0.6
     similarity_threshold: float = 0.85
