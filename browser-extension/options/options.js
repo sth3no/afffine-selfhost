@@ -391,7 +391,6 @@ const $templatesDetail = document.getElementById('templatesDetail');
 const $templatesView = document.getElementById('templatesView');
 
 let _templates = [];
-let _platformOptions = new Set();
 
 $tplRefresh.addEventListener('click', () => loadTemplatesList());
 $tplPlatform.addEventListener('change', () => loadTemplatesList());
@@ -432,10 +431,10 @@ async function loadTemplatesList() {
 }
 
 function refreshPlatformOptions(items) {
-  for (const t of items) _platformOptions.add(t.platform_id);
+  const platforms = new Set(items.map(t => t.platform_id));
   const current = $tplPlatform.value;
   $tplPlatform.innerHTML = `<option value="">All</option>`
-    + [..._platformOptions].sort().map(p =>
+    + [...platforms].sort().map(p =>
       `<option value="${escapeAttr(p)}"${p === current ? ' selected' : ''}>${escapeText(p)}</option>`,
     ).join('');
 }

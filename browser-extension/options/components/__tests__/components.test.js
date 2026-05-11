@@ -46,6 +46,13 @@ describe('<af-button>', () => {
     el.shadowRoot.querySelector('button').click();
     expect(clicks).toBe(1);
   });
+
+  it('forwards aria-label to the inner button', () => {
+    const el = document.createElement('af-button');
+    el.setAttribute('aria-label', 'Close');
+    document.body.appendChild(el);
+    expect(el.shadowRoot.querySelector('button').getAttribute('aria-label')).toBe('Close');
+  });
 });
 
 import '../af-input.js';
@@ -481,12 +488,12 @@ describe('<af-template-editor>', () => {
     expect(received).toEqual({ id: '01TPL', platform_id: 'youtube', topic: 'Tutorials' });
   });
 
-  it('emits "apply" with current template data', () => {
+  it('emits "apply" with current template scope', () => {
     const el = makeEditor();
     let received = null;
     el.addEventListener('apply', e => { received = e.detail; });
     el.shadowRoot.querySelector('af-button.apply-btn').dispatchEvent(new Event('click'));
-    expect(received).toEqual({ id: '01TPL', platform_id: 'youtube', topic: 'Tutorials' });
+    expect(received).toEqual({ platform_id: 'youtube', topic: 'Tutorials' });
   });
 
   it('hides the archive button when status=archived', () => {

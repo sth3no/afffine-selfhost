@@ -8,7 +8,7 @@
  *   - 'save'     — detail = { id, patch: { name, system_prompt } }
  *   - 'archive'  — detail = { id, name }
  *   - 'resynth'  — detail = { id, platform_id, topic }
- *   - 'apply'    — detail = { id, platform_id, topic }
+ *   - 'apply'    — detail = { platform_id, topic }
  *   - 'back'     — no detail (parent handles navigation)
  *
  * The parent (options.js) performs the API calls; this component is
@@ -203,7 +203,7 @@ class AfTemplateEditor extends HTMLElement {
     });
     this.shadowRoot.querySelector('af-button.apply-btn').addEventListener('click', () => {
       this.dispatchEvent(new CustomEvent('apply', {
-        detail: { id: d.id, platform_id: d.platform_id, topic: d.topic },
+        detail: { platform_id: d.platform_id, topic: d.topic },
         bubbles: true, composed: true,
       }));
     });
