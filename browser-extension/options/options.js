@@ -566,7 +566,83 @@ async function newTemplateFlow() {
   }
 }
 
-// Stub: Task 10 wires this up.
-async function applyToExistingCapturePicker(_filter) {
-  showToast('Apply-to-capture flow comes in Task 10');
+async function applyToExistingCapturePicker({ platform_id, topic }) {
+  // Build the picker overlay
+  const overlay = document.createElement('div');
+  overlay.className = 'tpl-picker-overlay';
+  overlay.innerHTML = `
+    <div class="tpl-picker">
+      <header>
+        <h3>Apply template to existing capture</h3>
+        <button class="back-btn" id="tplPickerClose">✕</button>
+      </header>
+      <p class="hint">
+        Showing recent captures matching ${escapeText(platform_id)} · ${escapeText(topic)}.
+        Re-render replaces the doc body in AFFiNE (v1 is append-only — old blocks remain).
+      </p>
+      <div id="tplPickerList" class="tpl-picker-list">
+        <p class="hint">Loading…</p>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+  overlay.querySelector('#tplPickerClose').addEventListener('click', () => overlay.remove());
+  overlay.addEventListener('click', e => {
+    if (e.target === overlay) overlay.remove();
+  });
+
+  let items = [];
+  try {
+    const page = await listCaptures({ limit: 50 });
+    items = page?.items ?? [];
+  } catch (e) {
+    overlay.querySelector('#tplPickerList').innerHTML =
+      `<p class="hint" style="color: var(--af-error)">Couldn't load captures: ${escapeText(e?.message ?? '')}</p>`;
+    return;
+  }
+
+  // Filter by platform + (if not '*') topic match on classifier_topic
+  const filtered = items.filter(c => {
+    if (platform_id !== '*' && c.platform !== platform_id) return false;
+    if (topic !== '*' && c.classifier_topic && c.classifier_topic !== topic) return false;
+    return c.status === 'done';
+  });
+
+  const $list = overlay.querySelector('#tplPickerList');
+  if (filtered.length === 0) {
+    $list.innerHTML = `<p class="hint">No matching captures with status=done.</p>`;
+    return;
+  }
+
+  $list.innerHTML = '';
+  for (const c of filtered) {
+    const row = document.createElement('div');
+    row.className = 'tpl-picker-row';
+    row.innerHTML = `
+      <div class="tpl-picker-meta">
+        <div class="tpl-picker-title">${escapeText(c.shared_title ?? c.url ?? '(untitled)')}</div>
+        <div class="tpl-picker-sub">${escapeText(c.platform)} · ${escapeText(c.classifier_topic ?? '—')} · ${escapeText(formatPickerTime(c.created_at))}</div>
+      </div>
+      <af-button variant="primary" data-id="${escapeAttr(c.capture_id)}">Re-render</af-button>
+    `;
+    row.querySelector('af-button').addEventListener('click', async () => {
+      try {
+        await rerenderCapture(c.capture_id);
+        showToast('Re-rendered — check AFFiNE');
+        overlay.remove();
+      } catch (e) {
+        showToast(errorLabel(e) || 'Re-render failed');
+      }
+    });
+    $list.appendChild(row);
+  }
+}
+
+function formatPickerTime(iso) {
+  if (!iso) return '';
+  const sec = Math.floor((Date.now() - new Date(iso).getTime()) / 1000);
+  if (sec < 60) return `${sec}s ago`;
+  if (sec < 3600) return `${Math.floor(sec / 60)}m ago`;
+  if (sec < 86400) return `${Math.floor(sec / 3600)}h ago`;
+  return `${Math.floor(sec / 86400)}d ago`;
 }
