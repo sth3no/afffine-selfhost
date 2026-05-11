@@ -493,4 +493,12 @@ describe('<af-template-editor>', () => {
     const el = makeEditor({ status: 'archived' });
     expect(el.shadowRoot.querySelector('af-button.archive-btn')).toBeFalsy();
   });
+
+  it('emits "back" on back-button click', () => {
+    const el = makeEditor();
+    let fired = false;
+    el.addEventListener('back', () => { fired = true; });
+    el.shadowRoot.querySelector('.back-btn').dispatchEvent(new Event('click'));
+    expect(fired).toBe(true);
+  });
 });
