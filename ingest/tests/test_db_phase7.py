@@ -119,3 +119,24 @@ async def test_mark_deleted_returns_row_with_doc_id():
     assert row.doc_id == "d"
     sql = conn.fetchrow.call_args.args[0]
     assert "status = 'deleted'" in sql or "status='deleted'" in sql.replace(" ", "")
+
+
+@pytest.mark.asyncio
+async def test_save_extracted_snapshot_uses_jsonb_cast_with_string_arg():
+    """Regression: asyncpg's default JSONB codec is text-format. Passing a
+    raw dict to $2 without ::jsonb cast fails at runtime. Make sure we send
+    json.dumps + cast."""
+    conn = AsyncMock()
+    repo = CaptureRepository(conn)
+
+    await repo.save_extracted_snapshot(
+        capture_id="cap1",
+        snapshot={"title": "T", "body_md": "B"},
+    )
+
+    sql = conn.execute.await_args.args[0]
+    args = conn.execute.await_args.args[1:]
+    assert "::jsonb" in sql
+    # The second positional arg must be a JSON-encoded str, not a dict.
+    assert isinstance(args[1], str)
+    assert '"title"' in args[1]

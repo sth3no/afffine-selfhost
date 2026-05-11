@@ -7,6 +7,7 @@ endpoints land in Phase 7. Worker loop in Phase 6.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 from contextlib import asynccontextmanager
@@ -32,9 +33,17 @@ from src.models import (
     CaptureResponse,
     CapturesPage,
     CaptureStatus,
+    ContentTemplateView,
+    CreateTemplateRequest,
+    SynthesizeRequest,
+    UpdateTemplateRequest,
     normalized_url,
     url_hash,
 )
+from src.pipeline.extracted import Extracted, MediaKind
+from src.pipeline.template_synth import synthesize_template
+from src.pipeline.templates import ContentTemplate, TemplatesRepository
+from src.pipeline.templated_render import render as templated_render
 from src.pipeline.filer import Filer
 from src.pipeline.router import PlatformRouter
 from src.worker import Worker
@@ -53,6 +62,7 @@ class AppState:
     router: PlatformRouter | None = None
     worker: Worker | None = None
     worker_task: asyncio.Task | None = None
+    templates_repo: TemplatesRepository | None = None
 
 
 app_state = AppState()
@@ -89,6 +99,10 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     if settings.database_url and "placeholder" not in settings.database_url:
         app_state.pool = await create_pool(settings.database_url)
 
+    if app_state.pool is not None:
+        from src.pipeline.templates import TemplatesRepository
+        app_state.templates_repo = TemplatesRepository(app_state.pool)
+
     # Filer needs the pool + an embed function for topic-folder dedup
     # (Phase 5). Without these, every confident-classified capture
     # raises "move_to_topic_folder requires embeddings_repo, ..." at
@@ -108,8 +122,12 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
             if n > 0:
                 log.info("crash recovery: reset %d in-flight rows to queued", n)
 
-    # Start the worker (only when pool, filer, and router are available).
-    if app_state.pool is not None and app_state.filer is not None and app_state.router is not None:
+    # Start the worker (only when pool, filer, router, and templates_repo are available).
+    # All four conditions must hold to start the worker. templates_repo is
+    # initialized together with pool, so it's never None when pool is set;
+    # the explicit check is defensive against future lifespan refactors.
+    if app_state.pool is not None and app_state.filer is not None \
+           and app_state.router is not None and app_state.templates_repo is not None:
         from src.pipeline.orchestrator import process_capture
         from src.pipeline.classifier import classify
         from src.pipeline.extractors import get_extractor
@@ -124,6 +142,7 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
                 filer=app_state.filer,
                 extract_fn=extractor,
                 classify_fn=classify,
+                templates_repo=app_state.templates_repo,
             )
 
         def _platform_for(row):
@@ -456,6 +475,338 @@ async def delete_capture(
                 capture_id, row.doc_id, e,
             )
     return {"ok": True}
+
+
+# ── Routes ── Phase 14: Templates CRUD + ops ─────────────────────────
+
+
+def _template_to_view(t: ContentTemplate, usage_count: int) -> ContentTemplateView:
+    return ContentTemplateView(
+        id=t.id, platform_id=t.platform_id, topic=t.topic,
+        name=t.name, system_prompt=t.system_prompt, status=t.status,
+        generator_meta=t.generator_meta, created_by=t.created_by,
+        created_at=t.created_at, updated_at=t.updated_at,
+        usage_count=usage_count,
+    )
+
+
+def _require_templates_repo() -> TemplatesRepository:
+    repo = app_state.templates_repo
+    if repo is None:
+        raise HTTPException(status_code=503, detail="templates_repo not initialized")
+    return repo
+
+
+@app.get("/templates", response_model=list[ContentTemplateView])
+async def list_templates(
+    platform: str | None = None,
+    topic: str | None = None,
+    status_filter: str | None = None,
+    _: str = require_token,
+):
+    repo = _require_templates_repo()
+    rows = await repo.list_all(platform_id=platform, topic=topic, status=status_filter)
+    return [_template_to_view(t, await repo.count_usage(template_id=t.id)) for t in rows]
+
+
+@app.get("/templates/resolve", response_model=ContentTemplateView)
+async def resolve_template(
+    platform: str, topic: str, _: str = require_token,
+):
+    repo = _require_templates_repo()
+    t = await repo.resolve(platform_id=platform, topic=topic)
+    if t is None:
+        raise HTTPException(status_code=404, detail="no template matches")
+    return _template_to_view(t, await repo.count_usage(template_id=t.id))
+
+
+@app.get("/templates/{template_id}", response_model=ContentTemplateView)
+async def get_template(template_id: str, _: str = require_token):
+    repo = _require_templates_repo()
+    t = await repo.get(template_id=template_id)
+    if t is None:
+        raise HTTPException(status_code=404)
+    return _template_to_view(t, await repo.count_usage(template_id=t.id))
+
+
+@app.post("/templates", response_model=ContentTemplateView, status_code=201)
+async def create_template(
+    body: CreateTemplateRequest, _: str = require_token,
+):
+    repo = _require_templates_repo()
+    try:
+        t = await repo.create(
+            platform_id=body.platform_id,
+            topic=body.topic,
+            name=body.name,
+            system_prompt=body.system_prompt,
+            status="edited",
+            created_by="user",
+            generator_meta=None,
+        )
+    except asyncpg.UniqueViolationError:
+        raise HTTPException(
+            status_code=409,
+            detail="A template already exists for this (platform_id, topic) scope.",
+        )
+    return _template_to_view(t, 0)
+
+
+@app.put("/templates/{template_id}", response_model=ContentTemplateView)
+async def update_template(
+    template_id: str, body: UpdateTemplateRequest, _: str = require_token,
+):
+    repo = _require_templates_repo()
+    try:
+        t = await repo.update(
+            template_id=template_id,
+            name=body.name,
+            system_prompt=body.system_prompt,
+            platform_id=body.platform_id,
+            topic=body.topic,
+        )
+    except asyncpg.UniqueViolationError:
+        raise HTTPException(
+            status_code=409,
+            detail="Scope change collides with an existing active template.",
+        )
+    if t is None:
+        raise HTTPException(status_code=404)
+    return _template_to_view(t, await repo.count_usage(template_id=t.id))
+
+
+@app.delete("/templates/{template_id}", response_model=ContentTemplateView)
+async def archive_template(template_id: str, _: str = require_token):
+    repo = _require_templates_repo()
+    target = await repo.get(template_id=template_id)
+    if target is None:
+        raise HTTPException(status_code=404)
+
+    # Seed protection: don't allow deleting the only active (*, *) row.
+    if target.platform_id == "*" and target.topic == "*" and target.status != "archived":
+        actives = await repo.list_all(platform_id="*", topic="*")
+        non_archived = [t for t in actives if t.status != "archived"]
+        if len(non_archived) <= 1:
+            raise HTTPException(
+                status_code=409,
+                detail="Refusing to archive the only active (*, *) seed template. "
+                       "POST a replacement first.",
+            )
+
+    archived = await repo.archive(template_id=template_id)
+    if archived is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Template disappeared between get and archive (concurrent delete).",
+        )
+    return _template_to_view(archived, await repo.count_usage(template_id=archived.id))
+
+
+@app.post("/templates/synthesize", response_model=ContentTemplateView, status_code=201)
+async def synth_endpoint(
+    body: SynthesizeRequest, _: str = require_token,
+):
+    repo = _require_templates_repo()
+    existing = await repo.resolve(platform_id=body.platform_id, topic=body.topic)
+    if existing is not None and existing.platform_id == body.platform_id and existing.topic == body.topic:
+        raise HTTPException(
+            status_code=409,
+            detail="An active template already exists at this scope. "
+                   "DELETE it first to regenerate.",
+        )
+
+    sample_extracted = await _load_sample_extracted(
+        sample_capture_id=body.sample_capture_id,
+        platform_id=body.platform_id,
+        topic=body.topic,
+    )
+    if sample_extracted is None:
+        raise HTTPException(
+            status_code=400,
+            detail="No sample capture available for synthesis. Either provide "
+                   "sample_capture_id or wait until at least one capture lands "
+                   "in this (platform, topic) scope.",
+        )
+
+    tmpl = await synthesize_template(
+        platform_id=body.platform_id,
+        topic=body.topic,
+        sample_extracted=sample_extracted,
+        templates_repo=repo,
+    )
+    return _template_to_view(tmpl, 0)
+
+
+def _snapshot_to_extracted(snap) -> Extracted:
+    """Deserialize a JSONB extracted_snapshot (dict or JSON string) to an
+    Extracted record. Returns a fresh dataclass instance."""
+    if isinstance(snap, str):
+        snap = json.loads(snap)
+    published_at = snap.get("published_at")
+    return Extracted(
+        title=snap.get("title"),
+        body_md=snap.get("body_md", ""),
+        author=snap.get("author"),
+        published_at=datetime.fromisoformat(published_at) if published_at else None,
+        media_kind=MediaKind(snap.get("media_kind", "video")),
+        extra=snap.get("extra") or {},
+    )
+
+
+async def _load_sample_extracted(
+    *,
+    sample_capture_id: str | None,
+    platform_id: str,
+    topic: str,
+):
+    """Load the most recent capture's extracted_snapshot for the given scope,
+    or the specific row if sample_capture_id is provided. Returns an Extracted
+    record or None."""
+    if app_state.pool is None:
+        return None
+    async with app_state.pool.acquire() as conn:
+        if sample_capture_id is not None:
+            row = await conn.fetchrow(
+                "SELECT extracted_snapshot FROM captures WHERE id = $1",
+                sample_capture_id,
+            )
+        else:
+            row = await conn.fetchrow(
+                """
+                SELECT extracted_snapshot FROM captures
+                WHERE platform = $1 AND classifier_topic = $2
+                  AND extracted_snapshot IS NOT NULL
+                ORDER BY created_at DESC LIMIT 1
+                """,
+                platform_id, topic,
+            )
+    if row is None or row["extracted_snapshot"] is None:
+        return None
+    return _snapshot_to_extracted(row["extracted_snapshot"])
+
+
+@app.post("/captures/{capture_id}/rerender", response_model=CaptureDetail)
+async def rerender_capture(
+    capture_id: str,
+    reextract: bool = False,
+    _: str = require_token,
+):
+    """Re-run the currently-resolved template against the capture's stored
+    extracted_snapshot.
+
+    With ?reextract=true, fall back to re-fetching the URL if no snapshot
+    exists (older pre-template captures). Not yet implemented in v1.
+
+    v1 caveats:
+    - **Append-only.** Blocks are appended to the existing doc body — calling
+      this multiple times for the same capture will accumulate duplicate
+      Summary / body sections. Replace/diff semantics are planned for v2.
+    - **No concurrency lock.** Two simultaneous rerenders of the same capture
+      will both succeed; blocks will be duplicated in the AFFiNE doc. For
+      single-user self-hosted deployments this is acceptable.
+    """
+    repo_t = _require_templates_repo()
+    if app_state.pool is None:
+        raise HTTPException(status_code=503, detail="DB pool not initialized")
+
+    async with app_state.pool.acquire() as conn:
+        captures_repo = CaptureRepository(conn)
+        row = await captures_repo.get_by_id(capture_id)
+        if row is None:
+            raise HTTPException(status_code=404)
+
+        snapshot = row.extracted_snapshot
+        if snapshot is None and not reextract:
+            raise HTTPException(
+                status_code=400,
+                detail="No extracted_snapshot for this capture. Pass "
+                       "?reextract=true to refetch the source URL.",
+            )
+
+        if snapshot is None:
+            raise HTTPException(
+                status_code=501,
+                detail=(
+                    "reextract=true is not yet supported. Captures processed before "
+                    "Phase 14 (no extracted_snapshot) cannot be rerendered. Workaround: "
+                    "POST /capture again with the original URL to create a new processed "
+                    "capture, then rerender that."
+                ),
+            )
+
+        extracted = _snapshot_to_extracted(snapshot)
+
+        # Resolve current template for this capture's (platform, topic).
+        topic = getattr(row, "classifier_topic", None) or "*"
+        template = await repo_t.resolve(platform_id=row.platform, topic=topic)
+        if template is None:
+            template = await repo_t.resolve(platform_id="*", topic="*")
+            if template is None:
+                raise HTTPException(
+                    status_code=503,
+                    detail="No template available — seed (*, *) is missing.",
+                )
+
+        # Run the render.
+        keyframes = (extracted.extra or {}).get("keyframes") or []
+        rendered = await templated_render(
+            template=template, extracted=extracted, keyframes=keyframes,
+        )
+
+        # Persist the new template_run.
+        await captures_repo.save_template_run(
+            capture_id=row.id,
+            template_id=template.id,
+            prompt_used=template.system_prompt,
+            output_raw=rendered.body_md,
+        )
+
+        # Replace blocks in the AFFiNE doc.
+        if app_state.mcp is None or row.doc_id is None:
+            log.warning(
+                "rerender: MCP unavailable or doc_id missing; skipped block update"
+            )
+        else:
+            from src.pipeline.markdown_render import markdown_to_blocks
+            from src.pipeline.orchestrator import url_embed_block
+            blocks: list[dict] = []
+            if row.url:
+                blocks.append(url_embed_block(row.url))
+            if rendered.lede:
+                blocks.append({"type": "callout", "text": rendered.lede})
+            if rendered.summary_md:
+                blocks.append({"type": "paragraph", "style": "h2", "text": "Summary"})
+                blocks.extend(
+                    await markdown_to_blocks(
+                        rendered.summary_md,
+                        keyframes=keyframes,
+                        mcp_client=app_state.mcp,
+                    )
+                )
+            if rendered.body_md:
+                blocks.extend(
+                    await markdown_to_blocks(
+                        rendered.body_md,
+                        keyframes=keyframes,
+                        mcp_client=app_state.mcp,
+                    )
+                )
+            if row.url:
+                blocks.append({
+                    "type": "paragraph", "style": "text",
+                    "text": [
+                        {"text": "Source: "},
+                        {"text": row.url, "italic": True, "link": row.url},
+                    ],
+                })
+            # Naive: append blocks after existing ones (v2 will diff/replace).
+            await app_state.mcp.append_blocks(row.doc_id, blocks)
+
+        # Refetch + return CaptureDetail.
+        refreshed = await captures_repo.get_by_id(capture_id)
+        if refreshed is None:
+            raise HTTPException(status_code=404)
+        return _row_to_detail(refreshed)
 
 
 # ── Routes ── Phase 12: YouTube cookies ──────────────────────────────

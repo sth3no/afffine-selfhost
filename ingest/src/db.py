@@ -27,6 +27,7 @@ class CaptureRow:
     classifier_conf: float | None = None
     classifier_reasoning: str | None = None
     retry_count: int = 0
+    extracted_snapshot: Any | None = None
 
 
 _INSERT_SQL = """
@@ -41,7 +42,7 @@ _BASE_SELECT = """
     SELECT id, url, url_hash, source_app, shared_title, shared_text,
            platform, status, doc_id, web_url, topic_path,
            classifier_topic, classifier_conf, classifier_reasoning,
-           retry_count, created_at
+           retry_count, created_at, extracted_snapshot
     FROM captures
 """
 
@@ -100,7 +101,7 @@ class CaptureRepository:
             RETURNING id, url, url_hash, source_app, shared_title, shared_text,
                       platform, status, doc_id, web_url, topic_path,
                       classifier_topic, classifier_conf, classifier_reasoning,
-                      retry_count, created_at
+                      retry_count, created_at, extracted_snapshot
         """
         rec = await self._conn.fetchrow(sql)
         return None if rec is None else CaptureRow(**dict(rec))
@@ -119,7 +120,7 @@ class CaptureRepository:
             RETURNING id, url, url_hash, source_app, shared_title, shared_text,
                       platform, status, doc_id, web_url, topic_path,
                       classifier_topic, classifier_conf, classifier_reasoning,
-                      retry_count, created_at
+                      retry_count, created_at, extracted_snapshot
         """
         rec = await self._conn.fetchrow(sql)
         return None if rec is None else CaptureRow(**dict(rec))
@@ -158,6 +159,56 @@ class CaptureRepository:
             WHERE id = $1
             """,
             capture_id,
+        )
+
+    async def save_template_run(
+        self,
+        *,
+        capture_id: str,
+        template_id: str,
+        prompt_used: str,
+        output_raw: str,
+    ) -> None:
+        """Persist which template ran for this capture, plus the prompt and body
+        snapshots needed for audit and replay."""
+        await self._conn.execute(
+            """
+            UPDATE captures
+            SET template_id = $2,
+                template_prompt_used = $3,
+                template_output_raw = $4,
+                updated_at = NOW()
+            WHERE id = $1
+            """,
+            capture_id, template_id, prompt_used, output_raw,
+        )
+
+    async def save_extracted_snapshot(
+        self,
+        *,
+        capture_id: str,
+        snapshot: dict,
+    ) -> None:
+        """Persist the Extracted record as JSONB so /captures/{id}/rerender
+        can replay against the same inputs without re-fetching the source.
+
+        The snapshot's `url` field is intentionally absent — url lives on the
+        capture row, not on the Extracted record.
+
+        JSONB encoding: asyncpg's default JSONB codec is text-format, so we
+        json.dumps + $::jsonb cast manually. Matches the pattern in
+        templates.py:insert_if_absent. Custom codec registration could be
+        added in db.create_pool() to make this transparent, but for two
+        write sites it's not worth the indirection yet.
+        """
+        import json
+        await self._conn.execute(
+            """
+            UPDATE captures
+            SET extracted_snapshot = $2::jsonb, updated_at = NOW()
+            WHERE id = $1
+            """,
+            capture_id, json.dumps(snapshot),
         )
 
     async def mark_failed(
@@ -233,7 +284,7 @@ class CaptureRepository:
             SELECT id, url, url_hash, source_app, shared_title, shared_text,
                    platform, status, doc_id, web_url, topic_path,
                    classifier_topic, classifier_conf, classifier_reasoning,
-                   retry_count, created_at
+                   retry_count, created_at, extracted_snapshot
             FROM captures
             {where}
             ORDER BY created_at DESC
@@ -263,7 +314,7 @@ class CaptureRepository:
             RETURNING id, url, url_hash, source_app, shared_title, shared_text,
                       platform, status, doc_id, web_url, topic_path,
                       classifier_topic, classifier_conf, classifier_reasoning,
-                      retry_count, created_at
+                      retry_count, created_at, extracted_snapshot
         """
         rec = await self._conn.fetchrow(sql, capture_id)
         return None if rec is None else CaptureRow(**dict(rec))
@@ -277,7 +328,7 @@ class CaptureRepository:
             RETURNING id, url, url_hash, source_app, shared_title, shared_text,
                       platform, status, doc_id, web_url, topic_path,
                       classifier_topic, classifier_conf, classifier_reasoning,
-                      retry_count, created_at
+                      retry_count, created_at, extracted_snapshot
         """
         rec = await self._conn.fetchrow(sql, capture_id)
         return None if rec is None else CaptureRow(**dict(rec))

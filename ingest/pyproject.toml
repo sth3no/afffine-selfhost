@@ -21,6 +21,7 @@ dependencies = [
     "numpy>=1.26",
     "scenedetect[opencv]>=0.6.4",
     "Pillow>=10.0",
+    "markdown-it-py>=3.0",
 ]
 
 [project.optional-dependencies]

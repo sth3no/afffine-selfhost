@@ -7,7 +7,7 @@ import hashlib
 from datetime import datetime
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
-from pydantic import BaseModel, ConfigDict, Field, HttpUrl, field_validator
+from pydantic import BaseModel, ConfigDict, Field, HttpUrl, field_validator, model_validator
 
 
 # ── Enums & helpers ──────────────────────────────────────────────────
@@ -128,3 +128,51 @@ class CaptureDetail(CaptureItem):
     error: str | None = None
     retry_count: int = 0
     classifier_reasoning: str | None = None
+
+
+# ── Templates (Phase 14) ─────────────────────────────────────────────
+
+
+class ContentTemplateView(BaseModel):
+    """API response shape for a template row."""
+
+    id: str
+    platform_id: str
+    topic: str
+    name: str
+    system_prompt: str
+    status: str
+    generator_meta: dict | None = None
+    created_by: str
+    created_at: datetime
+    updated_at: datetime
+    usage_count: int = 0
+
+
+class CreateTemplateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    platform_id: str = Field(..., min_length=1, max_length=64)
+    topic: str = Field(..., min_length=1, max_length=128)
+    name: str = Field(..., min_length=1, max_length=128)
+    system_prompt: str = Field(..., min_length=1)
+
+
+class UpdateTemplateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    platform_id: str | None = Field(default=None, min_length=1, max_length=64)
+    topic: str | None = Field(default=None, min_length=1, max_length=128)
+    name: str | None = Field(default=None, min_length=1, max_length=128)
+    system_prompt: str | None = Field(default=None, min_length=1)
+
+    @model_validator(mode="after")
+    def _at_least_one_field(self):
+        if all(v is None for v in (self.platform_id, self.topic, self.name, self.system_prompt)):
+            raise ValueError("At least one field must be provided.")
+        return self
+
+
+class SynthesizeRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    platform_id: str = Field(..., min_length=1, max_length=64)
+    topic: str = Field(..., min_length=1, max_length=128)
+    sample_capture_id: str | None = None
