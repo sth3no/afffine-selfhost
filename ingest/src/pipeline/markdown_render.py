@@ -26,6 +26,11 @@ from markdown_it.token import Token
 log = logging.getLogger(__name__)
 
 _KF_REF_RE = re.compile(r"^kf:(\d+)$")
+# Single-line callouts only. Multi-line callouts:
+#   > [!callout] First line
+#   > Continuation
+# render as a one-line callout ("First line") plus a separate quote paragraph
+# for the continuation. LLM-generated content follows the single-line convention.
 _CALLOUT_RE = re.compile(r"^\s*>\s*\[!callout\]\s*(.*)$", re.MULTILINE)
 _CROSS_DOC_RE = re.compile(r"\[\[([^\]]+)\]\]")
 _INLINE_LINK_RE = re.compile(
@@ -155,7 +160,7 @@ def _convert_callout_pseudoblocks(blocks: list[dict[str, Any]]) -> list[dict[str
         flat = text if isinstance(text, str) else (
             " ".join(op.get("text", "") for op in text) if isinstance(text, list) else ""
         )
-        if b.get("type") == "paragraph" and flat.startswith(":::callout"):
+        if b.get("type") == "paragraph" and flat.startswith(":::callout\n"):
             body = flat[len(":::callout"):].strip().rstrip(":").strip()
             out.append({"type": "callout", "text": body})
             continue
@@ -167,9 +172,9 @@ def _maybe_todo_block(item_text: str, parent_style: str) -> dict[str, Any] | Non
     """Detect GFM task-list items `[ ]` / `[x]` at the start of a list item."""
     t = item_text.lstrip()
     if t.startswith("[ ] "):
-        return {"type": "list", "style": "todo", "checked": False, "text": t[4:]}
+        return {"type": "list", "style": "todo", "checked": False, "text": _inline_to_text(t[4:])}
     if t.startswith("[x] ") or t.startswith("[X] "):
-        return {"type": "list", "style": "todo", "checked": True, "text": t[4:]}
+        return {"type": "list", "style": "todo", "checked": True, "text": _inline_to_text(t[4:])}
     return None
 
 

@@ -175,3 +175,30 @@ async def test_url_embed_with_empty_label_promotes_to_embed():
         mcp_client=None,
     )
     assert blocks[0]["type"] == "embed-youtube"
+
+
+@pytest.mark.asyncio
+async def test_todo_item_with_inline_link_preserved():
+    md = "- [ ] Read [the paper](https://example.com/paper.pdf) tonight\n"
+    blocks = await markdown_to_blocks(md, keyframes=[], mcp_client=None)
+    assert len(blocks) == 1
+    assert blocks[0]["type"] == "list"
+    assert blocks[0]["style"] == "todo"
+    assert blocks[0]["checked"] is False
+    # text should be an inline-op list with the link preserved
+    ops = blocks[0]["text"]
+    assert isinstance(ops, list)
+    linked = [op for op in ops if isinstance(op, dict) and op.get("link")]
+    assert len(linked) == 1
+    assert linked[0]["link"] == "https://example.com/paper.pdf"
+
+
+@pytest.mark.asyncio
+async def test_blockquote_renders_as_quote_paragraph():
+    blocks = await markdown_to_blocks(
+        "> A quoted sentence.\n", keyframes=[], mcp_client=None
+    )
+    assert len(blocks) == 1
+    assert blocks[0]["type"] == "paragraph"
+    assert blocks[0]["style"] == "quote"
+    assert "quoted sentence" in str(blocks[0]["text"])
