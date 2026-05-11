@@ -5,7 +5,12 @@ syntax handled inline:
   - Fenced code blocks with language sentinel `embed-html` → embed-html block
   - Image refs `![alt](kf:<n>)` → image block backed by keyframe blob_source_id
   - Cross-doc refs `[[Doc Title]]` → embed-linked-doc block (async MCP call)
-  - Callout blocks `> [!callout] text` → affine:callout block
+  - Callout blocks `> [!callout] text` (single or multi-line) → affine:callout
+
+Inline formatting (**bold**, _italic_, ~~strike~~, `code`, [label](url)) is
+parsed via markdown-it's inline tokenizer and emitted as AFFiNE InlineOp[]
+arrays so the rendered doc shows proper rich-text instead of literal
+asterisks/underscores/backticks.
 
 Async because cross-doc resolution hits the MCP server.
 
@@ -26,16 +31,32 @@ from markdown_it.token import Token
 log = logging.getLogger(__name__)
 
 _KF_REF_RE = re.compile(r"^kf:(\d+)$")
-# Single-line callouts only. Multi-line callouts:
-#   > [!callout] First line
-#   > Continuation
-# render as a one-line callout ("First line") plus a separate quote paragraph
-# for the continuation. LLM-generated content follows the single-line convention.
-_CALLOUT_RE = re.compile(r"^\s*>\s*\[!callout\]\s*(.*)$", re.MULTILINE)
 _CROSS_DOC_RE = re.compile(r"\[\[([^\]]+)\]\]")
 _INLINE_LINK_RE = re.compile(
     r"\[(?P<label>[^\]]*)\]\((?P<url>[^)\s]+)\)"
 )
+_IMAGE_REF_RE = re.compile(r"^!\[(?P<alt>[^\]]*)\]\((?P<src>[^)\s]+)\)\s*$")
+
+# Multi-line callout pattern: `> [!callout]` line plus any contiguous
+# `> body` continuation lines. The head is whatever follows `[!callout]`
+# on the same line (often empty when the LLM writes body on next lines).
+_CALLOUT_BLOCK_RE = re.compile(
+    r"^[ \t]*>[ \t]*\[!callout\][ \t]*(?P<head>[^\n]*)"
+    r"(?P<cont>(?:\n[ \t]*>[^\n]*)*)",
+    re.MULTILINE,
+)
+
+# Unique placeholder for callouts pre-extracted before markdown-it sees the
+# body_md. Plain alphanumeric so markdown-it tokenizes it as text and we
+# can find it in a post-pass. Index is appended.
+_CALLOUT_PLACEHOLDER_PREFIX = "AFFINECALLOUTPLACEHOLDER"
+
+# Shared inline tokenizer for parsing rich-text content (bold/italic/code/
+# links) inside paragraphs, headings, list items, blockquotes.
+_INLINE_PARSER = MarkdownIt("commonmark", {"breaks": False, "html": False})
+
+
+# ── Public entry point ──────────────────────────────────────────────
 
 
 async def markdown_to_blocks(
@@ -51,8 +72,7 @@ async def markdown_to_blocks(
     `mcp_client` resolves `[[Doc Title]]` refs via `find_doc_by_title`.
     Pass None to skip cross-doc resolution (refs render as plain text).
     """
-    # Pre-pass: convert callout lines to a sentinel that the token stream can pick up.
-    md = _CALLOUT_RE.sub(r":::callout\n\1\n:::", md)
+    md, callout_bodies = _extract_callouts(md)
 
     parser = MarkdownIt("commonmark", {"breaks": False, "html": False})
     tokens = parser.parse(md)
@@ -69,7 +89,8 @@ async def markdown_to_blocks(
             blocks.append({
                 "type": "paragraph",
                 "style": f"h{level}",
-                "text": _inline_to_text(inline.content),
+                "text": _walk_inline_children(inline.children or [])
+                        or inline.content,
             })
             i += 3  # heading_open, inline, heading_close
             continue
@@ -102,30 +123,57 @@ async def markdown_to_blocks(
                 if tokens[i].type == "list_item_open":
                     item_inline = _find_first_inline_after(tokens, i)
                     item_text = item_inline.content if item_inline else ""
-                    item_block = _maybe_todo_block(item_text, style)
+                    item_children = item_inline.children if item_inline else None
+                    item_block = _maybe_todo_block(item_text, item_children, style)
                     if item_block is None:
                         item_block = {
                             "type": "list",
                             "style": style,
-                            "text": _inline_to_text(item_text),
+                            "text": _walk_inline_children(item_children or [])
+                                    or item_text,
                         }
                     blocks.append(item_block)
                 i += 1
             i += 1  # consume closing token
             continue
 
-        # Paragraph (default)
+        # Paragraph — the most complex path because it may carry:
+        #   - URL embeds (empty-label `[](url)` alone)
+        #   - Cross-doc refs `[[Doc Title]]`
+        #   - Keyframe image refs `![alt](kf:N)` alone
+        #   - Callout placeholders (pre-extracted earlier)
+        #   - Regular rich text (bold/italic/code/links)
         if tok.type == "paragraph_open":
             inline = tokens[i + 1]
             text = inline.content
+            children = inline.children or []
+
+            # Callout placeholder?
+            cb = _try_callout_placeholder(text, callout_bodies)
+            if cb is not None:
+                blocks.append(cb)
+                i += 3
+                continue
+
+            # Standalone URL embed (paragraph contains only `[](url)`)
             embed = _try_url_embed(text)
             if embed is not None:
                 blocks.append(embed)
                 i += 3
                 continue
-            new_blocks = await _split_on_cross_doc_refs(text, mcp_client)
-            new_blocks = _replace_keyframe_refs(new_blocks, keyframes)
-            blocks.extend(new_blocks)
+
+            # Standalone keyframe image ref (`![alt](kf:N)` alone)
+            kf_image = _try_keyframe_image(text, keyframes)
+            if kf_image is not None:
+                blocks.append(kf_image)
+                i += 3
+                continue
+
+            # Cross-doc refs split the paragraph into multiple blocks.
+            split_blocks = await _split_on_cross_doc_refs(
+                text, children, mcp_client,
+            )
+            blocks.extend(split_blocks)
             i += 3  # paragraph_open, inline, paragraph_close
             continue
 
@@ -134,48 +182,248 @@ async def markdown_to_blocks(
             i += 1
             continue
 
-        # Quote block (not callout — already pre-transformed)
+        # Quote block
         if tok.type == "blockquote_open":
-            close_idx = _find_matching_close(tokens, i, "blockquote_open", "blockquote_close")
+            close_idx = _find_matching_close(
+                tokens, i, "blockquote_open", "blockquote_close",
+            )
+            # Concatenate inline children from all paragraphs inside the quote.
+            all_children: list[Token] = []
+            for t in tokens[i + 1:close_idx]:
+                if t.type == "inline" and t.children:
+                    if all_children:
+                        all_children.append(_make_text_token(" "))
+                    all_children.extend(t.children)
+            text_ops = _walk_inline_children(all_children) if all_children else ""
             inner_text = " ".join(
                 t.content for t in tokens[i + 1:close_idx] if t.type == "inline"
             )
             blocks.append({
                 "type": "paragraph",
                 "style": "quote",
-                "text": _inline_to_text(inner_text),
+                "text": text_ops or inner_text,
             })
             i = close_idx + 1
             continue
 
         i += 1
 
-    return _convert_callout_pseudoblocks(blocks)
+    # Drop any blocks marked _drop (empty callouts, missing keyframes, etc.)
+    return [b for b in blocks if not b.get("_drop")]
 
 
-def _convert_callout_pseudoblocks(blocks: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    out: list[dict[str, Any]] = []
-    for b in blocks:
-        text = b.get("text")
-        flat = text if isinstance(text, str) else (
-            " ".join(op.get("text", "") for op in text) if isinstance(text, list) else ""
-        )
-        if b.get("type") == "paragraph" and flat.startswith(":::callout\n"):
-            body = flat[len(":::callout"):].strip().rstrip(":").strip()
-            out.append({"type": "callout", "text": body})
-            continue
-        out.append(b)
-    return out
+# ── Callout extraction ──────────────────────────────────────────────
 
 
-def _maybe_todo_block(item_text: str, parent_style: str) -> dict[str, Any] | None:
+def _extract_callouts(md: str) -> tuple[str, list[str]]:
+    """Pre-extract `> [!callout] ...` blocks (single or multi-line) into
+    placeholder sentinels, returning (modified_md, list_of_bodies).
+
+    Single-line: `> [!callout] body text`
+    Multi-line:
+      > [!callout]
+      > body line 1
+      > body line 2
+    The body is the head (after `[!callout]`) joined with continuation
+    lines (with leading `> ` stripped), then stripped of surrounding
+    whitespace.
+
+    Empty bodies are still extracted but rendered as a no-op by the
+    post-pass (we drop the callout instead of emitting an empty one,
+    which the AFFiNE renderer otherwise shows as a confusing icon-only
+    block).
+    """
+    callouts: list[str] = []
+
+    def _replace(m: re.Match) -> str:
+        head = (m.group("head") or "").strip()
+        cont = m.group("cont") or ""
+        body_lines: list[str] = []
+        if head:
+            body_lines.append(head)
+        for raw in cont.split("\n"):
+            stripped = raw.strip()
+            if not stripped.startswith(">"):
+                continue
+            # Strip leading `>` plus optional space.
+            content = stripped[1:].lstrip()
+            body_lines.append(content)
+        body = "\n".join(body_lines).strip()
+        idx = len(callouts)
+        callouts.append(body)
+        return f"\n\n{_CALLOUT_PLACEHOLDER_PREFIX}{idx}\n\n"
+
+    new_md = _CALLOUT_BLOCK_RE.sub(_replace, md)
+    return new_md, callouts
+
+
+def _try_callout_placeholder(
+    text: str, callout_bodies: list[str],
+) -> dict[str, Any] | None:
+    """If the paragraph is exactly a callout placeholder, return the
+    callout block (or None if the body is empty — we drop empty callouts
+    rather than emitting an icon-only confusing block)."""
+    stripped = text.strip()
+    if not stripped.startswith(_CALLOUT_PLACEHOLDER_PREFIX):
+        return None
+    suffix = stripped[len(_CALLOUT_PLACEHOLDER_PREFIX):]
+    if not suffix.isdigit():
+        return None
+    idx = int(suffix)
+    if idx < 0 or idx >= len(callout_bodies):
+        return None
+    body = callout_bodies[idx].strip()
+    if not body:
+        # Empty-body callouts are visual noise — drop instead of emitting.
+        return {"_drop": True}
+    return {"type": "callout", "text": _inline_text_to_ops(body)}
+
+
+# ── Inline rich-text walking (markdown-it AST → AFFiNE InlineOp[]) ──
+
+
+def _walk_inline_children(children: list[Token]):
+    """Walk markdown-it inline children → AFFiNE InlineOp[].
+
+    Recognizes:
+      - text                  → {text}
+      - code_inline           → {text, code: true}
+      - strong_open/close     → {bold: true} on enclosed text
+      - em_open/close         → {italic: true} on enclosed text
+      - s_open/close          → {strike: true} on enclosed text
+      - link_open/close       → {link: url} on enclosed text
+      - softbreak / hardbreak → space / newline
+      - image (kf:N)          → handled at the block level (caller
+                                detects standalone `![](kf:N)` paragraphs);
+                                inline kf:N refs are dropped here with a warn
+
+    Returns:
+      - empty string if children produce no usable text
+      - a plain string if no formatting attributes were applied
+      - a list of InlineOp dicts otherwise
+    """
+    if not children:
+        return ""
+    ops: list[dict[str, Any]] = []
+    stack = {"bold": 0, "italic": 0, "code": 0, "strike": 0}
+    link_stack: list[str] = []
+    any_attr = False
+
+    def _attrs() -> dict[str, Any]:
+        a: dict[str, Any] = {}
+        if stack["bold"] > 0:
+            a["bold"] = True
+        if stack["italic"] > 0:
+            a["italic"] = True
+        if stack["strike"] > 0:
+            a["strike"] = True
+        if link_stack:
+            a["link"] = link_stack[-1]
+        return a
+
+    for child in children:
+        t = child.type
+        if t == "text":
+            if not child.content:
+                continue
+            attrs = _attrs()
+            op: dict[str, Any] = {"text": child.content, **attrs}
+            if attrs:
+                any_attr = True
+            ops.append(op)
+        elif t == "code_inline":
+            attrs = _attrs()
+            attrs["code"] = True
+            any_attr = True
+            ops.append({"text": child.content, **attrs})
+        elif t == "strong_open":
+            stack["bold"] += 1
+        elif t == "strong_close":
+            stack["bold"] = max(0, stack["bold"] - 1)
+        elif t == "em_open":
+            stack["italic"] += 1
+        elif t == "em_close":
+            stack["italic"] = max(0, stack["italic"] - 1)
+        elif t == "s_open":
+            stack["strike"] += 1
+        elif t == "s_close":
+            stack["strike"] = max(0, stack["strike"] - 1)
+        elif t == "link_open":
+            href = child.attrGet("href") or ""
+            link_stack.append(href)
+        elif t == "link_close":
+            if link_stack:
+                link_stack.pop()
+        elif t == "softbreak":
+            ops.append({"text": " "})
+        elif t == "hardbreak":
+            ops.append({"text": "\n"})
+        elif t == "image":
+            # Inline images are out of scope; the block-level handler picks
+            # up standalone `![alt](kf:N)` paragraphs separately.
+            log.debug("inline image in rich text dropped: %s",
+                      child.attrGet("src"))
+        # else: html_inline and other oddities are ignored
+
+    if not ops:
+        return ""
+
+    # If all ops are plain (no attributes), coalesce into one string.
+    if not any_attr and not link_stack and all(
+        set(op.keys()) == {"text"} for op in ops
+    ):
+        joined = "".join(op["text"] for op in ops)
+        return joined
+
+    return ops
+
+
+def _inline_text_to_ops(text: str):
+    """Parse a plain string of markdown-flavoured text into InlineOp[].
+
+    Used for callout bodies and other text we pre-extracted before
+    markdown-it parsing (so it never went through the normal pipeline).
+    """
+    if not text:
+        return ""
+    parsed = _INLINE_PARSER.parseInline(text)
+    if not parsed or not parsed[0].children:
+        return text
+    result = _walk_inline_children(parsed[0].children)
+    return result if result else text
+
+
+def _make_text_token(content: str) -> Token:
+    """Synthesize a markdown-it text Token for joining quote paragraphs."""
+    t = Token("text", "", 0)
+    t.content = content
+    return t
+
+
+# ── Todo list detection ─────────────────────────────────────────────
+
+
+def _maybe_todo_block(
+    item_text: str,
+    item_children: list[Token] | None,
+    parent_style: str,
+) -> dict[str, Any] | None:
     """Detect GFM task-list items `[ ]` / `[x]` at the start of a list item."""
     t = item_text.lstrip()
     if t.startswith("[ ] "):
-        return {"type": "list", "style": "todo", "checked": False, "text": _inline_to_text(t[4:])}
+        rest_text = t[4:]
+        rest_ops = _inline_text_to_ops(rest_text)
+        return {"type": "list", "style": "todo", "checked": False,
+                "text": rest_ops}
     if t.startswith("[x] ") or t.startswith("[X] "):
-        return {"type": "list", "style": "todo", "checked": True, "text": _inline_to_text(t[4:])}
+        rest_text = t[4:]
+        rest_ops = _inline_text_to_ops(rest_text)
+        return {"type": "list", "style": "todo", "checked": True,
+                "text": rest_ops}
     return None
+
+
+# ── Token-walking helpers ───────────────────────────────────────────
 
 
 def _find_first_inline_after(tokens: list[Token], start: int) -> Token | None:
@@ -188,7 +436,7 @@ def _find_first_inline_after(tokens: list[Token], start: int) -> Token | None:
 
 
 def _find_matching_close(
-    tokens: list[Token], start: int, open_type: str, close_type: str
+    tokens: list[Token], start: int, open_type: str, close_type: str,
 ) -> int:
     depth = 1
     i = start + 1
@@ -201,6 +449,9 @@ def _find_matching_close(
                 return i
         i += 1
     return len(tokens) - 1
+
+
+# ── URL embed / keyframe ref detection ──────────────────────────────
 
 
 def _try_url_embed(text: str) -> dict[str, Any] | None:
@@ -221,45 +472,62 @@ def _try_url_embed(text: str) -> dict[str, Any] | None:
     return {"type": "bookmark", "url": url}
 
 
-def _inline_to_text(text: str):
-    """Parse `[label](url)` inline links into the inline-op list shape
-    that mcp-ext's block-builder converts to rich-text deltas."""
-    if "](" not in text:
-        return text
-    parts: list[dict[str, Any]] = []
-    pos = 0
-    for m in _INLINE_LINK_RE.finditer(text):
-        if m.start() > pos:
-            parts.append({"text": text[pos:m.start()]})
-        label = m.group("label") or m.group("url")
-        parts.append({"text": label, "link": m.group("url")})
-        pos = m.end()
-    if pos < len(text):
-        parts.append({"text": text[pos:]})
-    return parts if parts else text
+def _try_keyframe_image(
+    text: str, keyframes: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    """A paragraph that is exactly `![alt](kf:N)` becomes an image block
+    backed by the n-th keyframe's blob_source_id. Out-of-range or non-`kf:`
+    image refs return None (caller falls through to normal rendering)."""
+    m = _IMAGE_REF_RE.match(text.strip())
+    if m is None:
+        return None
+    src = m.group("src")
+    kfm = _KF_REF_RE.match(src)
+    if kfm is None:
+        log.warning("external image ref dropped: %s", src)
+        return {"_drop": True}  # consume but don't emit
+    idx = int(kfm.group(1))
+    if idx < 0 or idx >= len(keyframes):
+        log.warning("keyframe ref kf:%d out of range (0..%d)",
+                    idx, len(keyframes) - 1)
+        return {"_drop": True}
+    kf = keyframes[idx]
+    sid = kf.get("blob_source_id")
+    if not sid:
+        log.warning("keyframe kf:%d missing blob_source_id", idx)
+        return {"_drop": True}
+    return {
+        "type": "image",
+        "sourceId": sid,
+        "caption": m.group("alt") or kf.get("caption", ""),
+    }
+
+
+# ── Cross-doc refs ──────────────────────────────────────────────────
 
 
 async def _split_on_cross_doc_refs(
-    text: str, mcp_client: Any | None
+    text: str,
+    children: list[Token],
+    mcp_client: Any | None,
 ) -> list[dict[str, Any]]:
     """Split a paragraph on `[[Doc Title]]` refs. Each ref becomes its own
-    embed-linked-doc block; the surrounding text becomes adjacent paragraphs.
-    Unresolved refs stay inline as literal text.
-
-    Note: paragraph blocks are returned with raw string `text` so that
-    `_replace_keyframe_refs` can inspect them for `![alt](kf:N)` image-ref
-    syntax. `_inline_to_text` is applied afterwards in that function.
-    """
+    embed-linked-doc block; the surrounding text becomes adjacent paragraphs
+    rendered with full inline formatting (bold/italic/code/links).
+    Unresolved refs stay inline as literal text."""
     matches = list(_CROSS_DOC_RE.finditer(text))
     if not matches:
-        return [{"type": "paragraph", "style": "text", "text": text}]
+        ops = _walk_inline_children(children) if children else text
+        return [{"type": "paragraph", "style": "text", "text": ops}]
 
     out: list[dict[str, Any]] = []
     pos = 0
     for m in matches:
         if m.start() > pos:
             pre = text[pos:m.start()]
-            out.append({"type": "paragraph", "style": "text", "text": pre})
+            ops = _inline_text_to_ops(pre)
+            if ops:
+                out.append({"type": "paragraph", "style": "text", "text": ops})
 
         title = m.group(1)
         doc_id = None
@@ -280,57 +548,8 @@ async def _split_on_cross_doc_refs(
 
         pos = m.end()
     if pos < len(text):
-        out.append({"type": "paragraph", "style": "text",
-                    "text": text[pos:]})
-    return out
-
-
-_IMAGE_REF_RE = re.compile(r"^!\[(?P<alt>[^\]]*)\]\((?P<src>[^)\s]+)\)\s*$")
-
-
-def _replace_keyframe_refs(
-    blocks: list[dict[str, Any]], keyframes: list[dict[str, Any]]
-) -> list[dict[str, Any]]:
-    """Walk paragraph blocks; if a paragraph is exactly an image ref
-    `![alt](kf:N)`, replace with an image block backed by the keyframe.
-
-    For paragraphs that are NOT image refs, `_inline_to_text` is applied
-    here to convert any `[label](url)` links into inline-op lists.
-    This is done after image-ref detection so the raw string is available
-    for `_IMAGE_REF_RE` matching.
-    """
-    out: list[dict[str, Any]] = []
-    for b in blocks:
-        if b.get("type") != "paragraph":
-            out.append(b)
-            continue
-        flat = b.get("text")
-        if not isinstance(flat, str):
-            # Already processed (e.g. inline-op list) — pass through.
-            out.append(b)
-            continue
-        m = _IMAGE_REF_RE.match(flat.strip())
-        if m is None:
-            # Not an image ref: apply inline-link conversion and keep as paragraph.
-            out.append({**b, "text": _inline_to_text(flat)})
-            continue
-        src = m.group("src")
-        kfm = _KF_REF_RE.match(src)
-        if kfm is None:
-            log.warning("external image ref dropped: %s", src)
-            continue
-        idx = int(kfm.group(1))
-        if idx < 0 or idx >= len(keyframes):
-            log.warning("keyframe ref kf:%d out of range (0..%d)", idx, len(keyframes) - 1)
-            continue
-        kf = keyframes[idx]
-        sid = kf.get("blob_source_id")
-        if not sid:
-            log.warning("keyframe kf:%d missing blob_source_id", idx)
-            continue
-        out.append({
-            "type": "image",
-            "sourceId": sid,
-            "caption": m.group("alt") or kf.get("caption", ""),
-        })
-    return out
+        tail = text[pos:]
+        ops = _inline_text_to_ops(tail)
+        if ops:
+            out.append({"type": "paragraph", "style": "text", "text": ops})
+    return [b for b in out if not b.get("_drop")]
