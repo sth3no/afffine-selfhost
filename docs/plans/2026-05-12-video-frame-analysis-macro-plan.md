@@ -90,7 +90,8 @@ mechanisms.
 
 **Effort:** ~2-4 hours. Single PR.
 
-**Detailed plan:** `docs/plans/2026-05-12-phase-15-keyframes-appear.md` (TBD when phase starts)
+**Status:** ✅ Shipped (commit `0882ec7`).
+**Detailed plan:** [`2026-05-12-phase-15-keyframes-appear.md`](2026-05-12-phase-15-keyframes-appear.md)
 
 ---
 
@@ -125,7 +126,8 @@ low-entropy) before the Sonnet vision call runs. Reduces vision cost by
 
 **Effort:** ~3-5 hours. Single PR.
 
-**Detailed plan:** `docs/plans/2026-05-12-phase-16-frame-quality-filter.md` (TBD)
+**Status:** ✅ Shipped (commit `47ebc1b`).
+**Detailed plan:** [`2026-05-12-phase-16-frame-quality-filter.md`](2026-05-12-phase-16-frame-quality-filter.md)
 
 ---
 

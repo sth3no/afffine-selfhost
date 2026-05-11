@@ -369,3 +369,68 @@ def test_rerender_501_when_reextract_requested(client, monkeypatch):
     r = c.post("/captures/cap1/rerender?reextract=true", headers=HEADERS)
     assert r.status_code == 501
     assert "reextract" in r.text.lower()
+
+
+def test_rerender_emits_keyframes_appendix_when_body_uses_no_kf_refs(client, monkeypatch):
+    """rerender_capture mirrors the orchestrator's fallback: when the
+    template's body_md references zero kf:N out of N available keyframes,
+    a `## Keyframes` appendix is appended with image blocks."""
+    c, repo = client
+    repo.resolve = AsyncMock(return_value=_tmpl(id="t_current"))
+
+    # Mock a capture with keyframes in its extracted_snapshot.
+    from src.db import CaptureRow
+    snap = {
+        "title": "T", "body_md": "B", "author": None,
+        "media_kind": "video", "published_at": None,
+        "extra": {
+            "keyframes": [
+                {"timestamp_seconds": 1.0, "caption": "frame zero",
+                 "blob_source_id": "blob0"},
+                {"timestamp_seconds": 2.0, "caption": "frame one",
+                 "blob_source_id": "blob1"},
+            ],
+        },
+    }
+    row = CaptureRow(
+        id="cap1", url="https://example.com", url_hash="h",
+        source_app=None, shared_title=None, shared_text=None,
+        platform="youtube", status="done", doc_id="doc1",
+        web_url=None, topic_path=None,
+        classifier_topic="Tutorials",
+        extracted_snapshot=snap,
+    )
+
+    fake_get_by_id = AsyncMock(return_value=row)
+    fake_save = AsyncMock()
+    monkeypatch.setattr("src.db.CaptureRepository.get_by_id", fake_get_by_id, raising=False)
+    monkeypatch.setattr("src.db.CaptureRepository.save_template_run", fake_save, raising=False)
+
+    fake_pool, _ = _make_fake_pool(row)
+    monkeypatch.setattr(app_state, "pool", fake_pool, raising=False)
+
+    from src.pipeline.templated_render import TemplatedOutput
+    # Body_md has NO kf:N refs → fallback should fire.
+    fake_render = AsyncMock(return_value=TemplatedOutput(
+        title="New Title", lede=None,
+        summary_md="- a", body_md="## Body\nContent without keyframe refs.",
+    ))
+    monkeypatch.setattr("src.api.templated_render", fake_render, raising=False)
+
+    mcp = AsyncMock()
+    monkeypatch.setattr(app_state, "mcp", mcp, raising=False)
+
+    r = c.post("/captures/cap1/rerender", headers=HEADERS)
+
+    assert r.status_code == 200
+    # Inspect the blocks passed to mcp.append_blocks
+    blocks = mcp.append_blocks.await_args.args[1]
+    keyframes_headings = [
+        b for b in blocks
+        if b.get("type") == "paragraph" and b.get("style") == "h2"
+        and b.get("text") == "Keyframes"
+    ]
+    assert len(keyframes_headings) == 1
+    image_blocks = [b for b in blocks if b.get("type") == "image"]
+    assert len(image_blocks) == 2
+    assert {b["sourceId"] for b in image_blocks} == {"blob0", "blob1"}

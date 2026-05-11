@@ -425,3 +425,28 @@ async def test_callout_with_only_whitespace_inline_ops_is_dropped():
     assert _is_empty_callout({"type": "callout", "text": "Real text"}) is False
     # Non-callout blocks pass through.
     assert _is_empty_callout({"type": "paragraph", "text": ""}) is False
+
+
+# ── count_keyframe_refs (Phase 15) ──────────────────────────────────
+
+
+def test_count_keyframe_refs_finds_inline_refs():
+    """Returns the set of integer indices referenced via `kf:N` syntax."""
+    from src.pipeline.markdown_render import count_keyframe_refs
+
+    md = (
+        "## Section\n\n"
+        "Some context. ![the IDE](kf:0) inline reference.\n\n"
+        "More text and then ![chart](kf:2) standalone:\n\n"
+        "![also referenced inside same paragraph](kf:2)\n"
+    )
+    refs = count_keyframe_refs(md)
+    assert refs == {0, 2}
+
+
+def test_count_keyframe_refs_returns_empty_set_when_no_refs():
+    """Body with no `kf:N` syntax returns an empty set."""
+    from src.pipeline.markdown_render import count_keyframe_refs
+
+    md = "Plain content. [normal link](https://example.com) only."
+    assert count_keyframe_refs(md) == set()

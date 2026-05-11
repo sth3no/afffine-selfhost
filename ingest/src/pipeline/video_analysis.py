@@ -32,6 +32,7 @@ from anthropic import AsyncAnthropic
 from pydantic import BaseModel, Field
 
 from src.config import settings
+from src.pipeline.video_analysis_filters import filter_low_quality_frames
 
 log = logging.getLogger(__name__)
 
@@ -150,6 +151,19 @@ async def analyze_video(
 
     if not frames:
         log.info("video_analysis: no scenes detected; skipping vision call")
+        return None, []
+
+    # Stage 2.5 — Phase 16 quality pre-filter (cheap heuristics; runs sync in a thread).
+    # Drops obviously-useless frames (black/uniform/duplicate) before paying the
+    # vision-call token cost. Pure-Python (numpy + imagehash) so safe to run
+    # in a thread pool. Failure should never block the pipeline.
+    try:
+        frames = await asyncio.to_thread(filter_low_quality_frames, frames)
+    except Exception as e:  # noqa: BLE001
+        log.warning("video_analysis: quality filter failed (continuing with unfiltered frames): %s", e)
+
+    if not frames:
+        log.info("video_analysis: quality filter dropped all frames; skipping vision call")
         return None, []
 
     # Stage 3: resize via Pillow (still sync; fold into the to_thread).

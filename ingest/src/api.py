@@ -767,7 +767,7 @@ async def rerender_capture(
                 "rerender: MCP unavailable or doc_id missing; skipped block update"
             )
         else:
-            from src.pipeline.markdown_render import markdown_to_blocks
+            from src.pipeline.markdown_render import count_keyframe_refs, markdown_to_blocks
             from src.pipeline.orchestrator import url_embed_block
             blocks: list[dict] = []
             if row.url:
@@ -791,6 +791,26 @@ async def rerender_capture(
                         mcp_client=app_state.mcp,
                     )
                 )
+
+            # Phase 15 fallback: append ## Keyframes when body_md referenced
+            # zero kf:N refs out of N available keyframes. Mirrors the
+            # orchestrator's behaviour in _replace_doc_body_templated.
+            if (
+                keyframes
+                and rendered.body_md
+                and not count_keyframe_refs(rendered.body_md)
+            ):
+                blocks.append({"type": "paragraph", "style": "h2", "text": "Keyframes"})
+                for kf in keyframes:
+                    source_id = kf.get("blob_source_id")
+                    if not source_id:
+                        continue
+                    blocks.append({
+                        "type": "image",
+                        "sourceId": source_id,
+                        "caption": kf.get("caption") or "",
+                    })
+
             # Always append the raw transcript/body as a separate section so
             # the source signal is preserved even when the template's body_md
             # is a compressed summary. Strip extractor metadata first so we

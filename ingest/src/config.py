@@ -59,6 +59,13 @@ class Settings(BaseSettings):
     keyframe_importance_threshold: int = 4
     frame_long_edge_px: int = 1024
     scenedetect_threshold: float = 27.0
+    # Phase 16 — Frame-quality pre-filter (runs BETWEEN scene detect and vision call).
+    # Defaults chosen to be conservative: drop only frames that are
+    # obviously useless. Tune via env vars if the filter is over- or
+    # under-aggressive on a particular video corpus.
+    frame_blackness_threshold: float = 20.0   # mean grayscale pixel value 0-255; below = "too dark"
+    frame_dedup_hamming_distance: int = 5     # imagehash pHash distance 0-64; below-or-equal = "duplicate"
+    frame_entropy_threshold: float = 4.0      # Shannon entropy of grayscale histogram, bits 0-8; below = "too uniform"
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore", case_sensitive=False)
 
