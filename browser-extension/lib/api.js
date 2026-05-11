@@ -23,7 +23,7 @@ export class IngestError extends Error {
 }
 
 /**
- * @param {'GET'|'POST'|'DELETE'} method
+ * @param {'GET'|'POST'|'PUT'|'DELETE'} method
  * @param {string} path  — server-relative, e.g. "/capture"
  * @param {{body?: any, bodyType?: 'json'|'text', signal?: AbortSignal}} [opts]
  * @returns {Promise<any>}  — parsed JSON, or `null` for empty 204s

@@ -66,7 +66,7 @@ componentSheet.replaceSync(`
 `);
 
 class AfButton extends HTMLElement {
-  static observedAttributes = ['variant', 'size', 'disabled'];
+  static observedAttributes = ['variant', 'size', 'disabled', 'aria-label', 'aria-describedby'];
 
   constructor() {
     super();
@@ -91,6 +91,13 @@ class AfButton extends HTMLElement {
     btn.classList.add(this.getAttribute('variant') || 'primary');
     if (this.hasAttribute('size')) btn.classList.add(this.getAttribute('size'));
     btn.disabled = this.hasAttribute('disabled');
+    // Forward aria-* attributes from the host to the inner button so screen
+    // readers get an accessible name (the host's aria-label is invisible to
+    // the AT since the real <button> is in shadow DOM).
+    for (const attr of ['aria-label', 'aria-describedby']) {
+      if (this.hasAttribute(attr)) btn.setAttribute(attr, this.getAttribute(attr));
+      else btn.removeAttribute(attr);
+    }
   }
 }
 

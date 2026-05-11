@@ -1,10 +1,12 @@
 /**
  * AFFiNE Capture — options page.
  *
- * Three tabs: Settings (this phase) · History (Phase 6) · Cookies (Phase 7).
- * URL hash routes drive tab visibility. The Settings tab persists URL + token
- * to chrome.storage.local via lib/storage.js, and Test connection hits the
- * health endpoint via lib/api.js.
+ * Four tabs: Settings · History · Cookies · Templates.
+ * URL hash routes drive tab visibility (#settings, #history, #cookies, #templates,
+ * plus #history/<id> and #templates/<id> deep links). The Settings tab persists
+ * URL + token to chrome.storage.local via lib/storage.js; History wraps the
+ * capture API (lib/api.js + capture/client.js); Templates wraps templates/client.js
+ * and composes <af-template-row> / <af-template-editor>.
  */
 import '../options/components/af-button.js';
 import '../options/components/af-input.js';
@@ -12,11 +14,22 @@ import '../options/components/af-card.js';
 import '../options/components/af-history-row.js';
 import '../options/components/af-status-timeline.js';
 import '../options/components/af-breadcrumb.js';
+import '../options/components/af-template-row.js';
+import '../options/components/af-template-editor.js';
+import '../options/components/af-prompt-textarea.js';
 import { getConfig, setConfig, getRecentCaptures, getLastSync } from '../lib/storage.js';
 import { health, IngestError } from '../lib/api.js';
-import { listCaptures, getCapture, retryCapture, deleteCapture } from '../capture/client.js';
+import { listCaptures, getCapture, retryCapture, deleteCapture, rerenderCapture } from '../capture/client.js';
+import {
+  listTemplates,
+  getTemplate,
+  createTemplate,
+  updateTemplate,
+  archiveTemplate,
+  synthesizeTemplate,
+} from '../templates/client.js';
 
-const VALID_TABS = ['settings', 'history', 'cookies'];
+const VALID_TABS = ['settings', 'history', 'cookies', 'templates'];
 
 const $tabs = document.querySelectorAll('.tab');
 const $panels = document.querySelectorAll('.panel');
@@ -40,10 +53,10 @@ function currentTab() {
   return VALID_TABS.includes(top) ? top : 'settings';
 }
 
-function currentDetailId() {
+function currentDetailId(forTab) {
   const hash = window.location.hash.replace('#', '');
   const parts = hash.split('/');
-  return parts[0] === 'history' && parts[1] ? parts[1] : null;
+  return parts[0] === forTab && parts[1] ? parts[1] : null;
 }
 
 function routeFromHash() {
@@ -56,6 +69,7 @@ function routeFromHash() {
   }
   if (target === 'history') renderHistoryView();
   if (target === 'cookies') renderCookiesView();
+  if (target === 'templates') renderTemplatesView();
 }
 
 async function loadSettings() {
@@ -140,7 +154,7 @@ document.querySelectorAll('.filter-pill').forEach(pill => {
 });
 
 async function renderHistoryView() {
-  const detailId = currentDetailId();
+  const detailId = currentDetailId('history');
   if (detailId) {
     await renderHistoryDetail(detailId);
     return;
@@ -363,3 +377,306 @@ function formatRelativeOptions(date) {
   if (sec < 86400) return `${Math.floor(sec / 3600)}h ago`;
   return `${Math.floor(sec / 86400)}d ago`;
 }
+
+// ── Templates tab ────────────────────────────────────────────────────────────
+
+const $tplPlatform = document.getElementById('tplPlatform');
+const $tplTopic = document.getElementById('tplTopic');
+const $tplStatus = document.getElementById('tplStatus');
+const $tplRefresh = document.getElementById('tplRefresh');
+const $tplNew = document.getElementById('tplNew');
+const $templatesList = document.getElementById('templatesList');
+const $templatesEmpty = document.getElementById('templatesEmpty');
+const $templatesDetail = document.getElementById('templatesDetail');
+const $templatesView = document.getElementById('templatesView');
+
+let _templates = [];
+
+$tplRefresh.addEventListener('click', () => loadTemplatesList());
+$tplPlatform.addEventListener('change', () => loadTemplatesList());
+$tplStatus.addEventListener('change', () => loadTemplatesList());
+$tplTopic.addEventListener('input', debounce(() => loadTemplatesList(), 250));
+$tplNew.addEventListener('click', () => newTemplateFlow());
+
+function debounce(fn, ms) {
+  let t;
+  return (...args) => { clearTimeout(t); t = setTimeout(() => fn(...args), ms); };
+}
+
+async function renderTemplatesView() {
+  const detailId = currentDetailId('templates');
+  if (detailId) {
+    await renderTemplateDetail(detailId);
+    return;
+  }
+  $templatesView.hidden = false;
+  $templatesDetail.hidden = true;
+  await loadTemplatesList();
+}
+
+async function loadTemplatesList() {
+  const filter = {
+    platform: $tplPlatform.value || undefined,
+    topic: $tplTopic.value.trim() || undefined,
+    statusFilter: $tplStatus.value || undefined,
+  };
+  try {
+    _templates = await listTemplates(filter) ?? [];
+  } catch (e) {
+    showToast(errorLabel(e) || 'Couldn\'t load templates');
+    _templates = [];
+  }
+  refreshPlatformOptions(_templates);
+  renderTemplatesList();
+}
+
+function refreshPlatformOptions(items) {
+  const platforms = new Set(items.map(t => t.platform_id));
+  const current = $tplPlatform.value;
+  $tplPlatform.innerHTML = `<option value="">All</option>`
+    + [...platforms].sort().map(p =>
+      `<option value="${escapeAttr(p)}"${p === current ? ' selected' : ''}>${escapeText(p)}</option>`,
+    ).join('');
+}
+
+function renderTemplatesList() {
+  $templatesList.innerHTML = '';
+  if (_templates.length === 0) {
+    $templatesEmpty.hidden = false;
+    return;
+  }
+  $templatesEmpty.hidden = true;
+  // Sort: most-used first, then alphabetic by scope.
+  const sorted = [..._templates].sort((a, b) => {
+    if ((b.usage_count ?? 0) !== (a.usage_count ?? 0)) {
+      return (b.usage_count ?? 0) - (a.usage_count ?? 0);
+    }
+    return `${a.platform_id}/${a.topic}`.localeCompare(`${b.platform_id}/${b.topic}`);
+  });
+  for (const t of sorted) {
+    const row = document.createElement('af-template-row');
+    row.data = t;
+    row.addEventListener('open', e => {
+      window.location.hash = `#templates/${e.detail.id}`;
+    });
+    row.addEventListener('archive', e => archiveFlow(e.detail));
+    $templatesList.appendChild(row);
+  }
+}
+
+async function renderTemplateDetail(id) {
+  $templatesView.hidden = true;
+  $templatesDetail.hidden = false;
+  $templatesDetail.innerHTML = `<p class="hint">Loading…</p>`;
+
+  let detail;
+  try {
+    detail = await getTemplate(id);
+  } catch (e) {
+    $templatesDetail.innerHTML = `
+      <button class="back-btn" id="tplBack">← Back</button>
+      <p class="hint" style="color: var(--af-error)">Couldn't load: ${escapeText(e?.message ?? String(e))}</p>
+    `;
+    document.getElementById('tplBack').addEventListener('click', () => {
+      window.location.hash = '#templates';
+    });
+    return;
+  }
+
+  $templatesDetail.innerHTML = `<af-template-editor></af-template-editor>`;
+  const editor = $templatesDetail.querySelector('af-template-editor');
+  editor.data = detail;
+  editor.addEventListener('back', () => { window.location.hash = '#templates'; });
+  editor.addEventListener('save', e => saveFlow(e.detail));
+  editor.addEventListener('archive', e => archiveFlow(e.detail));
+  editor.addEventListener('resynth', e => resynthFlow(e.detail));
+  editor.addEventListener('apply', e => applyToCaptureFlow(e.detail));
+}
+
+async function saveFlow({ id, patch }) {
+  try {
+    await updateTemplate(id, patch);
+    showToast('Saved');
+    await renderTemplateDetail(id);
+  } catch (e) {
+    showToast(errorLabel(e) || 'Save failed');
+  }
+}
+
+async function archiveFlow({ id, name }) {
+  if (!confirm(`Archive template "${name}"? Existing captures keep their template_id reference but no future captures will use this template.`)) {
+    return;
+  }
+  try {
+    await archiveTemplate(id);
+    showToast('Archived');
+    window.location.hash = '#templates';
+    await loadTemplatesList();
+  } catch (e) {
+    showToast(errorLabel(e) || 'Archive failed');
+  }
+}
+
+async function resynthFlow({ id, platform_id, topic }) {
+  if (!confirm(`Re-synthesize the template for (${platform_id}, ${topic})? This archives the current one and runs Sonnet 4.6 to generate a fresh template from the most recent capture.`)) {
+    return;
+  }
+  let archived = false;
+  try {
+    await archiveTemplate(id);
+    archived = true;
+    const fresh = await synthesizeTemplate({ platformId: platform_id, topic });
+    showToast('Re-synthesized');
+    window.location.hash = `#templates/${fresh.id}`;
+  } catch (e) {
+    const base = errorLabel(e) || 'Re-synth failed';
+    showToast(archived
+      ? `${base} — old template is archived; use "New template…" to recreate`
+      : base);
+  }
+}
+
+async function applyToCaptureFlow({ platform_id, topic }) {
+  // Implemented in Task 10.
+  await applyToExistingCapturePicker({ platform_id, topic });
+}
+
+async function newTemplateFlow() {
+  const platform_id = prompt('Platform id (e.g. youtube, instagram, * for wildcard):');
+  if (!platform_id) return;
+  const topic = prompt('Topic (e.g. Tutorials, Recipes, * for wildcard):');
+  if (!topic) return;
+  const name = prompt('Template name:', `${platform_id} · ${topic}`);
+  if (!name) return;
+  const system_prompt = prompt('Paste the system prompt (or "synth" to synthesize from a recent capture instead):');
+  if (!system_prompt) return;
+
+  try {
+    let created;
+    if (system_prompt === 'synth') {
+      created = await synthesizeTemplate({ platformId: platform_id, topic });
+    } else {
+      created = await createTemplate({ platform_id, topic, name, system_prompt });
+    }
+    showToast('Created');
+    window.location.hash = `#templates/${created.id}`;
+  } catch (e) {
+    showToast(errorLabel(e) || 'Create failed');
+  }
+}
+
+async function applyToExistingCapturePicker({ platform_id, topic }) {
+  // Guard against double-open: if a picker is already mounted, replace it.
+  document.querySelector('.tpl-picker-overlay')?.remove();
+
+  // CaptureItem from /captures doesn't carry classifier_topic or shared_title
+  // (see ingest/src/models.py:101-115). We filter server-side by platform when
+  // we can, surface topic_path as a hint, and intentionally don't filter
+  // client-side by topic — that would require either the server exposing
+  // classifier_topic or brittle topic_path parsing.
+  const scopeText = (platform_id === '*' && topic === '*')
+    ? 'all recent done captures'
+    : (platform_id === '*'
+      ? `recent done captures (any platform)`
+      : `recent done captures from ${platform_id}`);
+
+  const overlay = document.createElement('div');
+  overlay.className = 'tpl-picker-overlay';
+  overlay.innerHTML = `
+    <div class="tpl-picker" role="dialog" aria-modal="true" aria-label="Apply template to existing capture">
+      <header>
+        <h3>Apply template</h3>
+        <af-button class="tpl-picker-close" variant="icon" aria-label="Close">✕</af-button>
+      </header>
+      <p class="hint">
+        Showing ${escapeText(scopeText)}.
+        Re-render replaces the doc body in AFFiNE (v1 is append-only — old blocks remain).
+      </p>
+      <div id="tplPickerList" class="tpl-picker-list">
+        <p class="hint">Loading…</p>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(overlay);
+
+  overlay.querySelector('af-button.tpl-picker-close').addEventListener('click', () => overlay.remove());
+  overlay.addEventListener('click', e => {
+    if (e.target === overlay) overlay.remove();
+  });
+
+  let items = [];
+  try {
+    const page = await listCaptures({
+      limit: 50,
+      status: 'done',
+      platform: platform_id !== '*' ? platform_id : undefined,
+    });
+    items = page?.items ?? [];
+  } catch (e) {
+    overlay.querySelector('#tplPickerList').innerHTML =
+      `<p class="hint" style="color: var(--af-error)">Couldn't load captures: ${escapeText(errorLabel(e) || e?.message || '')}</p>`;
+    return;
+  }
+
+  const $list = overlay.querySelector('#tplPickerList');
+  if (items.length === 0) {
+    $list.innerHTML = `<p class="hint">No matching captures.</p>`;
+    return;
+  }
+
+  $list.innerHTML = '';
+  for (const c of items) {
+    const row = document.createElement('div');
+    row.className = 'tpl-picker-row';
+    row.innerHTML = `
+      <div class="tpl-picker-meta">
+        <div class="tpl-picker-title">${escapeText(c.url ?? '(untitled)')}</div>
+        <div class="tpl-picker-sub">${escapeText(c.platform)} · ${escapeText(c.topic_path ?? '—')} · ${escapeText(formatPickerTime(c.created_at))}</div>
+      </div>
+      <af-button variant="primary" data-id="${escapeAttr(c.capture_id)}">Re-render</af-button>
+    `;
+    row.querySelector('af-button[variant="primary"]').addEventListener('click', async () => {
+      try {
+        await rerenderCapture(c.capture_id);
+        showToast('Re-rendered — check AFFiNE');
+        overlay.remove();
+      } catch (e) {
+        showToast(errorLabel(e) || 'Re-render failed');
+      }
+    });
+    $list.appendChild(row);
+  }
+}
+
+function formatPickerTime(iso) {
+  if (!iso) return '';
+  const sec = Math.floor((Date.now() - new Date(iso).getTime()) / 1000);
+  if (sec < 60) return `${sec}s ago`;
+  if (sec < 3600) return `${Math.floor(sec / 60)}m ago`;
+  if (sec < 86400) return `${Math.floor(sec / 3600)}h ago`;
+  return `${Math.floor(sec / 86400)}d ago`;
+}
+
+// ── Server-version footer ────────────────────────────────────────────────────
+
+const EXTENSION_API_MAJOR = 0;  // bump when this code targets a new ingest major
+
+(async function renderServerVersion() {
+  const $v = document.getElementById('serverVersion');
+  if (!$v) return;
+  try {
+    const res = await health();
+    const v = res?.version ?? '?';
+    const serverMajor = Number(String(v).split('.')[0]);
+    const mismatch = Number.isFinite(serverMajor) && serverMajor !== EXTENSION_API_MAJOR;
+    if (mismatch) {
+      $v.classList.add('version-warn');
+      $v.textContent = `Server v${v} — extension targets v${EXTENSION_API_MAJOR}.x. Some features may not work.`;
+    } else {
+      $v.classList.remove('version-warn');
+      $v.textContent = `Server v${v}`;
+    }
+  } catch {
+    $v.textContent = `Server unreachable`;
+  }
+})();

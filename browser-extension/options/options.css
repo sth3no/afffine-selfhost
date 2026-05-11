@@ -247,3 +247,113 @@ body {
   display: inline;
   margin: 0;
 }
+
+/* Templates tab */
+
+.templates-filter-bar {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto minmax(0, 1fr) auto minmax(0, 1fr) auto auto;
+  gap: var(--af-space-2);
+  align-items: center;
+  margin-bottom: var(--af-space-3);
+}
+.templates-filter-bar .field-label {
+  margin: 0;
+}
+.filter-select,
+.filter-input {
+  font: var(--af-small);
+  padding: var(--af-space-2) var(--af-space-3);
+  border: 1px solid var(--af-border);
+  border-radius: var(--af-radius-button);
+  background: var(--af-surface);
+  color: var(--af-navy);
+  outline: none;
+  min-width: 120px;
+}
+.filter-select:focus,
+.filter-input:focus { border-color: var(--af-blue); }
+
+.templates-list {
+  display: flex;
+  flex-direction: column;
+}
+.templates-empty {
+  margin-top: var(--af-space-3);
+  text-align: center;
+}
+
+.page-foot {
+  margin-top: var(--af-space-5);
+  padding-top: var(--af-space-3);
+  border-top: 1px solid var(--af-border);
+  font: var(--af-small);
+  color: var(--af-text-body);
+  text-align: center;
+}
+.page-foot .version-warn { color: var(--af-error); font-weight: 600; }
+
+/* Templates: capture-picker overlay */
+
+.tpl-picker-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 26, 63, 0.4);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+.tpl-picker {
+  background: var(--af-surface);
+  border-radius: var(--af-radius-card);
+  padding: var(--af-space-4);
+  width: min(640px, 90vw);
+  max-height: 80vh;
+  display: flex;
+  flex-direction: column;
+  box-shadow: var(--af-shadow-card);
+}
+.tpl-picker header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: var(--af-space-2);
+}
+.tpl-picker header h3 {
+  margin: 0;
+  font: var(--af-h3);
+}
+.tpl-picker-list {
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--af-space-2);
+}
+.tpl-picker-row {
+  display: flex;
+  align-items: center;
+  gap: var(--af-space-3);
+  padding: var(--af-space-2) var(--af-space-3);
+  border: 1px solid var(--af-border);
+  border-radius: var(--af-radius-button);
+}
+.tpl-picker-meta {
+  flex: 1;
+  overflow: hidden;
+}
+.tpl-picker-title {
+  font: var(--af-body);
+  font-weight: 600;
+  color: var(--af-navy);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.tpl-picker-sub {
+  font: var(--af-small);
+  color: var(--af-text-body);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}

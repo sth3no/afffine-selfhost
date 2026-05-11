@@ -14,9 +14,10 @@
     </header>
 
     <nav class="tabs" role="tablist">
-      <a href="#settings" class="tab" data-tab="settings" role="tab">Settings</a>
-      <a href="#history"  class="tab" data-tab="history"  role="tab">History</a>
-      <a href="#cookies"  class="tab" data-tab="cookies"  role="tab">Cookies</a>
+      <a href="#settings"  class="tab" data-tab="settings"  role="tab">Settings</a>
+      <a href="#history"   class="tab" data-tab="history"   role="tab">History</a>
+      <a href="#cookies"   class="tab" data-tab="cookies"   role="tab">Cookies</a>
+      <a href="#templates" class="tab" data-tab="templates" role="tab">Templates</a>
     </nav>
 
     <main class="panels">
@@ -96,7 +97,51 @@
           </label>
         </af-card>
       </section>
+
+      <!-- Templates panel -->
+      <section id="panel-templates" class="panel" role="tabpanel" data-panel="templates" hidden>
+        <div id="templatesView">
+          <div class="templates-filter-bar">
+            <label class="field-label" for="tplPlatform">Platform</label>
+            <select id="tplPlatform" class="filter-select">
+              <option value="">All</option>
+            </select>
+
+            <label class="field-label" for="tplTopic">Topic</label>
+            <input id="tplTopic" class="filter-input" type="text" placeholder="e.g. Tutorials">
+
+            <label class="field-label" for="tplStatus">Status</label>
+            <select id="tplStatus" class="filter-select">
+              <option value="">All</option>
+              <option value="auto">Auto</option>
+              <option value="edited">Edited</option>
+              <option value="archived">Archived</option>
+            </select>
+
+            <af-button id="tplRefresh" variant="secondary">Refresh</af-button>
+            <af-button id="tplNew" variant="primary">New template…</af-button>
+          </div>
+
+          <div id="templatesList" class="templates-list"></div>
+
+          <div id="templatesEmpty" class="templates-empty" hidden>
+            <af-card>
+              <p class="hint">
+                Templates appear here automatically when you capture content of a new
+                (platform, topic) kind. Try saving a recipe video to seed your first
+                Recipe template.
+              </p>
+            </af-card>
+          </div>
+        </div>
+
+        <div id="templatesDetail" class="template-detail" hidden></div>
+      </section>
     </main>
+
+    <footer class="page-foot">
+      <span id="serverVersion" class="hint">…</span>
+    </footer>
   </div>
 
   <script type="module" src="options.js"></script>
