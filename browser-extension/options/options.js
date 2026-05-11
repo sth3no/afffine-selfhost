@@ -12,11 +12,22 @@ import '../options/components/af-card.js';
 import '../options/components/af-history-row.js';
 import '../options/components/af-status-timeline.js';
 import '../options/components/af-breadcrumb.js';
+import '../options/components/af-template-row.js';
+import '../options/components/af-template-editor.js';
+import '../options/components/af-prompt-textarea.js';
 import { getConfig, setConfig, getRecentCaptures, getLastSync } from '../lib/storage.js';
 import { health, IngestError } from '../lib/api.js';
-import { listCaptures, getCapture, retryCapture, deleteCapture } from '../capture/client.js';
+import { listCaptures, getCapture, retryCapture, deleteCapture, rerenderCapture } from '../capture/client.js';
+import {
+  listTemplates,
+  getTemplate,
+  createTemplate,
+  updateTemplate,
+  archiveTemplate,
+  synthesizeTemplate,
+} from '../templates/client.js';
 
-const VALID_TABS = ['settings', 'history', 'cookies'];
+const VALID_TABS = ['settings', 'history', 'cookies', 'templates'];
 
 const $tabs = document.querySelectorAll('.tab');
 const $panels = document.querySelectorAll('.panel');
@@ -40,10 +51,10 @@ function currentTab() {
   return VALID_TABS.includes(top) ? top : 'settings';
 }
 
-function currentDetailId() {
+function currentDetailId(forTab) {
   const hash = window.location.hash.replace('#', '');
   const parts = hash.split('/');
-  return parts[0] === 'history' && parts[1] ? parts[1] : null;
+  return parts[0] === forTab && parts[1] ? parts[1] : null;
 }
 
 function routeFromHash() {
@@ -56,6 +67,7 @@ function routeFromHash() {
   }
   if (target === 'history') renderHistoryView();
   if (target === 'cookies') renderCookiesView();
+  if (target === 'templates') renderTemplatesView();
 }
 
 async function loadSettings() {
@@ -140,7 +152,7 @@ document.querySelectorAll('.filter-pill').forEach(pill => {
 });
 
 async function renderHistoryView() {
-  const detailId = currentDetailId();
+  const detailId = currentDetailId('history');
   if (detailId) {
     await renderHistoryDetail(detailId);
     return;
@@ -362,4 +374,192 @@ function formatRelativeOptions(date) {
   if (sec < 3600) return `${Math.floor(sec / 60)}m ago`;
   if (sec < 86400) return `${Math.floor(sec / 3600)}h ago`;
   return `${Math.floor(sec / 86400)}d ago`;
+}
+
+// ── Templates tab ────────────────────────────────────────────────────────────
+
+const $tplPlatform = document.getElementById('tplPlatform');
+const $tplTopic = document.getElementById('tplTopic');
+const $tplStatus = document.getElementById('tplStatus');
+const $tplRefresh = document.getElementById('tplRefresh');
+const $tplNew = document.getElementById('tplNew');
+const $templatesList = document.getElementById('templatesList');
+const $templatesEmpty = document.getElementById('templatesEmpty');
+const $templatesDetail = document.getElementById('templatesDetail');
+const $templatesView = document.getElementById('templatesView');
+
+let _templates = [];
+let _platformOptions = new Set();
+
+$tplRefresh.addEventListener('click', () => loadTemplatesList());
+$tplPlatform.addEventListener('change', () => loadTemplatesList());
+$tplStatus.addEventListener('change', () => loadTemplatesList());
+$tplTopic.addEventListener('input', debounce(() => loadTemplatesList(), 250));
+$tplNew.addEventListener('click', () => newTemplateFlow());
+
+function debounce(fn, ms) {
+  let t;
+  return (...args) => { clearTimeout(t); t = setTimeout(() => fn(...args), ms); };
+}
+
+async function renderTemplatesView() {
+  const detailId = currentDetailId('templates');
+  if (detailId) {
+    await renderTemplateDetail(detailId);
+    return;
+  }
+  $templatesView.hidden = false;
+  $templatesDetail.hidden = true;
+  await loadTemplatesList();
+}
+
+async function loadTemplatesList() {
+  const filter = {
+    platform: $tplPlatform.value || undefined,
+    topic: $tplTopic.value.trim() || undefined,
+    statusFilter: $tplStatus.value || undefined,
+  };
+  try {
+    _templates = await listTemplates(filter) ?? [];
+  } catch (e) {
+    showToast(e?.message ?? 'Couldn\'t load templates');
+    _templates = [];
+  }
+  refreshPlatformOptions(_templates);
+  renderTemplatesList();
+}
+
+function refreshPlatformOptions(items) {
+  for (const t of items) _platformOptions.add(t.platform_id);
+  const current = $tplPlatform.value;
+  $tplPlatform.innerHTML = `<option value="">All</option>`
+    + [..._platformOptions].sort().map(p =>
+      `<option value="${escapeAttr(p)}"${p === current ? ' selected' : ''}>${escapeText(p)}</option>`,
+    ).join('');
+}
+
+function renderTemplatesList() {
+  $templatesList.innerHTML = '';
+  if (_templates.length === 0) {
+    $templatesEmpty.hidden = false;
+    return;
+  }
+  $templatesEmpty.hidden = true;
+  // Sort: most-used first, then alphabetic by scope.
+  const sorted = [..._templates].sort((a, b) => {
+    if ((b.usage_count ?? 0) !== (a.usage_count ?? 0)) {
+      return (b.usage_count ?? 0) - (a.usage_count ?? 0);
+    }
+    return `${a.platform_id}/${a.topic}`.localeCompare(`${b.platform_id}/${b.topic}`);
+  });
+  for (const t of sorted) {
+    const row = document.createElement('af-template-row');
+    row.data = t;
+    row.addEventListener('open', e => {
+      window.location.hash = `#templates/${e.detail.id}`;
+    });
+    row.addEventListener('archive', e => archiveFlow(e.detail));
+    $templatesList.appendChild(row);
+  }
+}
+
+async function renderTemplateDetail(id) {
+  $templatesView.hidden = true;
+  $templatesDetail.hidden = false;
+  $templatesDetail.innerHTML = `<p class="hint">Loading…</p>`;
+
+  let detail;
+  try {
+    detail = await getTemplate(id);
+  } catch (e) {
+    $templatesDetail.innerHTML = `
+      <button class="back-btn" id="tplBack">← Back</button>
+      <p class="hint" style="color: var(--af-error)">Couldn't load: ${escapeText(e?.message ?? String(e))}</p>
+    `;
+    document.getElementById('tplBack').addEventListener('click', () => {
+      window.location.hash = '#templates';
+    });
+    return;
+  }
+
+  $templatesDetail.innerHTML = `<af-template-editor></af-template-editor>`;
+  const editor = $templatesDetail.querySelector('af-template-editor');
+  editor.data = detail;
+  editor.addEventListener('back', () => { window.location.hash = '#templates'; });
+  editor.addEventListener('save', e => saveFlow(e.detail));
+  editor.addEventListener('archive', e => archiveFlow(e.detail));
+  editor.addEventListener('resynth', e => resynthFlow(e.detail));
+  editor.addEventListener('apply', e => applyToCaptureFlow(e.detail));
+}
+
+async function saveFlow({ id, patch }) {
+  try {
+    await updateTemplate(id, patch);
+    showToast('Saved');
+    await renderTemplateDetail(id);
+  } catch (e) {
+    showToast(errorLabel(e) || 'Save failed');
+  }
+}
+
+async function archiveFlow({ id, name }) {
+  if (!confirm(`Archive template "${name}"? Existing captures keep their template_id reference but no future captures will use this template.`)) {
+    return;
+  }
+  try {
+    await archiveTemplate(id);
+    showToast('Archived');
+    window.location.hash = '#templates';
+    await loadTemplatesList();
+  } catch (e) {
+    showToast(errorLabel(e) || 'Archive failed');
+  }
+}
+
+async function resynthFlow({ id, platform_id, topic }) {
+  if (!confirm(`Re-synthesize the template for (${platform_id}, ${topic})? This archives the current one and runs Sonnet 4.6 to generate a fresh template from the most recent capture.`)) {
+    return;
+  }
+  try {
+    await archiveTemplate(id);
+    const fresh = await synthesizeTemplate({ platformId: platform_id, topic });
+    showToast('Re-synthesized');
+    window.location.hash = `#templates/${fresh.id}`;
+  } catch (e) {
+    showToast(errorLabel(e) || 'Re-synth failed');
+  }
+}
+
+async function applyToCaptureFlow({ id, platform_id, topic }) {
+  // Implemented in Task 10.
+  await applyToExistingCapturePicker({ platform_id, topic });
+}
+
+async function newTemplateFlow() {
+  const platform_id = prompt('Platform id (e.g. youtube, instagram, * for wildcard):');
+  if (!platform_id) return;
+  const topic = prompt('Topic (e.g. Tutorials, Recipes, * for wildcard):');
+  if (!topic) return;
+  const name = prompt('Template name:', `${platform_id} · ${topic}`);
+  if (!name) return;
+  const system_prompt = prompt('Paste the system prompt (or "synth" to synthesize from a recent capture instead):');
+  if (!system_prompt) return;
+
+  try {
+    let created;
+    if (system_prompt === 'synth') {
+      created = await synthesizeTemplate({ platformId: platform_id, topic });
+    } else {
+      created = await createTemplate({ platform_id, topic, name, system_prompt });
+    }
+    showToast('Created');
+    window.location.hash = `#templates/${created.id}`;
+  } catch (e) {
+    showToast(errorLabel(e) || 'Create failed');
+  }
+}
+
+// Stub: Task 10 wires this up.
+async function applyToExistingCapturePicker(_filter) {
+  showToast('Apply-to-capture flow comes in Task 10');
 }
