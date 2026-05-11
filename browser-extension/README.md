@@ -90,6 +90,7 @@ Three tabs (`chrome-extension://<id>/options/options.html`):
   missing) + manual Sync now + extended-scope opt-in for
   `accounts.google.com` cookies (helps with age-gated and members-only
   videos).
+- **Templates** — see [Templates](#templates) below.
 
 ---
 
@@ -122,6 +123,22 @@ music-with-territory-restrictions videos that auth via Google's central
 account domain. Untick to revoke (the extension calls
 `chrome.permissions.remove`, so site access is genuinely removed — verify
 in `chrome://extensions/` → Details → Site access).
+
+---
+
+## Templates
+
+The Templates tab lists every per-(platform, topic) AI prompt the ingest
+service is using to render captured content. From here you can:
+
+- Browse all templates (auto-synthesized + manually edited)
+- Edit a template's system prompt — affects future captures
+- Re-synthesize a template against a fresh sample capture
+- Apply a template to an existing capture (v1: append-only)
+- Archive a template (the (*, *) seed is protected)
+
+See [docs/api-for-extension.md](../docs/api-for-extension.md) for the full
+contract.
 
 ---
 
