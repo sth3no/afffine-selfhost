@@ -61,7 +61,7 @@ async def test_synthesize_template_calls_sonnet_and_inserts_row():
     fake = MagicMock()
     fake.parsed_output = SynthesizedTemplate(
         name="YouTube Recipe v1",
-        system_prompt="You are a recipe summarizer. ...",
+        system_prompt="You are a recipe summarizer. Produce ingredients list and numbered steps.",
         biggest_value="Ingredients + numbered steps.",
         user_intent="Cook it later.",
         best_roi_format="Ingredients list + numbered steps + time estimate.",
@@ -94,7 +94,7 @@ async def test_synthesize_template_calls_sonnet_and_inserts_row():
     kwargs = repo.insert_if_absent.await_args.kwargs
     assert kwargs["platform_id"] == "youtube"
     assert kwargs["topic"] == "Recipes"
-    assert kwargs["system_prompt"] == "You are a recipe summarizer. ..."
+    assert kwargs["system_prompt"] == "You are a recipe summarizer. Produce ingredients list and numbered steps."
     assert kwargs["created_by"] == "synth"
     assert kwargs["status"] == "auto"
     assert "biggest_value" in kwargs["generator_meta"]
@@ -104,7 +104,8 @@ async def test_synthesize_template_calls_sonnet_and_inserts_row():
 async def test_synthesize_template_passes_sample_in_user_message():
     fake = MagicMock()
     fake.parsed_output = SynthesizedTemplate(
-        name="X", system_prompt="x",
+        name="X",
+        system_prompt="x" * 50,
         biggest_value="x", user_intent="x", best_roi_format="x",
         available_blocks_used=["paragraph"],
     )
@@ -129,3 +130,20 @@ async def test_synthesize_template_passes_sample_in_user_message():
     assert "youtube" in user_msg
     assert "Recipes" in user_msg
     assert "UNIQUE_SAMPLE_TITLE_TOKEN" in user_msg
+
+
+@pytest.mark.asyncio
+async def test_synthesize_template_raises_when_parsed_output_is_none():
+    fake = MagicMock()
+    fake.parsed_output = None
+    repo = AsyncMock()
+    with patch("src.pipeline.template_synth.AsyncAnthropic") as Client, \
+         patch("src.pipeline.template_synth.settings") as settings_mock:
+        settings_mock.anthropic_api_key = "sk-ant-test"
+        settings_mock.vision_model = "claude-sonnet-4-6"
+        Client.return_value.messages.parse = AsyncMock(return_value=fake)
+        with pytest.raises(RuntimeError, match="parsed_output is None"):
+            await synthesize_template(
+                platform_id="youtube", topic="Recipes",
+                sample_extracted=_extracted(), templates_repo=repo,
+            )

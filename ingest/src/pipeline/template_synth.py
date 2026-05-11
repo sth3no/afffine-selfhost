@@ -9,9 +9,10 @@ synthesis races resolve to a single winner.
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timezone
 
 from anthropic import AsyncAnthropic
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from src.config import settings
 from src.pipeline.extracted import Extracted
@@ -35,6 +36,16 @@ class SynthesizedTemplate(BaseModel):
     available_blocks_used: list[str] = Field(
         description="Which AFFiNE block flavours the generated prompt actively instructs."
     )
+
+    @field_validator("system_prompt")
+    @classmethod
+    def _prompt_must_be_substantive(cls, v: str) -> str:
+        if len(v) < 50:
+            raise ValueError(
+                f"synthesized system_prompt is too short ({len(v)} chars); "
+                "expected at least 50 chars of instruction."
+            )
+        return v
 
 
 META_SYSTEM_PROMPT = """You are designing a content template for a personal
@@ -61,10 +72,11 @@ Available block flavours the generated prompt can request (via markdown):
 - Headings h1-h6: `# heading`, `## heading`
 - Paragraphs: plain text
 - Bulleted/numbered/todo lists: `- item`, `1. item`, `[ ] item`
-- Code blocks with language: ```python ... ```  (any language)
-- Mermaid diagrams: ```mermaid\\nflowchart ... ```  (renders as diagram)
-- Embedded HTML "frames" (SVG charts, styled cards):
-  ```embed-html\\n<svg ...> ... ```
+- Code blocks with language: fenced ```python (or any language)``` blocks
+- Mermaid diagrams: fenced ```mermaid``` blocks containing flowchart / sequence /
+  gantt / mindmap syntax (rendered as a diagram by the AFFiNE renderer)
+- Embedded HTML "frames" (SVG charts, styled cards): fenced ```embed-html```
+  blocks containing inline HTML/SVG (rendered as a styled card)
 - Image refs to available keyframes: `![caption](kf:<index>)`
 - Cross-doc references: `[[Doc Title]]` (resolves to embed-linked-doc)
 - Callouts (highlighted blocks): `> [!callout] text`
@@ -91,7 +103,7 @@ you generate will be sent to Haiku 4.5 — make it self-contained.
 def _build_user_message(
     *, platform_id: str, topic: str, sample: Extracted
 ) -> str:
-    body_excerpt = (sample.body_md or "")[:4000]
+    body_excerpt = sample.body_md[:4000]
     description = (sample.extra or {}).get("description")
     video_summary = (sample.extra or {}).get("video_summary")
     parts: list[str] = [
@@ -132,7 +144,11 @@ async def synthesize_template(
     response = await client.messages.parse(
         model=settings.vision_model,  # Sonnet 4.6 — runs once per scope
         max_tokens=4096,
-        system=[{"type": "text", "text": META_SYSTEM_PROMPT}],
+        system=[{
+            "type": "text",
+            "text": META_SYSTEM_PROMPT,
+            "cache_control": {"type": "ephemeral"},
+        }],
         messages=[{"role": "user", "content": user_msg}],
         output_format=SynthesizedTemplate,
     )
@@ -149,6 +165,7 @@ async def synthesize_template(
         "best_roi_format": synth.best_roi_format,
         "available_blocks_used": synth.available_blocks_used,
         "synthesizer_model": settings.vision_model,
+        "synthesized_at": datetime.now(timezone.utc).isoformat(),
     }
 
     return await templates_repo.insert_if_absent(
