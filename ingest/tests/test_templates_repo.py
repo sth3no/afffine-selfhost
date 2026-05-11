@@ -213,7 +213,7 @@ async def test_update_changes_status_to_edited_when_prompt_changes():
 
     assert tmpl is not None
     sql = conn.fetchrow.await_args.args[0]
-    assert "status" in sql
+    assert "CASE WHEN status = 'auto' THEN 'edited'" in sql
 
 
 @pytest.mark.asyncio
@@ -261,3 +261,32 @@ async def test_insert_if_absent_on_conflict_does_nothing():
 
     assert tmpl is not None
     assert tmpl.platform_id == "youtube"
+    assert conn.fetchrow.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_insert_if_absent_raises_when_no_winner():
+    conn = AsyncMock()
+    conn.fetchrow.side_effect = [None, None]
+    repo = TemplatesRepository(conn)
+    with pytest.raises(RuntimeError, match="no winner found"):
+        await repo.insert_if_absent(
+            platform_id="youtube", topic="AI",
+            name="x", system_prompt="x",
+        )
+
+
+@pytest.mark.asyncio
+async def test_update_raises_when_no_fields_provided():
+    conn = AsyncMock()
+    repo = TemplatesRepository(conn)
+    with pytest.raises(ValueError, match="no fields"):
+        await repo.update(template_id="t_yt_tut")
+
+
+@pytest.mark.asyncio
+async def test_update_returns_none_when_id_not_found():
+    conn = AsyncMock()
+    conn.fetchrow.return_value = None
+    repo = TemplatesRepository(conn)
+    assert await repo.update(template_id="nope", name="x") is None

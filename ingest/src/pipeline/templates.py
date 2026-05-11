@@ -71,6 +71,14 @@ _COUNT_USAGE_SQL = """
     SELECT count(*) FROM captures WHERE template_id = $1
 """
 
+_ARCHIVE_SQL = """
+    UPDATE content_templates
+    SET status = 'archived', updated_at = NOW()
+    WHERE id = $1
+    RETURNING id, platform_id, topic, name, system_prompt, status,
+              generator_meta, created_by, created_at, updated_at
+"""
+
 
 class TemplatesRepository:
     """asyncpg-backed CRUD + fallback chain resolver.
@@ -188,6 +196,8 @@ class TemplatesRepository:
     ) -> ContentTemplate | None:
         """Patch any of the fields. Setting system_prompt flips status to 'edited'
         if it was previously 'auto' (audit-trail signal for synth vs user edits)."""
+        if name is None and system_prompt is None and platform_id is None and topic is None:
+            raise ValueError("update() called with no fields to change")
         sets: list[str] = ["updated_at = NOW()"]
         args: list[Any] = []
         if name is not None:
@@ -215,16 +225,7 @@ class TemplatesRepository:
         return None if record is None else _row_to_model(record)
 
     async def archive(self, *, template_id: str) -> ContentTemplate | None:
-        record = await self._conn.fetchrow(
-            """
-            UPDATE content_templates
-            SET status = 'archived', updated_at = NOW()
-            WHERE id = $1
-            RETURNING id, platform_id, topic, name, system_prompt, status,
-                      generator_meta, created_by, created_at, updated_at
-            """,
-            template_id,
-        )
+        record = await self._conn.fetchrow(_ARCHIVE_SQL, template_id)
         return None if record is None else _row_to_model(record)
 
     async def count_usage(self, *, template_id: str) -> int:
