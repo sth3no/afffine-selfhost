@@ -264,8 +264,8 @@ async def _replace_doc_body_templated(
         })
 
     if rendered is not None:
-        if rendered.lede:
-            blocks.append({"type": "callout", "text": rendered.lede})
+        if rendered.lede and rendered.lede.strip():
+            blocks.append({"type": "callout", "text": rendered.lede.strip()})
         if rendered.summary_md:
             blocks.append({"type": "paragraph", "style": "h2", "text": "Summary"})
             blocks.extend(

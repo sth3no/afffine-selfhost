@@ -385,3 +385,43 @@ def test_strip_extractor_metadata_passthrough_when_no_prefix():
 
     body = "Regular content without the cobalt prefix.\nMore stuff."
     assert strip_extractor_metadata(body) == body
+
+
+# ── Defensive empty-callout filter (Phase 14.4) ─────────────────────
+
+
+@pytest.mark.asyncio
+async def test_callout_with_whitespace_only_body_is_dropped():
+    """Belt-and-suspenders: the safety filter at the end of
+    markdown_to_blocks drops callouts that ended up with empty/whitespace
+    text. Catches stragglers from any code path that emits a callout
+    without checking the text content."""
+    # `> [!callout]    ` → empty body after strip → drop.
+    blocks = await markdown_to_blocks(
+        "## A heading\n\n> [!callout]    \n\nNext paragraph.\n",
+        keyframes=[], mcp_client=None,
+    )
+    callouts = [b for b in blocks if b.get("type") == "callout"]
+    assert len(callouts) == 0
+
+
+@pytest.mark.asyncio
+async def test_callout_with_only_whitespace_inline_ops_is_dropped():
+    """Callout whose inline-op text is only whitespace should also be dropped."""
+    # The placeholder mechanism handles this directly; this test ensures
+    # the safety filter is also covering the case for any callout that
+    # might slip through with InlineOp[] all-whitespace text.
+    from src.pipeline.markdown_render import _is_empty_callout
+
+    assert _is_empty_callout({"type": "callout", "text": ""}) is True
+    assert _is_empty_callout({"type": "callout", "text": "   "}) is True
+    assert _is_empty_callout({"type": "callout", "text": None}) is True
+    assert _is_empty_callout(
+        {"type": "callout", "text": [{"text": "   "}, {"text": ""}]}
+    ) is True
+    assert _is_empty_callout(
+        {"type": "callout", "text": [{"text": "real content"}]}
+    ) is False
+    assert _is_empty_callout({"type": "callout", "text": "Real text"}) is False
+    # Non-callout blocks pass through.
+    assert _is_empty_callout({"type": "paragraph", "text": ""}) is False

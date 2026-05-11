@@ -772,8 +772,8 @@ async def rerender_capture(
             blocks: list[dict] = []
             if row.url:
                 blocks.append(url_embed_block(row.url))
-            if rendered.lede:
-                blocks.append({"type": "callout", "text": rendered.lede})
+            if rendered.lede and rendered.lede.strip():
+                blocks.append({"type": "callout", "text": rendered.lede.strip()})
             if rendered.summary_md:
                 blocks.append({"type": "paragraph", "style": "h2", "text": "Summary"})
                 blocks.extend(
