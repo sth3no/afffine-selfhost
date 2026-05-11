@@ -143,25 +143,38 @@ export async function runSourcesReorg(opts: {
       folderId: folder.id,
       clusters: [],
     };
-    for (const cluster of validClusters) {
-      const created = await client.callTool('create_folder', {
-        name: cluster.name,
-        parentFolderId: folder.id,
-      });
-      const newFolder = JSON.parse(created.content[0].text) as { folderId: string };
-      for (const docId of cluster.docIds) {
-        await client.callTool('move_document', {
-          docId,
+    // Contain failures at the folder level so one bad mcp-ext call (a
+    // poisoned fractional-index sibling, a transient network glitch) can't
+    // abort the entire weekly sweep. Clusters that completed before the
+    // throw are preserved in the summary; the workspace keeps whatever
+    // sub-folders + moves already landed, and the next run picks up where
+    // this one stopped.
+    try {
+      for (const cluster of validClusters) {
+        const created = await client.callTool('create_folder', {
+          name: cluster.name,
+          parentFolderId: folder.id,
+        });
+        const newFolder = JSON.parse(created.content[0].text) as { folderId: string };
+        for (const docId of cluster.docIds) {
+          await client.callTool('move_document', {
+            docId,
+            folderId: newFolder.folderId,
+          });
+        }
+        split.clusters.push({
+          name: cluster.name,
           folderId: newFolder.folderId,
+          docCount: cluster.docIds.length,
         });
       }
-      split.clusters.push({
-        name: cluster.name,
-        folderId: newFolder.folderId,
-        docCount: cluster.docIds.length,
-      });
+    } catch (e) {
+      console.warn(
+        `[Reorganizer] ${folder.name}: aborted at cluster ${split.clusters.length + 1}/${validClusters.length}:`,
+        e,
+      );
     }
-    summary.splits.push(split);
+    if (split.clusters.length > 0) summary.splits.push(split);
   }
 
   return summary;
