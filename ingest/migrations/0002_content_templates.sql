@@ -1,6 +1,4 @@
 -- Phase 14: content templates — per-(platform, topic) prompts.
--- Seed inserts the current summarizer prompt as the (*, *) default so
--- behavior on first deploy is identical to today.
 
 CREATE TABLE IF NOT EXISTS content_templates (
     id              TEXT PRIMARY KEY,
@@ -20,20 +18,30 @@ CREATE UNIQUE INDEX IF NOT EXISTS content_templates_active_scope
     ON content_templates (platform_id, topic)
     WHERE status <> 'archived';
 
--- Lookup index for the fallback chain.
-CREATE INDEX IF NOT EXISTS content_templates_scope_lookup
-    ON content_templates (platform_id, topic)
-    WHERE status <> 'archived';
-
--- Capture-level audit trail + replay inputs.
+-- Capture-level audit + replay inputs:
+--   template_id          : FK to the template that ran for this capture
+--   template_prompt_used : snapshot of template.system_prompt at runtime
+--                          (so capture record survives later template edits)
+--   template_output_raw  : the body_md the LLM returned (replayable input)
+--   extracted_snapshot   : JSON-serialised Extracted record from pipeline
+--                          (title/body_md/author/media_kind/extra) so
+--                          /captures/{id}/rerender can replay without
+--                          refetching the source URL.
 ALTER TABLE captures
     ADD COLUMN IF NOT EXISTS template_id          TEXT REFERENCES content_templates(id),
     ADD COLUMN IF NOT EXISTS template_prompt_used TEXT,
     ADD COLUMN IF NOT EXISTS template_output_raw  TEXT,
     ADD COLUMN IF NOT EXISTS extracted_snapshot   JSONB;
 
--- Seed the (*, *) default template — verbatim today's summarizer system prompt.
+-- Seed the (*, *) default template. The prompt here targets the new
+-- TemplatedOutput schema (title + lede + summary_md + body_md) that
+-- replaces the current SummaryResult once Task 7 wires in the templated
+-- orchestrator. Until then this row is dormant — orchestrator still
+-- routes through summarizer.py.
 -- INSERT only when no (*, *) row exists, so re-running migrations is safe.
+-- Note: id is a stable non-ULID literal so re-running the migration
+-- can use it for idempotency (re-generating a fresh ULID each run
+-- would defeat the WHERE NOT EXISTS guard below).
 INSERT INTO content_templates (
     id, platform_id, topic, name, system_prompt, status, created_by
 )

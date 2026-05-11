@@ -11,7 +11,7 @@ import uuid
 import asyncpg
 import pytest
 
-from src.migrate import apply_migrations, ensure_database
+from src.migrate import apply_migrations
 
 pytestmark = pytest.mark.skipif(
     not os.environ.get("DB_ADMIN_URL"),
@@ -32,14 +32,15 @@ async def throwaway_db():
         await conn.close()
 
     target = admin.rsplit("/", 1)[0] + f"/{name}"
-    await apply_migrations(target)
-    yield target
-
-    conn = await asyncpg.connect(admin)
     try:
-        await conn.execute(f'DROP DATABASE "{name}"')
+        await apply_migrations(target)
+        yield target
     finally:
-        await conn.close()
+        conn = await asyncpg.connect(admin)
+        try:
+            await conn.execute(f'DROP DATABASE "{name}" WITH (FORCE)')
+        finally:
+            await conn.close()
 
 
 @pytest.mark.asyncio
@@ -63,7 +64,7 @@ async def test_captures_has_new_columns(throwaway_db):
     try:
         cols = await conn.fetch(
             "SELECT column_name FROM information_schema.columns "
-            "WHERE table_name='captures'"
+            "WHERE table_name='captures' AND table_schema='public'"
         )
     finally:
         await conn.close()
