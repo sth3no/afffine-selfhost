@@ -567,17 +567,30 @@ async function newTemplateFlow() {
 }
 
 async function applyToExistingCapturePicker({ platform_id, topic }) {
-  // Build the picker overlay
+  // Guard against double-open: if a picker is already mounted, replace it.
+  document.querySelector('.tpl-picker-overlay')?.remove();
+
+  // CaptureItem from /captures doesn't carry classifier_topic or shared_title
+  // (see ingest/src/models.py:101-115). We filter server-side by platform when
+  // we can, surface topic_path as a hint, and intentionally don't filter
+  // client-side by topic — that would require either the server exposing
+  // classifier_topic or brittle topic_path parsing.
+  const scopeText = (platform_id === '*' && topic === '*')
+    ? 'all recent done captures'
+    : (platform_id === '*'
+      ? `recent done captures (any platform)`
+      : `recent done captures from ${platform_id}`);
+
   const overlay = document.createElement('div');
   overlay.className = 'tpl-picker-overlay';
   overlay.innerHTML = `
-    <div class="tpl-picker">
+    <div class="tpl-picker" role="dialog" aria-modal="true" aria-label="Apply template to existing capture">
       <header>
-        <h3>Apply template to existing capture</h3>
-        <button class="back-btn" id="tplPickerClose">✕</button>
+        <h3>Apply template</h3>
+        <af-button class="tpl-picker-close" variant="icon" aria-label="Close">✕</af-button>
       </header>
       <p class="hint">
-        Showing recent captures matching ${escapeText(platform_id)} · ${escapeText(topic)}.
+        Showing ${escapeText(scopeText)}.
         Re-render replaces the doc body in AFFiNE (v1 is append-only — old blocks remain).
       </p>
       <div id="tplPickerList" class="tpl-picker-list">
@@ -586,46 +599,44 @@ async function applyToExistingCapturePicker({ platform_id, topic }) {
     </div>
   `;
   document.body.appendChild(overlay);
-  overlay.querySelector('#tplPickerClose').addEventListener('click', () => overlay.remove());
+
+  overlay.querySelector('af-button.tpl-picker-close').addEventListener('click', () => overlay.remove());
   overlay.addEventListener('click', e => {
     if (e.target === overlay) overlay.remove();
   });
 
   let items = [];
   try {
-    const page = await listCaptures({ limit: 50 });
+    const page = await listCaptures({
+      limit: 50,
+      status: 'done',
+      platform: platform_id !== '*' ? platform_id : undefined,
+    });
     items = page?.items ?? [];
   } catch (e) {
     overlay.querySelector('#tplPickerList').innerHTML =
-      `<p class="hint" style="color: var(--af-error)">Couldn't load captures: ${escapeText(e?.message ?? '')}</p>`;
+      `<p class="hint" style="color: var(--af-error)">Couldn't load captures: ${escapeText(errorLabel(e) || e?.message || '')}</p>`;
     return;
   }
 
-  // Filter by platform + (if not '*') topic match on classifier_topic
-  const filtered = items.filter(c => {
-    if (platform_id !== '*' && c.platform !== platform_id) return false;
-    if (topic !== '*' && c.classifier_topic && c.classifier_topic !== topic) return false;
-    return c.status === 'done';
-  });
-
   const $list = overlay.querySelector('#tplPickerList');
-  if (filtered.length === 0) {
-    $list.innerHTML = `<p class="hint">No matching captures with status=done.</p>`;
+  if (items.length === 0) {
+    $list.innerHTML = `<p class="hint">No matching captures.</p>`;
     return;
   }
 
   $list.innerHTML = '';
-  for (const c of filtered) {
+  for (const c of items) {
     const row = document.createElement('div');
     row.className = 'tpl-picker-row';
     row.innerHTML = `
       <div class="tpl-picker-meta">
-        <div class="tpl-picker-title">${escapeText(c.shared_title ?? c.url ?? '(untitled)')}</div>
-        <div class="tpl-picker-sub">${escapeText(c.platform)} · ${escapeText(c.classifier_topic ?? '—')} · ${escapeText(formatPickerTime(c.created_at))}</div>
+        <div class="tpl-picker-title">${escapeText(c.url ?? '(untitled)')}</div>
+        <div class="tpl-picker-sub">${escapeText(c.platform)} · ${escapeText(c.topic_path ?? '—')} · ${escapeText(formatPickerTime(c.created_at))}</div>
       </div>
       <af-button variant="primary" data-id="${escapeAttr(c.capture_id)}">Re-render</af-button>
     `;
-    row.querySelector('af-button').addEventListener('click', async () => {
+    row.querySelector('af-button[variant="primary"]').addEventListener('click', async () => {
       try {
         await rerenderCapture(c.capture_id);
         showToast('Re-rendered — check AFFiNE');
