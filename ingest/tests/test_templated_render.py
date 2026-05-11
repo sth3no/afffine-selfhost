@@ -53,6 +53,16 @@ def test_fallback_title_uses_url_host():
     assert fallback_title(e, url="https://www.instagram.com/reel/abc/?x=1") == "Capture from www.instagram.com"
 
 
+def test_fallback_title_uses_author_when_no_title():
+    e = _extracted(title=None, author="Travis Scott", media_kind=MediaKind.AUDIO)
+    assert fallback_title(e, url=None) == "Travis Scott — audio"
+
+
+def test_fallback_title_when_nothing_available():
+    e = _extracted(title=None, author=None)
+    assert fallback_title(e, url=None) == "Untitled capture"
+
+
 # ── render() shape ───────────────────────────────────────────────────
 
 
@@ -105,6 +115,7 @@ async def test_render_uses_template_system_prompt():
     system = call.kwargs["system"]
     assert system[0]["text"] == "UNIQUE_MARKER_PROMPT_TEXT"
     assert system[0].get("cache_control") == {"type": "ephemeral"}
+    assert call.kwargs.get("output_format") is TemplatedOutput
 
 
 @pytest.mark.asyncio

@@ -59,7 +59,7 @@ class TemplatedOutput(BaseModel):
 
 
 def _build_user_message(extracted: Extracted, keyframes: list[dict[str, Any]]) -> str:
-    body_excerpt = (extracted.body_md or "")[: settings.summarizer_max_body_chars]
+    body_excerpt = extracted.body_md[: settings.summarizer_max_body_chars]
     description = (extracted.extra or {}).get("description")
     video_summary = (extracted.extra or {}).get("video_summary")
     published = getattr(extracted, "published_at", None)
@@ -89,7 +89,7 @@ def _build_user_message(extracted: Extracted, keyframes: list[dict[str, Any]]) -
 
     if keyframes:
         parts.append(
-            "Available keyframes (reference by index, e.g. ![caption](kf:2)):"
+            "Available keyframes (reference by index, e.g. ![caption](kf:0)):"
         )
         for i, kf in enumerate(keyframes):
             ts = kf.get("timestamp_seconds", 0.0)
@@ -138,7 +138,11 @@ async def render(
 
 
 def fallback_title(extracted: Extracted, *, url: str | None) -> str:
-    """Deterministic title when no API key / parse fails. Moved from summarizer.py."""
+    """Deterministic title when no API key / parse fails.
+
+    Duplicates summarizer.fallback_title for now; summarizer.py is deleted
+    in Task 7 of this phase. Keep this and summarizer's copy in sync until then.
+    """
     if extracted.title:
         return extracted.title.strip()
     if extracted.author:
