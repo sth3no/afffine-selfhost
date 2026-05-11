@@ -252,7 +252,7 @@ body {
 
 .templates-filter-bar {
   display: grid;
-  grid-template-columns: auto 1fr auto 1fr auto 1fr auto auto;
+  grid-template-columns: auto minmax(0, 1fr) auto minmax(0, 1fr) auto minmax(0, 1fr) auto auto;
   gap: var(--af-space-2);
   align-items: center;
   margin-bottom: var(--af-space-3);
@@ -281,10 +281,6 @@ body {
 .templates-empty {
   margin-top: var(--af-space-3);
   text-align: center;
-}
-
-.template-detail {
-  display: block;
 }
 
 .page-foot {
