@@ -383,3 +383,114 @@ describe('<af-prompt-textarea>', () => {
     expect(el.shadowRoot.querySelector('textarea').placeholder).toBe('system prompt…');
   });
 });
+
+import '../af-template-editor.js';
+
+describe('<af-template-editor>', () => {
+  function makeEditor(props = {}) {
+    const el = document.createElement('af-template-editor');
+    el.data = {
+      id: '01TPL',
+      platform_id: 'youtube',
+      topic: 'Tutorials',
+      name: 'YouTube Tutorial v1',
+      system_prompt: 'You are…',
+      status: 'edited',
+      generator_meta: null,
+      created_by: 'user',
+      created_at: '2026-05-11T14:32:00Z',
+      updated_at: '2026-05-11T15:00:00Z',
+      usage_count: 14,
+      ...props,
+    };
+    document.body.appendChild(el);
+    return el;
+  }
+
+  it('registers', () => {
+    expect(customElements.get('af-template-editor')).toBeTypeOf('function');
+  });
+
+  it('renders the name in an editable input', () => {
+    const el = makeEditor({ name: 'My Name' });
+    const nameInput = el.shadowRoot.querySelector('af-input.name-input');
+    expect(nameInput).toBeTruthy();
+  });
+
+  it('renders the system_prompt in the textarea', () => {
+    const el = makeEditor({ system_prompt: 'You are X' });
+    const ta = el.shadowRoot.querySelector('af-prompt-textarea');
+    expect(ta).toBeTruthy();
+  });
+
+  it('renders the generator_meta block when status=auto', () => {
+    const el = makeEditor({
+      status: 'auto',
+      generator_meta: {
+        biggest_value: 'Step-by-step',
+        user_intent: 'Bookmark',
+        best_roi_format: 'Numbered list',
+        available_blocks_used: ['paragraph', 'list'],
+        synthesizer_model: 'claude-sonnet-4-6',
+        synthesized_at: '2026-05-11T14:32:00Z',
+      },
+    });
+    const meta = el.shadowRoot.querySelector('.generator-meta');
+    expect(meta).toBeTruthy();
+    expect(meta.textContent).toContain('Step-by-step');
+  });
+
+  it('omits generator_meta block when null', () => {
+    const el = makeEditor({ status: 'edited', generator_meta: null });
+    expect(el.shadowRoot.querySelector('.generator-meta')).toBeFalsy();
+  });
+
+  it('renders scope header with platform_id and topic', () => {
+    const el = makeEditor({ platform_id: 'youtube', topic: 'Tutorials' });
+    const header = el.shadowRoot.querySelector('.meta-header');
+    expect(header.textContent).toContain('youtube');
+    expect(header.textContent).toContain('Tutorials');
+  });
+
+  it('emits "save" with current name + system_prompt on save click', () => {
+    const el = makeEditor();
+    let received = null;
+    el.addEventListener('save', e => { received = e.detail; });
+    el.shadowRoot.querySelector('af-prompt-textarea').value = 'new prompt';
+    el.shadowRoot.querySelector('af-input.name-input').value = 'new name';
+    el.shadowRoot.querySelector('af-button.save-btn').dispatchEvent(new Event('click'));
+    expect(received).toEqual({
+      id: '01TPL',
+      patch: { name: 'new name', system_prompt: 'new prompt' },
+    });
+  });
+
+  it('emits "archive" with id on archive click', () => {
+    const el = makeEditor();
+    let received = null;
+    el.addEventListener('archive', e => { received = e.detail; });
+    el.shadowRoot.querySelector('af-button.archive-btn').dispatchEvent(new Event('click'));
+    expect(received).toEqual({ id: '01TPL', name: 'YouTube Tutorial v1' });
+  });
+
+  it('emits "resynth" with platform_id + topic', () => {
+    const el = makeEditor();
+    let received = null;
+    el.addEventListener('resynth', e => { received = e.detail; });
+    el.shadowRoot.querySelector('af-button.resynth-btn').dispatchEvent(new Event('click'));
+    expect(received).toEqual({ id: '01TPL', platform_id: 'youtube', topic: 'Tutorials' });
+  });
+
+  it('emits "apply" with current template data', () => {
+    const el = makeEditor();
+    let received = null;
+    el.addEventListener('apply', e => { received = e.detail; });
+    el.shadowRoot.querySelector('af-button.apply-btn').dispatchEvent(new Event('click'));
+    expect(received).toEqual({ id: '01TPL', platform_id: 'youtube', topic: 'Tutorials' });
+  });
+
+  it('hides the archive button when status=archived', () => {
+    const el = makeEditor({ status: 'archived' });
+    expect(el.shadowRoot.querySelector('af-button.archive-btn')).toBeFalsy();
+  });
+});
