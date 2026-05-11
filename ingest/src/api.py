@@ -591,6 +591,11 @@ async def archive_template(template_id: str, _: str = require_token):
             )
 
     archived = await repo.archive(template_id=template_id)
+    if archived is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Template disappeared between get and archive (concurrent delete).",
+        )
     return _template_to_view(archived, await repo.count_usage(template_id=archived.id))
 
 
@@ -663,7 +668,6 @@ async def _load_sample_extracted(
     snap = row["extracted_snapshot"]
     if isinstance(snap, str):
         snap = json.loads(snap)
-    from datetime import datetime
     published_at = snap.get("published_at")
     return Extracted(
         title=snap.get("title"),

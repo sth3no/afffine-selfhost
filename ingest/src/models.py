@@ -7,7 +7,7 @@ import hashlib
 from datetime import datetime
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
-from pydantic import BaseModel, ConfigDict, Field, HttpUrl, field_validator
+from pydantic import BaseModel, ConfigDict, Field, HttpUrl, field_validator, model_validator
 
 
 # ── Enums & helpers ──────────────────────────────────────────────────
@@ -163,6 +163,12 @@ class UpdateTemplateRequest(BaseModel):
     topic: str | None = Field(default=None, min_length=1, max_length=128)
     name: str | None = Field(default=None, min_length=1, max_length=128)
     system_prompt: str | None = Field(default=None, min_length=1)
+
+    @model_validator(mode="after")
+    def _at_least_one_field(self):
+        if all(v is None for v in (self.platform_id, self.topic, self.name, self.system_prompt)):
+            raise ValueError("At least one field must be provided.")
+        return self
 
 
 class SynthesizeRequest(BaseModel):

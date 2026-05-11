@@ -215,6 +215,12 @@ def test_synthesize_creates_new_template(client, monkeypatch):
     assert r.json()["id"] == "t_new"
 
 
+def test_put_template_422_on_empty_body(client):
+    c, repo = client
+    r = c.put("/templates/t1", headers=HEADERS, json={})
+    assert r.status_code == 422
+
+
 def test_synthesize_409_when_active_template_exists(client):
     c, repo = client
     repo.resolve = AsyncMock(return_value=_tmpl())
