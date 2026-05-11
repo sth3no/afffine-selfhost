@@ -15,12 +15,13 @@ import logging
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-from src.config import Platform, TopicsConfig
+from src.config import Platform, TopicsConfig, settings
 from src.db import CaptureRepository, CaptureRow
 from src.pipeline.classification import ClassificationResult
 from src.pipeline.extracted import Extracted
 from src.pipeline.filer import Filer
 from src.pipeline.markdown_render import markdown_to_blocks
+from src.pipeline.chunked_render import chunked_render
 from src.pipeline.templated_render import TemplatedOutput, fallback_title, render as templated_render
 from src.pipeline.template_synth import synthesize_template
 from src.pipeline.templates import TemplatesRepository
@@ -133,9 +134,26 @@ async def process_capture(
     )
 
     # ── Templated render ───────────────────────────────────────────────
+    # For long transcripts we route through chunked_render (map-reduce
+    # over chunks of the body) instead of the single-call render_fn.
+    # The reducer sees the full picture of the source via the chunk
+    # digest, which is what a clickbait-resolving lede needs.
     keyframes = (extracted.extra or {}).get("keyframes") or []
+    body_len = len(extracted.body_md or "")
+    use_chunked = body_len > settings.chunked_render_threshold_chars
     try:
-        rendered = await render_fn(template=template, extracted=extracted, keyframes=keyframes)
+        if use_chunked:
+            log.info(
+                "transition",
+                extra={"step": "render_chunked", "body_chars": body_len},
+            )
+            rendered = await chunked_render(
+                template=template, extracted=extracted, keyframes=keyframes,
+            )
+        else:
+            rendered = await render_fn(
+                template=template, extracted=extracted, keyframes=keyframes,
+            )
     except Exception as e:  # noqa: BLE001
         log.warning("templated render failed: %s", e)
         rendered = None
