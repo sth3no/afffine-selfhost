@@ -37,6 +37,18 @@ _INLINE_LINK_RE = re.compile(
 )
 _IMAGE_REF_RE = re.compile(r"^!\[(?P<alt>[^\]]*)\]\((?P<src>[^)\s]+)\)\s*$")
 
+# Captures `kf:N` references INSIDE `![alt](kf:N)` markdown image syntax.
+# Tolerant of any alt text and any surrounding context.
+_COUNT_KF_REF_RE = re.compile(r"!\[[^\]]*\]\(kf:(\d+)\)")
+
+
+def count_keyframe_refs(body_md: str) -> set[int]:
+    """Return the set of integer indices referenced via `![cap](kf:N)`
+    image syntax in the body_md. Used by the orchestrator to decide
+    whether to append a `## Keyframes` fallback section when the template
+    didn't surface any keyframes itself."""
+    return {int(m.group(1)) for m in _COUNT_KF_REF_RE.finditer(body_md or "")}
+
 # Multi-line callout pattern: `> [!callout]` line plus any contiguous
 # `> body` continuation lines. The head is whatever follows `[!callout]`
 # on the same line (often empty when the LLM writes body on next lines).
