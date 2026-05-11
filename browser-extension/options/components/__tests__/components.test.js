@@ -254,3 +254,58 @@ describe('<af-breadcrumb>', () => {
     expect(segments[3].textContent).toBe('Recipes');
   });
 });
+
+import '../af-prompt-textarea.js';
+
+describe('<af-prompt-textarea>', () => {
+  it('registers the custom element', () => {
+    expect(customElements.get('af-prompt-textarea')).toBeTypeOf('function');
+  });
+
+  it('renders a textarea inside Shadow DOM', () => {
+    const el = document.createElement('af-prompt-textarea');
+    document.body.appendChild(el);
+    expect(el.shadowRoot.querySelector('textarea')).toBeTruthy();
+  });
+
+  it('defaults to 30 rows', () => {
+    const el = document.createElement('af-prompt-textarea');
+    document.body.appendChild(el);
+    expect(el.shadowRoot.querySelector('textarea').rows).toBe(30);
+  });
+
+  it('honours rows attribute override', () => {
+    const el = document.createElement('af-prompt-textarea');
+    el.setAttribute('rows', '12');
+    document.body.appendChild(el);
+    expect(el.shadowRoot.querySelector('textarea').rows).toBe(12);
+  });
+
+  it('value getter/setter round-trips', () => {
+    const el = document.createElement('af-prompt-textarea');
+    document.body.appendChild(el);
+    el.value = 'hello world';
+    expect(el.value).toBe('hello world');
+    expect(el.shadowRoot.querySelector('textarea').value).toBe('hello world');
+  });
+
+  it('emits input and change events from the inner textarea', () => {
+    const el = document.createElement('af-prompt-textarea');
+    document.body.appendChild(el);
+    let inputs = 0, changes = 0;
+    el.addEventListener('input', () => inputs++);
+    el.addEventListener('change', () => changes++);
+    const ta = el.shadowRoot.querySelector('textarea');
+    ta.dispatchEvent(new Event('input', { bubbles: true, composed: true }));
+    ta.dispatchEvent(new Event('change', { bubbles: true, composed: true }));
+    expect(inputs).toBe(1);
+    expect(changes).toBe(1);
+  });
+
+  it('placeholder attribute populates the textarea', () => {
+    const el = document.createElement('af-prompt-textarea');
+    el.setAttribute('placeholder', 'system prompt…');
+    document.body.appendChild(el);
+    expect(el.shadowRoot.querySelector('textarea').placeholder).toBe('system prompt…');
+  });
+});
