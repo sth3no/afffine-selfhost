@@ -288,3 +288,12 @@ Recommended workflow per phase:
 3. Get a step-by-step task plan saved to `docs/plans/2026-MM-DD-phase-N-<slug>.md`.
 4. Execute via `superpowers:subagent-driven-development` (one subagent per task with checkpoints) — recommended for autonomous mode.
 5. After phase acceptance criteria pass, commit, move to next phase.
+
+---
+
+## Later additions
+
+Phases 10+ extend the v1 service with capabilities the original macro plan didn't anticipate. Each has its own task-level plan:
+
+- **Phase 13 — Video frame analysis** ([spec](../specs/2026-05-08-phase-13-video-frame-analysis.md), [plan](2026-05-08-phase-13-video-frame-analysis.md)) — Scene-detect + Sonnet 4.6 vision pass extracts keyframes from captured videos. Keyframes become first-class inputs to downstream rendering.
+- **Phase 14 — Content templates + rich render** ([spec](../specs/2026-05-11-content-templates-design.md), [plan](2026-05-11-phase-14-content-templates.md)) — Per-`(platform_id, topic)` system prompts via DB-backed templates. LLM synthesizer designs templates on first encounter of a new scope. Rich block emitter speaks AFFiNE's full vocabulary (code/mermaid/embed-html/callouts/keyframe refs/cross-doc refs). New API: `/templates/*` CRUD + `/captures/{id}/rerender` replay.
