@@ -11,10 +11,7 @@ import logging
 import os
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, AsyncIterator
-
-if TYPE_CHECKING:
-    from src.pipeline.templates import TemplatesRepository
+from typing import AsyncIterator
 
 import asyncpg
 import httpx
@@ -35,9 +32,15 @@ from src.models import (
     CaptureResponse,
     CapturesPage,
     CaptureStatus,
+    ContentTemplateView,
+    CreateTemplateRequest,
+    SynthesizeRequest,
+    UpdateTemplateRequest,
     normalized_url,
     url_hash,
 )
+from src.pipeline.template_synth import synthesize_template
+from src.pipeline.templates import ContentTemplate, TemplatesRepository
 from src.pipeline.filer import Filer
 from src.pipeline.router import PlatformRouter
 from src.worker import Worker
@@ -56,7 +59,7 @@ class AppState:
     router: PlatformRouter | None = None
     worker: Worker | None = None
     worker_task: asyncio.Task | None = None
-    templates_repo: "TemplatesRepository | None" = None
+    templates_repo: TemplatesRepository | None = None
 
 
 app_state = AppState()
@@ -469,6 +472,207 @@ async def delete_capture(
                 capture_id, row.doc_id, e,
             )
     return {"ok": True}
+
+
+# ── Routes ── Phase 14: Templates CRUD + ops ─────────────────────────
+
+
+def _template_to_view(t: ContentTemplate, usage_count: int) -> ContentTemplateView:
+    return ContentTemplateView(
+        id=t.id, platform_id=t.platform_id, topic=t.topic,
+        name=t.name, system_prompt=t.system_prompt, status=t.status,
+        generator_meta=t.generator_meta, created_by=t.created_by,
+        created_at=t.created_at, updated_at=t.updated_at,
+        usage_count=usage_count,
+    )
+
+
+def _require_templates_repo() -> TemplatesRepository:
+    repo = app_state.templates_repo
+    if repo is None:
+        raise HTTPException(status_code=503, detail="templates_repo not initialized")
+    return repo
+
+
+@app.get("/templates", response_model=list[ContentTemplateView])
+async def list_templates(
+    platform: str | None = None,
+    topic: str | None = None,
+    status_filter: str | None = None,
+    _: str = require_token,
+):
+    repo = _require_templates_repo()
+    rows = await repo.list_all(platform_id=platform, topic=topic, status=status_filter)
+    return [_template_to_view(t, await repo.count_usage(template_id=t.id)) for t in rows]
+
+
+@app.get("/templates/resolve", response_model=ContentTemplateView)
+async def resolve_template(
+    platform: str, topic: str, _: str = require_token,
+):
+    repo = _require_templates_repo()
+    t = await repo.resolve(platform_id=platform, topic=topic)
+    if t is None:
+        raise HTTPException(status_code=404, detail="no template matches")
+    return _template_to_view(t, await repo.count_usage(template_id=t.id))
+
+
+@app.get("/templates/{template_id}", response_model=ContentTemplateView)
+async def get_template(template_id: str, _: str = require_token):
+    repo = _require_templates_repo()
+    t = await repo.get(template_id=template_id)
+    if t is None:
+        raise HTTPException(status_code=404)
+    return _template_to_view(t, await repo.count_usage(template_id=t.id))
+
+
+@app.post("/templates", response_model=ContentTemplateView, status_code=201)
+async def create_template(
+    body: CreateTemplateRequest, _: str = require_token,
+):
+    repo = _require_templates_repo()
+    try:
+        t = await repo.create(
+            platform_id=body.platform_id,
+            topic=body.topic,
+            name=body.name,
+            system_prompt=body.system_prompt,
+            status="edited",
+            created_by="user",
+            generator_meta=None,
+        )
+    except asyncpg.UniqueViolationError:
+        raise HTTPException(
+            status_code=409,
+            detail="A template already exists for this (platform_id, topic) scope.",
+        )
+    return _template_to_view(t, 0)
+
+
+@app.put("/templates/{template_id}", response_model=ContentTemplateView)
+async def update_template(
+    template_id: str, body: UpdateTemplateRequest, _: str = require_token,
+):
+    repo = _require_templates_repo()
+    try:
+        t = await repo.update(
+            template_id=template_id,
+            name=body.name,
+            system_prompt=body.system_prompt,
+            platform_id=body.platform_id,
+            topic=body.topic,
+        )
+    except asyncpg.UniqueViolationError:
+        raise HTTPException(
+            status_code=409,
+            detail="Scope change collides with an existing active template.",
+        )
+    if t is None:
+        raise HTTPException(status_code=404)
+    return _template_to_view(t, await repo.count_usage(template_id=t.id))
+
+
+@app.delete("/templates/{template_id}", response_model=ContentTemplateView)
+async def archive_template(template_id: str, _: str = require_token):
+    repo = _require_templates_repo()
+    target = await repo.get(template_id=template_id)
+    if target is None:
+        raise HTTPException(status_code=404)
+
+    # Seed protection: don't allow deleting the only active (*, *) row.
+    if target.platform_id == "*" and target.topic == "*" and target.status != "archived":
+        actives = await repo.list_all(platform_id="*", topic="*")
+        non_archived = [t for t in actives if t.status != "archived"]
+        if len(non_archived) <= 1:
+            raise HTTPException(
+                status_code=409,
+                detail="Refusing to archive the only active (*, *) seed template. "
+                       "POST a replacement first.",
+            )
+
+    archived = await repo.archive(template_id=template_id)
+    return _template_to_view(archived, await repo.count_usage(template_id=archived.id))
+
+
+@app.post("/templates/synthesize", response_model=ContentTemplateView, status_code=201)
+async def synth_endpoint(
+    body: SynthesizeRequest, _: str = require_token,
+):
+    repo = _require_templates_repo()
+    existing = await repo.resolve(platform_id=body.platform_id, topic=body.topic)
+    if existing is not None and existing.platform_id == body.platform_id and existing.topic == body.topic:
+        raise HTTPException(
+            status_code=409,
+            detail="An active template already exists at this scope. "
+                   "DELETE it first to regenerate.",
+        )
+
+    sample_extracted = await _load_sample_extracted(
+        sample_capture_id=body.sample_capture_id,
+        platform_id=body.platform_id,
+        topic=body.topic,
+    )
+    if sample_extracted is None:
+        raise HTTPException(
+            status_code=400,
+            detail="No sample capture available for synthesis. Either provide "
+                   "sample_capture_id or wait until at least one capture lands "
+                   "in this (platform, topic) scope.",
+        )
+
+    tmpl = await synthesize_template(
+        platform_id=body.platform_id,
+        topic=body.topic,
+        sample_extracted=sample_extracted,
+        templates_repo=repo,
+    )
+    return _template_to_view(tmpl, 0)
+
+
+async def _load_sample_extracted(
+    *,
+    sample_capture_id: str | None,
+    platform_id: str,
+    topic: str,
+):
+    """Load the most recent capture's extracted_snapshot for the given scope,
+    or the specific row if sample_capture_id is provided. Returns an Extracted
+    record or None."""
+    from src.pipeline.extracted import Extracted, MediaKind
+    if app_state.pool is None:
+        return None
+    async with app_state.pool.acquire() as conn:
+        if sample_capture_id is not None:
+            row = await conn.fetchrow(
+                "SELECT extracted_snapshot FROM captures WHERE id = $1",
+                sample_capture_id,
+            )
+        else:
+            row = await conn.fetchrow(
+                """
+                SELECT extracted_snapshot FROM captures
+                WHERE platform = $1 AND classifier_topic = $2
+                  AND extracted_snapshot IS NOT NULL
+                ORDER BY created_at DESC LIMIT 1
+                """,
+                platform_id, topic,
+            )
+    if row is None or row["extracted_snapshot"] is None:
+        return None
+    import json
+    snap = row["extracted_snapshot"]
+    if isinstance(snap, str):
+        snap = json.loads(snap)
+    from datetime import datetime
+    published_at = snap.get("published_at")
+    return Extracted(
+        title=snap.get("title"),
+        body_md=snap.get("body_md", ""),
+        author=snap.get("author"),
+        published_at=datetime.fromisoformat(published_at) if published_at else None,
+        media_kind=MediaKind(snap.get("media_kind", "video")),
+        extra=snap.get("extra") or {},
+    )
 
 
 # ── Routes ── Phase 12: YouTube cookies ──────────────────────────────
