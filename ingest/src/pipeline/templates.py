@@ -13,10 +13,9 @@ returns None and the caller is expected to fall through to the synthesizer.
 from __future__ import annotations
 
 import json
-from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel
+from pydantic import AwareDatetime, BaseModel
 
 
 class ContentTemplate(BaseModel):
@@ -30,8 +29,8 @@ class ContentTemplate(BaseModel):
     status: str                    # 'auto' | 'edited' | 'archived'
     generator_meta: dict[str, Any] | None = None
     created_by: str                # 'synth' | 'user'
-    created_at: datetime
-    updated_at: datetime
+    created_at: AwareDatetime
+    updated_at: AwareDatetime
 
 
 _RESOLVE_SQL = """
@@ -69,8 +68,10 @@ class TemplatesRepository:
 def _row_to_model(record: Any) -> ContentTemplate:
     """Map an asyncpg.Record (or dict from tests) to ContentTemplate."""
     d = dict(record)
-    # generator_meta arrives from asyncpg as a JSON string when the column is
-    # JSONB; coerce to dict for the model. None passes through.
+    # asyncpg's default JSONB codec decodes to dict automatically, so the
+    # isinstance check here is defensive — guards against custom codec
+    # configurations and the test path which passes a JSON string for
+    # fidelity with the on-disk JSONB shape.
     meta = d.get("generator_meta")
     if isinstance(meta, str):
         meta = json.loads(meta)

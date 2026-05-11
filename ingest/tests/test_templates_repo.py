@@ -39,6 +39,8 @@ async def test_resolve_prefers_exact_match():
     assert tmpl is not None
     assert tmpl.platform_id == "youtube"
     assert tmpl.topic == "Tutorials"
+    # Chain must short-circuit on first hit — no further calls.
+    assert conn.fetchrow.await_count == 1
 
 
 @pytest.mark.asyncio
@@ -53,6 +55,10 @@ async def test_resolve_falls_back_to_topic_wildcard():
     assert tmpl is not None
     assert tmpl.platform_id == "*"
     assert tmpl.topic == "Recipes"
+    # Verify the chain queried in the correct order:
+    calls = conn.fetchrow.await_args_list
+    assert calls[0].args[1:] == ("youtube", "Recipes")  # most-specific first
+    assert calls[1].args[1:] == ("*", "Recipes")        # topic wildcard
 
 
 @pytest.mark.asyncio
@@ -67,6 +73,11 @@ async def test_resolve_falls_back_to_platform_wildcard():
     assert tmpl is not None
     assert tmpl.platform_id == "instagram"
     assert tmpl.topic == "*"
+    # Verify the chain queried in the correct order:
+    calls = conn.fetchrow.await_args_list
+    assert calls[0].args[1:] == ("instagram", "AI")  # most-specific first
+    assert calls[1].args[1:] == ("*", "AI")          # topic wildcard
+    assert calls[2].args[1:] == ("instagram", "*")   # platform wildcard
 
 
 @pytest.mark.asyncio
@@ -81,6 +92,12 @@ async def test_resolve_falls_back_to_global_default():
     assert tmpl is not None
     assert tmpl.platform_id == "*"
     assert tmpl.topic == "*"
+    # Verify the chain queried in the correct order:
+    calls = conn.fetchrow.await_args_list
+    assert calls[0].args[1:] == ("reddit", "Politics")  # most-specific first
+    assert calls[1].args[1:] == ("*", "Politics")       # topic wildcard
+    assert calls[2].args[1:] == ("reddit", "*")         # platform wildcard
+    assert calls[3].args[1:] == ("*", "*")              # global default
 
 
 @pytest.mark.asyncio
@@ -92,6 +109,13 @@ async def test_resolve_returns_none_when_nothing_matches():
     tmpl = await repo.resolve(platform_id="x", topic="Memes")
 
     assert tmpl is None
+    # Verify all 4 chain positions were tried in the correct order:
+    calls = conn.fetchrow.await_args_list
+    assert len(calls) == 4
+    assert calls[0].args[1:] == ("x", "Memes")   # most-specific first
+    assert calls[1].args[1:] == ("*", "Memes")   # topic wildcard
+    assert calls[2].args[1:] == ("x", "*")       # platform wildcard
+    assert calls[3].args[1:] == ("*", "*")       # global default
 
 
 @pytest.mark.asyncio
