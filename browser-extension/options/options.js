@@ -1,10 +1,12 @@
 /**
  * AFFiNE Capture — options page.
  *
- * Three tabs: Settings (this phase) · History (Phase 6) · Cookies (Phase 7).
- * URL hash routes drive tab visibility. The Settings tab persists URL + token
- * to chrome.storage.local via lib/storage.js, and Test connection hits the
- * health endpoint via lib/api.js.
+ * Four tabs: Settings · History · Cookies · Templates.
+ * URL hash routes drive tab visibility (#settings, #history, #cookies, #templates,
+ * plus #history/<id> and #templates/<id> deep links). The Settings tab persists
+ * URL + token to chrome.storage.local via lib/storage.js; History wraps the
+ * capture API (lib/api.js + capture/client.js); Templates wraps templates/client.js
+ * and composes <af-template-row> / <af-template-editor>.
  */
 import '../options/components/af-button.js';
 import '../options/components/af-input.js';
@@ -422,7 +424,7 @@ async function loadTemplatesList() {
   try {
     _templates = await listTemplates(filter) ?? [];
   } catch (e) {
-    showToast(e?.message ?? 'Couldn\'t load templates');
+    showToast(errorLabel(e) || 'Couldn\'t load templates');
     _templates = [];
   }
   refreshPlatformOptions(_templates);
@@ -520,17 +522,22 @@ async function resynthFlow({ id, platform_id, topic }) {
   if (!confirm(`Re-synthesize the template for (${platform_id}, ${topic})? This archives the current one and runs Sonnet 4.6 to generate a fresh template from the most recent capture.`)) {
     return;
   }
+  let archived = false;
   try {
     await archiveTemplate(id);
+    archived = true;
     const fresh = await synthesizeTemplate({ platformId: platform_id, topic });
     showToast('Re-synthesized');
     window.location.hash = `#templates/${fresh.id}`;
   } catch (e) {
-    showToast(errorLabel(e) || 'Re-synth failed');
+    const base = errorLabel(e) || 'Re-synth failed';
+    showToast(archived
+      ? `${base} — old template is archived; use "New template…" to recreate`
+      : base);
   }
 }
 
-async function applyToCaptureFlow({ id, platform_id, topic }) {
+async function applyToCaptureFlow({ platform_id, topic }) {
   // Implemented in Task 10.
   await applyToExistingCapturePicker({ platform_id, topic });
 }
