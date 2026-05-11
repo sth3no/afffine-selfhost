@@ -131,3 +131,133 @@ async def test_resolve_skips_archived_rows():
     # Inspect the first SQL call: must filter on status.
     first_call_sql = conn.fetchrow.await_args_list[0].args[0]
     assert "status <> 'archived'" in first_call_sql or "status != 'archived'" in first_call_sql
+
+
+@pytest.mark.asyncio
+async def test_get_returns_template_by_id():
+    conn = AsyncMock()
+    conn.fetchrow.return_value = _row("youtube", "Tutorials", template_id="t_yt_tut")
+    repo = TemplatesRepository(conn)
+
+    tmpl = await repo.get(template_id="t_yt_tut")
+
+    assert tmpl is not None
+    assert tmpl.id == "t_yt_tut"
+
+
+@pytest.mark.asyncio
+async def test_get_returns_none_when_missing():
+    conn = AsyncMock()
+    conn.fetchrow.return_value = None
+    repo = TemplatesRepository(conn)
+    assert await repo.get(template_id="nope") is None
+
+
+@pytest.mark.asyncio
+async def test_list_with_no_filters():
+    conn = AsyncMock()
+    conn.fetch.return_value = [_row("youtube", "Tutorials"), _row("*", "*")]
+    repo = TemplatesRepository(conn)
+
+    rows = await repo.list_all()
+
+    assert len(rows) == 2
+
+
+@pytest.mark.asyncio
+async def test_list_filters_by_platform_and_status():
+    conn = AsyncMock()
+    conn.fetch.return_value = [_row("youtube", "Tutorials", status="edited")]
+    repo = TemplatesRepository(conn)
+
+    rows = await repo.list_all(platform_id="youtube", status="edited")
+
+    assert len(rows) == 1
+    # Inspect SQL to ensure WHERE clauses applied:
+    sql = conn.fetch.await_args.args[0]
+    assert "platform_id" in sql
+    assert "status" in sql
+
+
+@pytest.mark.asyncio
+async def test_create_inserts_and_returns():
+    conn = AsyncMock()
+    inserted = _row("youtube", "Tutorials", status="edited")
+    conn.fetchrow.return_value = inserted
+    repo = TemplatesRepository(conn)
+
+    tmpl = await repo.create(
+        platform_id="youtube",
+        topic="Tutorials",
+        name="YouTube Tutorial v1",
+        system_prompt="prompt",
+        status="edited",
+        created_by="user",
+        generator_meta=None,
+    )
+
+    assert tmpl.id == inserted["id"]
+    # fetchrow used because we RETURN the inserted row.
+    assert conn.fetchrow.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_update_changes_status_to_edited_when_prompt_changes():
+    """PUT /templates/{id} with new system_prompt flips status auto → edited."""
+    conn = AsyncMock()
+    updated = _row("youtube", "Tutorials", status="edited")
+    conn.fetchrow.return_value = updated
+    repo = TemplatesRepository(conn)
+
+    tmpl = await repo.update(template_id="t_yt_tut", system_prompt="new")
+
+    assert tmpl is not None
+    sql = conn.fetchrow.await_args.args[0]
+    assert "status" in sql
+
+
+@pytest.mark.asyncio
+async def test_archive_soft_deletes():
+    conn = AsyncMock()
+    archived = _row("youtube", "Tutorials", status="archived")
+    conn.fetchrow.return_value = archived
+    repo = TemplatesRepository(conn)
+
+    tmpl = await repo.archive(template_id="t_yt_tut")
+
+    assert tmpl is not None
+    assert tmpl.status == "archived"
+
+
+@pytest.mark.asyncio
+async def test_count_usage_returns_int():
+    conn = AsyncMock()
+    conn.fetchval.return_value = 42
+    repo = TemplatesRepository(conn)
+
+    count = await repo.count_usage(template_id="t_yt_tut")
+
+    assert count == 42
+
+
+@pytest.mark.asyncio
+async def test_insert_if_absent_on_conflict_does_nothing():
+    """Synthesis race: two concurrent synth calls. The second returns the
+    existing row rather than failing."""
+    conn = AsyncMock()
+    # ON CONFLICT DO NOTHING returns no row → fall back to a SELECT
+    conn.fetchrow.side_effect = [None, _row("youtube", "AI")]
+    repo = TemplatesRepository(conn)
+
+    tmpl = await repo.insert_if_absent(
+        platform_id="youtube",
+        topic="AI",
+        name="x",
+        system_prompt="x",
+        status="auto",
+        created_by="synth",
+        generator_meta={"biggest_value": "..."},
+    )
+
+    assert tmpl is not None
+    assert tmpl.platform_id == "youtube"
