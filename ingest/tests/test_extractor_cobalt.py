@@ -138,7 +138,13 @@ async def test_cobalt_empty_audio_raises_descriptive_error(monkeypatch):
     empty / HTML body when the upstream YT fetch silently failed.
     Whisper would then choke with cryptic "Invalid file format /
     duration 0" — _download_audio now detects this and raises a clear
-    error pointing at the real cause."""
+    error pointing at the real cause.
+
+    Verified on a NON-YouTube platform: for IG/TikTok the raw error
+    propagates so the worker retries normally. (YouTube intercepts the
+    same error via _is_youtube_recoverable_failure and falls back to
+    oEmbed-only — covered separately by
+    test_youtube_cobalt_zero_byte_audio_falls_back_to_oembed.)"""
     from src.pipeline.extractors import cobalt_ext
 
     def _handler(request: httpx.Request) -> httpx.Response:
@@ -155,7 +161,7 @@ async def test_cobalt_empty_audio_raises_descriptive_error(monkeypatch):
     monkeypatch.setattr(cobalt_ext, "_whisper_transcribe", AsyncMock(return_value="ok"))
 
     with pytest.raises(RuntimeError, match="cobalt audio too small"):
-        await cobalt_ext.extract("https://example.com/x", _platform())
+        await cobalt_ext.extract("https://www.instagram.com/reel/x/", _platform(id_="instagram"))
 
 
 @pytest.mark.asyncio
@@ -371,6 +377,83 @@ async def test_non_youtube_bot_block_still_raises(monkeypatch):
     monkeypatch.setattr(cobalt_ext, "_TEST_TRANSPORT", httpx.MockTransport(_cobalt_handler), raising=False)
 
     with pytest.raises(RuntimeError, match="cobalt http"):
+        await cobalt_ext.extract(
+            "https://www.instagram.com/reel/x/",
+            _platform(id_="instagram"),
+        )
+
+
+@pytest.mark.asyncio
+async def test_youtube_cobalt_zero_byte_audio_falls_back_to_oembed(monkeypatch):
+    """Cobalt's tunnel can return HTTP 200 with a 0-byte body when the
+    upstream YouTube fetch silently failed. _download_audio raises
+    `cobalt audio too small: 0 bytes` — that error must trigger the same
+    oEmbed-only fallback as the explicit error.api.youtube.login response.
+
+    Without this fallback, captures with no captions get pinned in the
+    failed/retry loop forever even though oEmbed-only would produce a
+    usable doc with title + author + 'transcript unavailable' note."""
+    from src.pipeline.extractors import cobalt_ext
+
+    def _cobalt_handler(request: httpx.Request) -> httpx.Response:
+        # POST → 200 with a tunnel URL (looks like success).
+        if request.url.path == "/" and request.method == "POST":
+            return httpx.Response(
+                200,
+                json={"status": "tunnel", "url": "http://cobalt:9000/tunnel/empty", "filename": "x.mp3"},
+            )
+        # GET tunnel → 200 with 0 bytes (cobalt's silent upstream failure).
+        if request.url.path.startswith("/tunnel/"):
+            return httpx.Response(200, content=b"")
+        return httpx.Response(404)
+
+    monkeypatch.setattr(cobalt_ext, "_TEST_TRANSPORT", httpx.MockTransport(_cobalt_handler), raising=False)
+
+    async def _no_captions(url: str, **kwargs) -> None:
+        return None
+    monkeypatch.setattr(cobalt_ext, "fetch_youtube_transcript", _no_captions, raising=False)
+
+    async def _fail_metadata(url: str) -> None:
+        return None
+    monkeypatch.setattr(cobalt_ext, "fetch_metadata", _fail_metadata, raising=False)
+
+    async def _fake_oembed(url: str) -> dict:
+        return {"title": "Some Talk", "author_name": "Conf", "type": "video"}
+    monkeypatch.setattr(cobalt_ext, "fetch_youtube_oembed", _fake_oembed, raising=False)
+
+    # Must NOT raise — must fall through to oEmbed-only Extracted.
+    result = await cobalt_ext.extract(
+        "https://www.youtube.com/watch?v=-wDnwHX02fU",
+        _platform(),
+    )
+
+    assert result.title == "Some Talk"
+    assert result.author == "Conf"
+    assert result.extra["extractor"] == "youtube_oembed_fallback"
+    assert result.extra["transcript_unavailable"] is True
+    assert "Unavailable" in result.body_md
+
+
+@pytest.mark.asyncio
+async def test_non_youtube_cobalt_zero_byte_audio_still_raises(monkeypatch):
+    """The 0-byte fallback is YouTube-specific — IG/TikTok captures must
+    still raise so the worker retries them on the normal backoff schedule.
+    (No oEmbed equivalent for those platforms.)"""
+    from src.pipeline.extractors import cobalt_ext
+
+    def _cobalt_handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/" and request.method == "POST":
+            return httpx.Response(
+                200,
+                json={"status": "tunnel", "url": "http://cobalt:9000/tunnel/empty", "filename": "x.mp3"},
+            )
+        if request.url.path.startswith("/tunnel/"):
+            return httpx.Response(200, content=b"")
+        return httpx.Response(404)
+
+    monkeypatch.setattr(cobalt_ext, "_TEST_TRANSPORT", httpx.MockTransport(_cobalt_handler), raising=False)
+
+    with pytest.raises(RuntimeError, match="cobalt audio too small"):
         await cobalt_ext.extract(
             "https://www.instagram.com/reel/x/",
             _platform(id_="instagram"),
