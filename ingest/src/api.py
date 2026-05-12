@@ -245,6 +245,23 @@ async def health() -> dict:
     }
 
 
+@app.get("/diagnostic/logging")
+async def diagnostic_logging() -> dict:
+    """Snapshot of the logging-handler topology.
+
+    Use this when production logs show the mangled `INFO INFO INFO ts=...`
+    pattern: a healthy response has `json_formatter_active=true`,
+    `root_handler_count=1`, and `extra_handler_loggers=[]`. If any of
+    those are wrong, the in-memory state has drifted from setup_logging
+    — likely a re-attached handler from a framework. If they all look
+    right but logs still look mangled, the issue is in the display layer
+    (e.g. Portainer's log viewer rendering JSON as logfmt) and not the
+    code.
+    """
+    from src.logging_setup import audit_log_handlers
+    return audit_log_handlers()
+
+
 @app.get("/health/deep")
 async def health_deep() -> JSONResponse:
     """Probe every dependency that synchronous /capture exercises.

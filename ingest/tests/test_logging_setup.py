@@ -112,3 +112,57 @@ def test_extra_fields_included_in_payload():
     payload = _format_one(record)
     assert payload["platform"] == "instagram"
     assert payload["duration_ms"] == 123
+
+
+def test_audit_log_handlers_reports_clean_topology(_reset_logging):
+    """After a fresh setup, the audit reports json_formatter_active=True
+    and no per-logger handlers. This is the green-state diagnostic."""
+    from src.logging_setup import audit_log_handlers
+    root = logging.getLogger()
+    root.handlers[:] = []
+    setup_logging(level="INFO")
+    audit = audit_log_handlers()
+    assert audit["json_formatter_active"] is True
+    assert audit["root_handler_count"] == 1
+    assert audit["root_formatter"] == "JsonFormatter"
+    assert audit["extra_handler_loggers"] == []
+
+
+def test_audit_log_handlers_flags_re_attached_handlers(_reset_logging):
+    """Defensive: if a framework re-attaches a handler to a sublogger
+    AFTER setup_logging ran, the audit reports it. The operator sees
+    `extra_handler_loggers=['suspect.framework']` in the diagnostic
+    endpoint and knows the byte-interleaving symptom is back."""
+    from src.logging_setup import audit_log_handlers
+    root = logging.getLogger()
+    root.handlers[:] = []
+    setup_logging(level="INFO")
+    # Simulate a framework re-attaching its own handler post-setup.
+    suspect = logging.getLogger("suspect.framework")
+    suspect.handlers[:] = [logging.StreamHandler()]
+    suspect.propagate = False
+    audit = audit_log_handlers()
+    assert "suspect.framework" in audit["extra_handler_loggers"]
+
+
+def test_setup_logging_emits_diagnostic_marker(_reset_logging, capsys):
+    """The setup_logging_complete log line must appear after handler
+    install — operators read it in `docker logs` to confirm the new
+    image is actually running. Marker must be in JSON form (not the
+    mangled fallback) which proves JsonFormatter is on the emit path."""
+    root = logging.getLogger()
+    root.handlers[:] = []
+    setup_logging(level="INFO")
+    captured = capsys.readouterr()
+    # The marker line must be a parseable JSON line, not mangled output.
+    assert "setup_logging_complete" in captured.out
+    # Find the line and make sure it parses as JSON with the right fields.
+    marker_lines = [
+        line for line in captured.out.splitlines()
+        if "setup_logging_complete" in line
+    ]
+    assert marker_lines, f"no marker line in output: {captured.out!r}"
+    payload = json.loads(marker_lines[0])
+    assert payload["msg"] == "setup_logging_complete"
+    assert payload["formatter"] == "JsonFormatter"
+    assert payload["root_handlers"] == 1

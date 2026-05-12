@@ -106,6 +106,14 @@ def setup_logging(*, level: str | int = "INFO") -> None:
 
     Also silences a small set of chatty loggers (uvicorn.access for
     health-check spam, httpcore, asyncpg.pool) to WARNING.
+
+    Emits a one-shot diagnostic log line at the end so operators can
+    verify in `docker logs` that THIS function ran (vs. an old image
+    still serving). Look for `setup_logging_complete` — it MUST appear
+    as a single clean JSON line. If you see the mangled
+    `INFO INFO INFO ...` pattern around that message, the deployed
+    image is older than commit 50285b4 (May 9 2026) and the container
+    needs a `docker compose up --build`.
     """
     root = logging.getLogger()
 
@@ -121,11 +129,14 @@ def setup_logging(*, level: str | int = "INFO") -> None:
 
     # Walk every existing logger, strip its handlers, force propagation
     # to root. Snapshot the keys first because we mutate the registry.
+    stripped_count = 0
     for name in list(logging.Logger.manager.loggerDict.keys()):
         existing = logging.Logger.manager.loggerDict.get(name)
         if not isinstance(existing, logging.Logger):
             # Skip PlaceHolder entries (lazy parent slots).
             continue
+        if existing.handlers:
+            stripped_count += 1
         existing.handlers[:] = []
         existing.propagate = True
 
@@ -133,6 +144,45 @@ def setup_logging(*, level: str | int = "INFO") -> None:
     # threshold so the signal lines aren't drowned out.
     for name in _SILENCED_LOGGERS:
         logging.getLogger(name).setLevel(logging.WARNING)
+
+    # Diagnostic. Operators read this in `docker logs` to confirm the
+    # current image actually has the JSON-clean logging fix deployed.
+    logging.getLogger(__name__).info(
+        "setup_logging_complete",
+        extra={
+            "formatter": type(handler.formatter).__name__,
+            "root_handlers": len(root.handlers),
+            "stripped_logger_handlers": stripped_count,
+        },
+    )
+
+
+def audit_log_handlers() -> dict[str, object]:
+    """Snapshot of the current logging-handler topology.
+
+    Returns counts + per-logger handler info. Useful for a /diagnostic
+    endpoint or ad-hoc check when the operator suspects the JSON
+    formatter isn't actually active. If `extra_handler_loggers` is
+    non-empty, some logger has had a handler re-attached AFTER
+    setup_logging ran — which would re-introduce the byte-interleaving
+    that produces mangled `INFO INFO INFO ts=...` output.
+
+    Cheap (~microseconds) — safe to call on every healthcheck if useful.
+    """
+    root = logging.getLogger()
+    extra_handler_loggers: list[str] = []
+    for name in list(logging.Logger.manager.loggerDict.keys()):
+        existing = logging.Logger.manager.loggerDict.get(name)
+        if isinstance(existing, logging.Logger) and existing.handlers:
+            extra_handler_loggers.append(name)
+    return {
+        "root_handler_count": len(root.handlers),
+        "root_formatter": type(root.handlers[0].formatter).__name__ if root.handlers else None,
+        "extra_handler_loggers": extra_handler_loggers,
+        "json_formatter_active": any(
+            isinstance(h.formatter, JsonFormatter) for h in root.handlers
+        ),
+    }
 
 
 @contextlib.contextmanager

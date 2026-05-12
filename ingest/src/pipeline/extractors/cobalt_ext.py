@@ -36,12 +36,28 @@ from src.pipeline.extractors.ytdlp_ext import _whisper_transcribe
 log = logging.getLogger(__name__)
 
 
-# Cobalt's well-known YouTube bot-block code. Returned as
-# `{"status":"error","error":{"code":"error.api.youtube.login"}}` on a 400.
-_YOUTUBE_BOT_BLOCK_FRAGMENTS = (
+# Cobalt failure modes that should trigger the YouTube oEmbed-only
+# fallback path (instead of failing the capture and retrying forever).
+#
+# Two kinds of failure end up here:
+#   - Explicit bot-block: cobalt returns
+#     `{"status":"error","error":{"code":"error.api.youtube.login"}}` on
+#     a 400. Cobalt knows YouTube wanted auth.
+#   - Silent upstream failure: cobalt's tunnel returns HTTP 200 with a
+#     0-byte body (or HTML error page) because YouTube refused server-
+#     side and cobalt didn't propagate the error. _download_audio's
+#     min-bytes guard turns this into "cobalt audio too small: N bytes".
+#     Same recovery path as the explicit case — captions API + oEmbed.
+#
+# Match is substring-based against `str(exc).lower()`.
+_YOUTUBE_RECOVERABLE_FAILURE_FRAGMENTS = (
+    # Explicit bot-block codes
     "error.api.youtube.login",
     "youtube.api.youtube.login",
     "sign in to confirm",
+    # Silent upstream failure (empty audio/video body from cobalt tunnel)
+    "cobalt audio too small",
+    "cobalt video too small",
 )
 
 
@@ -91,6 +107,11 @@ async def extract(
                 log.warning("captions probe failed: %s", e)
                 captions_transcript = None
 
+        # Acquire transcript + metadata. The cobalt audio path is wrapped
+        # in the SAME try/except as the tunnel request so that 0-byte
+        # responses from `_download_audio` (cobalt's silent upstream
+        # failure mode) get the same YT recovery treatment as the
+        # explicit `error.api.youtube.login` block.
         try:
             if captions_transcript:
                 # Captions worked — skip the cobalt audio download AND the
@@ -99,36 +120,39 @@ async def extract(
                 # unused on this path.
                 metadata = await fetch_metadata(url)
                 tunnel_url = ""
+                transcript = captions_transcript
+                transcript_heading = "## Transcript (YouTube captions)"
+                log.info("transcript via youtube-transcript-api (captions, free)",
+                         extra={"char_count": len(transcript)})
             else:
                 # No captions — fall back to cobalt audio + Whisper.
                 tunnel_url, metadata = await asyncio.gather(
                     _request_tunnel(url),
                     fetch_metadata(url),
                 )
+                audio_path = await _download_audio(tunnel_url, workdir)
+                transcript = await _whisper_transcribe(audio_path)
+                transcript_heading = "## Transcript (Whisper via cobalt)"
+                log.info("transcript via cobalt + Whisper (no captions available)",
+                         extra={"char_count": len(transcript)})
         except RuntimeError as e:
             # YouTube has been escalating bot detection in 2026 — both
             # cobalt and yt-dlp need cookies to scrape video pages. Rather
             # than hard-fail the capture (and force manual retries), fall
             # back to YouTube's unauthenticated oEmbed endpoint to at
             # least recover the title + uploader.
-            if platform.id == "youtube" and _is_youtube_bot_block(e):
+            #
+            # Two cobalt failure modes route here: explicit bot-block
+            # ("error.api.youtube.login") AND silent upstream failure
+            # ("cobalt audio too small: 0 bytes" — cobalt's tunnel
+            # returned 200 with an empty body because YouTube refused
+            # server-side). Both share the same recovery path.
+            if platform.id == "youtube" and _is_youtube_recoverable_failure(e):
                 log.warning(
-                    "youtube bot-block hit; falling back to oEmbed-only metadata: %s", e,
+                    "youtube cobalt failure; falling back to oEmbed-only metadata: %s", e,
                 )
                 return await _youtube_metadata_only(url, platform)
             raise
-
-        if captions_transcript:
-            transcript = captions_transcript
-            transcript_heading = "## Transcript (YouTube captions)"
-            log.info("transcript via youtube-transcript-api (captions, free)",
-                     extra={"char_count": len(transcript)})
-        else:
-            audio_path = await _download_audio(tunnel_url, workdir)
-            transcript = await _whisper_transcribe(audio_path)
-            transcript_heading = "## Transcript (Whisper via cobalt)"
-            log.info("transcript via cobalt + Whisper (no captions available)",
-                     extra={"char_count": len(transcript)})
 
         # Phase 13: optional video frame analysis. Best-effort — failures
         # leave the audio-only path untouched. Independent of which
@@ -275,10 +299,14 @@ async def _maybe_run_video_analysis(
         return None, []
 
 
-def _is_youtube_bot_block(exc: BaseException) -> bool:
-    """True when the error is YouTube refusing without cookies."""
+def _is_youtube_recoverable_failure(exc: BaseException) -> bool:
+    """True when a cobalt failure is recoverable via the oEmbed-only path.
+
+    Covers both explicit YouTube bot-blocks and silent upstream failures
+    (cobalt 0-byte tunnel responses) — see _YOUTUBE_RECOVERABLE_FAILURE_FRAGMENTS.
+    """
     msg = str(exc).lower()
-    return any(frag in msg for frag in _YOUTUBE_BOT_BLOCK_FRAGMENTS)
+    return any(frag in msg for frag in _YOUTUBE_RECOVERABLE_FAILURE_FRAGMENTS)
 
 
 async def _youtube_metadata_only(url: str, platform: Platform) -> Extracted:

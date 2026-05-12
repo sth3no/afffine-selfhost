@@ -44,6 +44,15 @@ async def fetch_metadata(url: str) -> dict | None:
             "--write-info-json",
             "--no-warnings",
             "--quiet",
+            # YouTube's mid-2026 PO-Token tightening means many videos return
+            # "Only images are available" without auth, and yt-dlp's default
+            # format selector then errors with "Requested format is not
+            # available" — even with --skip-download. We don't actually want
+            # any downloadable format here; we just need title, description,
+            # uploader, etc. This flag tells yt-dlp to write the info.json
+            # anyway, so the doc still gets useful metadata even when the
+            # audio/video paths can't be fetched.
+            "--ignore-no-formats-error",
         ]
         # Inject auth cookies when available — bypasses YT's "sign in to
         # confirm you're not a bot" page on cloud IPs.
