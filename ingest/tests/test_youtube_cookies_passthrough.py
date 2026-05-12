@@ -44,6 +44,43 @@ async def test_ytdlp_metadata_passes_cookies_when_file_exists(tmp_path, monkeypa
 
 
 @pytest.mark.asyncio
+async def test_ytdlp_metadata_passes_ignore_no_formats_error(tmp_path, monkeypatch):
+    """yt-dlp evaluates the format selector even with --skip-download to
+    populate the info.json's `requested_downloads` field. When YouTube
+    returns "Only images are available" (mid-2026 PO Token tightening),
+    the default selector matches nothing and the entire metadata fetch
+    fails with "Requested format is not available" — even though we
+    didn't actually want any format.
+
+    --ignore-no-formats-error tells yt-dlp to write the info.json anyway,
+    which keeps title/description/uploader available for the doc even
+    when the audio/video paths can't be downloaded."""
+    from src.pipeline.extractors import _ytdlp_metadata
+
+    from src.config import settings
+    monkeypatch.setattr(settings, "youtube_cookies_path", str(tmp_path / "missing.txt"))
+
+    captured_args: list[str] = []
+
+    async def _fake_subprocess_exec(*args, **kwargs):
+        captured_args.extend(args)
+        proc = MagicMock()
+        proc.communicate = AsyncMock(return_value=(b"", b""))
+        proc.returncode = 1
+        return proc
+
+    monkeypatch.setattr(
+        _ytdlp_metadata.asyncio,
+        "create_subprocess_exec",
+        _fake_subprocess_exec,
+    )
+
+    await _ytdlp_metadata.fetch_metadata("https://youtube.com/watch?v=abc")
+
+    assert "--ignore-no-formats-error" in captured_args
+
+
+@pytest.mark.asyncio
 async def test_ytdlp_metadata_does_not_force_player_client(tmp_path, monkeypatch):
     """Phase 12.5 fix #8: dropped the web_embedded,tv_simply extractor
     args. With residential proxy egress, the default client works AND

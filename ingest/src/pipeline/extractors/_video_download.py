@@ -10,9 +10,30 @@ Replaces the previous cobalt-based path. yt-dlp uses:
     fallback for non-iOS clients but should never actually be invoked
     for YouTube on this path.
 
+KNOWN BREAKAGE (mid-2026): YouTube has tightened the iOS client and it
+now ALSO requires a GVS PO Token, so the strategy above no longer works.
+Logs show:
+    WARNING: [youtube] <id>: ios client hls formats require a GVS PO Token
+             which was not provided. They will be skipped.
+    WARNING: Only images are available for download.
+    ERROR:   Requested format is not available.
+
+bgutil-ytdlp-pot-provider script mode IS configured here, but its Node
+fetch ignores HTTP_PROXY so it can't reach YouTube from the cloud IP and
+no POT gets minted. The proper fix is to switch to bgutil HTTP server
+mode (separate container in compose.yaml, similar to the existing
+yt_session_server sidecar), with HTTP_PROXY set on it so it can complete
+the BotGuard challenge through the residential gateway.
+
+Until that lands, video downloads fail for most YouTube URLs and the
+keyframes section is empty for them. The audio path (cobalt) and
+caption path (youtube-transcript-api) still work — only inline
+keyframe images are missing.
+
 Returns the path to the downloaded mp4 (`workdir/video.mp4`). Raises
 RuntimeError on yt-dlp failure or empty output. Caller (cobalt_ext's
-_maybe_run_video_analysis) is responsible for cleanup.
+_maybe_run_video_analysis) is responsible for cleanup AND for catching
+the RuntimeError — the orchestrator must not propagate it.
 """
 
 from __future__ import annotations
