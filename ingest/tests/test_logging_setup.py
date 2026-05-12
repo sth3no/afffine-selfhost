@@ -145,6 +145,37 @@ def test_audit_log_handlers_flags_re_attached_handlers(_reset_logging):
     assert "suspect.framework" in audit["extra_handler_loggers"]
 
 
+def test_audit_log_handlers_ignores_null_handler_attachments(_reset_logging):
+    """Library convention is addHandler(NullHandler()) to suppress 'no
+    handlers found' warnings. NullHandler.emit() is a no-op so it can't
+    cause byte-interleaving. The audit must NOT flag those — otherwise
+    `requests`, `urllib3`, `charset_normalizer` (transitively imported
+    by youtube-transcript-api in the YT capture path) would clutter the
+    diagnostic permanently with no actionable signal."""
+    from src.logging_setup import audit_log_handlers
+    root = logging.getLogger()
+    root.handlers[:] = []
+    setup_logging(level="INFO")
+    # Simulate a library's standard NullHandler attachment.
+    polite_lib = logging.getLogger("polite.library")
+    polite_lib.handlers[:] = [logging.NullHandler()]
+    audit = audit_log_handlers()
+    assert "polite.library" not in audit["extra_handler_loggers"]
+
+
+def test_audit_log_handlers_flags_real_handler_alongside_null(_reset_logging):
+    """If a logger has BOTH a NullHandler AND a real handler attached,
+    the real one still poses a duplication risk and must be flagged."""
+    from src.logging_setup import audit_log_handlers
+    root = logging.getLogger()
+    root.handlers[:] = []
+    setup_logging(level="INFO")
+    mixed = logging.getLogger("mixed.framework")
+    mixed.handlers[:] = [logging.NullHandler(), logging.StreamHandler()]
+    audit = audit_log_handlers()
+    assert "mixed.framework" in audit["extra_handler_loggers"]
+
+
 def test_setup_logging_emits_diagnostic_marker(_reset_logging, capsys):
     """The setup_logging_complete log line must appear after handler
     install — operators read it in `docker logs` to confirm the new

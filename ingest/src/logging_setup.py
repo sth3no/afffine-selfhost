@@ -163,9 +163,19 @@ def audit_log_handlers() -> dict[str, object]:
     Returns counts + per-logger handler info. Useful for a /diagnostic
     endpoint or ad-hoc check when the operator suspects the JSON
     formatter isn't actually active. If `extra_handler_loggers` is
-    non-empty, some logger has had a handler re-attached AFTER
-    setup_logging ran — which would re-introduce the byte-interleaving
-    that produces mangled `INFO INFO INFO ts=...` output.
+    non-empty, some logger has had an EMITTING handler re-attached
+    AFTER setup_logging ran — which would re-introduce the byte-
+    interleaving that produces mangled `INFO INFO INFO ts=...` output.
+
+    NullHandler attachments are deliberately ignored. The Python
+    library convention is `logging.getLogger(__name__).addHandler(NullHandler())`
+    to suppress "no handlers could be found" warnings when a library is
+    used without its host configuring logging. NullHandler.emit() is
+    a no-op — it can't produce duplicate output. Flagging these would
+    make the audit perpetually noisy: any time `requests`, `urllib3`,
+    `charset_normalizer`, etc. get imported (which our pipeline does
+    transitively via youtube-transcript-api), they'd appear here even
+    though they pose zero risk to log integrity.
 
     Cheap (~microseconds) — safe to call on every healthcheck if useful.
     """
@@ -173,7 +183,12 @@ def audit_log_handlers() -> dict[str, object]:
     extra_handler_loggers: list[str] = []
     for name in list(logging.Logger.manager.loggerDict.keys()):
         existing = logging.Logger.manager.loggerDict.get(name)
-        if isinstance(existing, logging.Logger) and existing.handlers:
+        if not isinstance(existing, logging.Logger):
+            continue
+        emitting_handlers = [
+            h for h in existing.handlers if not isinstance(h, logging.NullHandler)
+        ]
+        if emitting_handlers:
             extra_handler_loggers.append(name)
     return {
         "root_handler_count": len(root.handlers),
