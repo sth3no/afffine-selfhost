@@ -22,6 +22,8 @@ from src.pipeline.video_analysis import (
     KeyframeRef,
     _ExtractedFrame,
     _FrameCaption,
+    _merge_dedup_timestamps,
+    _SILENCE_END_RE,
     _VisionAnalysis,
     analyze_video,
 )
@@ -374,3 +376,41 @@ async def test_analyze_video_returns_empty_when_filter_drops_all_frames(tmp_path
     assert keyframes == []
     vision_mock.assert_not_called()
     mcp_client.upload_blob.assert_not_awaited()
+
+
+# ── Silence-cut helpers ──────────────────────────────────────────────
+
+
+def test_silence_end_regex_parses_ffmpeg_stderr_lines():
+    """The regex must match the standard `silencedetect` filter output that
+    ffmpeg writes to stderr: `[silencedetect @ ...] silence_end: 12.34 |
+    silence_duration: 1.567`."""
+    sample = (
+        "frame= 1234 fps=30\n"
+        "[silencedetect @ 0x55] silence_start: 10.5\n"
+        "[silencedetect @ 0x55] silence_end: 12.34 | silence_duration: 1.84\n"
+        "[silencedetect @ 0x55] silence_start: 30.0\n"
+        "[silencedetect @ 0x55] silence_end: 32.0 | silence_duration: 2.0\n"
+        "[out#0/null] Output\n"
+    )
+    matches = [(float(m.group(1)), float(m.group(2)))
+               for m in _SILENCE_END_RE.finditer(sample)]
+    assert matches == [(12.34, 1.84), (32.0, 2.0)]
+
+
+def test_merge_dedup_timestamps_keeps_primary_drops_close_secondary():
+    """Primary entries are always retained. Secondary entries are added only
+    if they're at least `min_gap_seconds` away from every already-accepted ts."""
+    primary = [10.0, 30.0, 50.0]
+    secondary = [10.5, 19.0, 31.0, 70.0]  # 10.5 & 31.0 within 2s; 19.0 & 70.0 not
+    merged = _merge_dedup_timestamps(
+        primary=primary, secondary=secondary, min_gap_seconds=2.0,
+    )
+    assert sorted(merged) == [10.0, 19.0, 30.0, 50.0, 70.0]
+
+
+def test_merge_dedup_timestamps_empty_secondary_returns_primary_copy():
+    primary = [1.0, 2.0]
+    out = _merge_dedup_timestamps(primary=primary, secondary=[], min_gap_seconds=1.0)
+    assert out == primary
+    assert out is not primary  # caller can mutate without affecting input

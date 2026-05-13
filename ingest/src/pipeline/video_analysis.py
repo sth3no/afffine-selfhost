@@ -24,6 +24,7 @@ import asyncio
 import base64
 import io
 import logging
+import re
 import subprocess
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -281,31 +282,51 @@ def _detect_and_extract_frames(
         # (25%, 50%, 75% of video duration) for short / single-shot videos.
         return _fallback_fixed_interval_frames(video_path, workdir, n=3)
 
-    # Cap at max_frames, spreading the picks evenly across the FULL scene
+    # Build candidate timestamps. Scene cuts go in first (visual structure is
+    # the strongest signal); silencedetect midpoints, if enabled, augment for
+    # talky content where the visual detector misses topic boundaries.
+    # Sampling at the MIDDLE of each scene avoids cuts / motion-blurred frames.
+    scene_timestamps: list[float] = [
+        (s.get_seconds() + e.get_seconds()) / 2.0 for s, e in scene_list
+    ]
+    candidates: list[float] = list(scene_timestamps)
+    if settings.frame_silence_cuts_enabled:
+        silence_timestamps = _silencedetect_timestamps(video_path)
+        if silence_timestamps:
+            log.info(
+                "video_analysis: silencedetect contributed %d candidate timestamps",
+                len(silence_timestamps),
+            )
+            candidates = _merge_dedup_timestamps(
+                primary=candidates,
+                secondary=silence_timestamps,
+                min_gap_seconds=settings.frame_candidate_dedup_seconds,
+            )
+
+    # Cap at max_frames, spreading the picks evenly across the FULL candidate
     # list (endpoints included). `int(i * step)` consistently lost the tail
     # because indices were always [0, step, 2*step, …]. `np.linspace(0, N-1,
     # max_frames)` rounded to int hits both endpoints and stays unbiased.
-    if len(scene_list) > max_frames:
-        idxs = np.linspace(0, len(scene_list) - 1, max_frames, dtype=int)
+    candidates.sort()
+    if len(candidates) > max_frames:
+        idxs = np.linspace(0, len(candidates) - 1, max_frames, dtype=int)
         # np.linspace can repeat the same index near the endpoints when
-        # max_frames is close to len(scene_list); dedup while preserving order.
+        # max_frames is close to len(candidates); dedup while preserving order.
         seen: set[int] = set()
         ordered_unique: list[int] = []
         for i in idxs.tolist():
             if i not in seen:
                 seen.add(i)
                 ordered_unique.append(i)
-        picks = [scene_list[i] for i in ordered_unique]
+        picked_timestamps = [candidates[i] for i in ordered_unique]
     else:
-        picks = scene_list
+        picked_timestamps = candidates
 
-    # Build the extract task list. Sample the MIDDLE of each scene, not the
-    # cut itself — the first frame after a cut is frequently a partial fade,
-    # motion-blurred, or a transitional thumbnail.
-    tasks: list[tuple[int, float, Path]] = []
-    for idx, (start, end) in enumerate(picks):
-        ts = (start.get_seconds() + end.get_seconds()) / 2.0
-        tasks.append((idx, ts, workdir / f"frame-{idx:02d}.jpg"))
+    # Build the extract task list from the chosen timestamps.
+    tasks: list[tuple[int, float, Path]] = [
+        (idx, ts, workdir / f"frame-{idx:02d}.jpg")
+        for idx, ts in enumerate(picked_timestamps)
+    ]
 
     # Run ffmpeg extracts in parallel. Each subprocess.run releases the GIL
     # while waiting on the child process, so a ThreadPoolExecutor gives a
@@ -464,6 +485,76 @@ def _ffmpeg_extract_frame(
         log.warning("ffmpeg produced an invalid JPEG at t=%.2fs", timestamp_seconds)
         return False
     return True
+
+
+# ── Audio-based cut detection (silencedetect) ────────────────────────
+
+
+_SILENCE_END_RE = re.compile(
+    r"silence_end:\s*([0-9.]+)\s*\|\s*silence_duration:\s*([0-9.]+)"
+)
+
+
+def _silencedetect_timestamps(video_path: Path) -> list[float]:
+    """Run ffmpeg `silencedetect` on the audio track and return the midpoints
+    of each detected silence interval as candidate sampling timestamps. The
+    midpoint (silence_end - silence_duration/2) is the most likely place to
+    find a representative frame for the speech segment that just concluded.
+
+    Returns [] on any error; the caller treats this as "no silence signal".
+    """
+    threshold_db = settings.frame_silence_threshold_db
+    min_duration = settings.frame_silence_min_duration
+    cmd = [
+        "ffmpeg",
+        "-hide_banner",
+        "-nostats",
+        "-i", str(video_path),
+        "-af", f"silencedetect=noise={threshold_db}dB:d={min_duration}",
+        "-vn",            # don't decode video — audio analysis only
+        "-f", "null",
+        "-",
+    ]
+    try:
+        proc = subprocess.run(cmd, capture_output=True, check=False, timeout=120)
+    except (OSError, subprocess.SubprocessError) as e:
+        log.warning("silencedetect failed: %s", e)
+        return []
+    if proc.returncode != 0:
+        log.warning(
+            "silencedetect returned %d; stderr (last 500B): %s",
+            proc.returncode,
+            (proc.stderr or b"")[-500:].decode("utf-8", errors="replace"),
+        )
+        return []
+
+    out: list[float] = []
+    stderr = (proc.stderr or b"").decode("utf-8", errors="replace")
+    for match in _SILENCE_END_RE.finditer(stderr):
+        try:
+            end = float(match.group(1))
+            duration = float(match.group(2))
+        except ValueError:
+            continue
+        midpoint = max(0.0, end - duration / 2.0)
+        out.append(midpoint)
+    return out
+
+
+def _merge_dedup_timestamps(
+    *,
+    primary: list[float],
+    secondary: list[float],
+    min_gap_seconds: float,
+) -> list[float]:
+    """Merge two timestamp lists. `primary` entries are always retained;
+    `secondary` entries are added only when no already-retained timestamp is
+    within `min_gap_seconds`. Caller is responsible for any final sorting."""
+    accepted = list(primary)
+    for ts in secondary:
+        if all(abs(ts - kept) >= min_gap_seconds for kept in accepted):
+            accepted.append(ts)
+    return accepted
 
 
 def _hwaccel_args() -> list[str]:

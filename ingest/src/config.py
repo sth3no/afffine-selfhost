@@ -97,6 +97,25 @@ class Settings(BaseSettings):
     # a stderr warning, but mis-tuned hwaccel can be SLOWER than CPU decode
     # on very short clips — measure before enabling.
     ffmpeg_hwaccel: str = ""
+    # Audio-based cut detection: when enabled, ffmpeg's `silencedetect` filter
+    # is run alongside PySceneDetect and its silence-end timestamps are merged
+    # into the keyframe candidate list. Useful for content where visual cuts
+    # are sparse but speech has clear topic breaks (long screencasts, lectures,
+    # talking-head podcasts). Off by default — adds one ffmpeg pass per video.
+    frame_silence_cuts_enabled: bool = False
+    # silencedetect `noise` threshold in dB (negative). Below this RMS, the
+    # filter considers audio silent. -30 is a reasonable default for clean
+    # speech recordings; lower (e.g. -40) for noisier sources.
+    frame_silence_threshold_db: float = -30.0
+    # Minimum silence duration (seconds) that counts as a topic break.
+    # Conversational micro-pauses are usually < 1s; 1.5s skips those while
+    # still catching real transitions.
+    frame_silence_min_duration: float = 1.5
+    # When merging silence-cut timestamps with scene-detect timestamps, drop
+    # any candidate that's within this many seconds of an already-accepted
+    # one (the earlier-source candidate wins). Prevents two near-identical
+    # keyframes from blowing the vision-call budget.
+    frame_candidate_dedup_seconds: float = 2.0
     # Phase 16 — Frame-quality pre-filter (runs BETWEEN scene detect and vision call).
     # Defaults chosen to be conservative: drop only frames that are
     # obviously useless. Tune via env vars if the filter is over- or
