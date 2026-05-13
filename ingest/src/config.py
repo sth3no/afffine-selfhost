@@ -70,6 +70,14 @@ class Settings(BaseSettings):
     # exceed the window mean to trigger a cut. Higher = fewer cuts. The
     # PySceneDetect default of 3.0 is a good general baseline.
     scenedetect_adaptive_threshold: float = 3.0
+    # Minimum scene length in FRAMES. Suppresses back-to-back micro-cuts in
+    # montages so a 12-frame intro animation isn't allowed to consume the
+    # entire `max_frames_per_video` budget. 15 ≈ 0.5s @ 30fps.
+    scenedetect_min_scene_len: int = 15
+    # When True, the detector compares the luma (Y) channel only — ignoring
+    # chroma. Faster, and shrugs off pure color-grading shifts that don't
+    # really constitute scene cuts.
+    scenedetect_luma_only: bool = True
     # Phase 16 — Frame-quality pre-filter (runs BETWEEN scene detect and vision call).
     # Defaults chosen to be conservative: drop only frames that are
     # obviously useless. Tune via env vars if the filter is over- or

@@ -239,7 +239,11 @@ def _detect_and_extract_frames(
 
     algorithm = settings.scenedetect_algorithm.lower().strip()
     if algorithm == "content":
-        detector = ContentDetector(threshold=settings.scenedetect_threshold)
+        detector = ContentDetector(
+            threshold=settings.scenedetect_threshold,
+            min_scene_len=settings.scenedetect_min_scene_len,
+            luma_only=settings.scenedetect_luma_only,
+        )
     else:
         # Default + any unrecognized value → AdaptiveDetector. `min_content_val`
         # mirrors the old ContentDetector threshold as an absolute floor so we
@@ -253,6 +257,8 @@ def _detect_and_extract_frames(
         detector = AdaptiveDetector(
             adaptive_threshold=settings.scenedetect_adaptive_threshold,
             min_content_val=settings.scenedetect_threshold,
+            min_scene_len=settings.scenedetect_min_scene_len,
+            luma_only=settings.scenedetect_luma_only,
         )
 
     scene_list = detect(str(video_path), detector)
