@@ -78,6 +78,12 @@ class Settings(BaseSettings):
     # chroma. Faster, and shrugs off pure color-grading shifts that don't
     # really constitute scene cuts.
     scenedetect_luma_only: bool = True
+    # Width (seconds) of the window around mid-scene over which ffmpeg's
+    # `thumbnail` filter picks the most representative frame. 0 disables
+    # the filter and falls back to a single-frame seek at the midpoint
+    # (legacy behavior). 1.0–2.0s is the sweet spot for cleaner keyframes
+    # at modest extra decode cost.
+    frame_thumbnail_window_seconds: float = 1.0
     # Phase 16 — Frame-quality pre-filter (runs BETWEEN scene detect and vision call).
     # Defaults chosen to be conservative: drop only frames that are
     # obviously useless. Tune via env vars if the filter is over- or

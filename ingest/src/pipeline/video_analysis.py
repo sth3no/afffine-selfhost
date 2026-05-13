@@ -284,7 +284,11 @@ def _detect_and_extract_frames(
         ts = (start.get_seconds() + end.get_seconds()) / 2.0
         frame_path = workdir / f"frame-{idx:02d}.jpg"
         if not _ffmpeg_extract_frame(
-            video_path, ts, frame_path, long_edge_px=settings.frame_long_edge_px,
+            video_path,
+            ts,
+            frame_path,
+            long_edge_px=settings.frame_long_edge_px,
+            thumbnail_window_seconds=settings.frame_thumbnail_window_seconds,
         ):
             continue
         out.append(_ExtractedFrame(path=frame_path, timestamp_seconds=ts, index=idx))
@@ -330,6 +334,7 @@ def _ffmpeg_extract_frame(
     timestamp_seconds: float,
     out_path: Path,
     long_edge_px: int | None = None,
+    thumbnail_window_seconds: float = 0.0,
 ) -> bool:
     """Single-frame extract via ffmpeg. Returns True on success.
 
@@ -337,31 +342,58 @@ def _ffmpeg_extract_frame(
     within that pixel count in the same ffmpeg invocation — avoiding the
     extract → JPEG → Pillow → JPEG double-encode that was the previous design.
     Pure downscale: a frame already smaller than the box is left untouched.
+
+    When `thumbnail_window_seconds > 0`, ffmpeg decodes a small window centered
+    on `timestamp_seconds` and uses the `thumbnail` filter to pick the most
+    visually distinct frame from that window — much more robust than the
+    exact-midpoint seek when the midpoint happens to land on motion blur
+    or a transitional sub-frame.
     """
     import subprocess
 
-    cmd = [
-        "ffmpeg",
-        # -ss BEFORE -i is much faster (seek demuxer) but slightly less
-        # precise. For keyframe captures that's fine.
-        "-ss", f"{timestamp_seconds:.3f}",
-        "-i", str(video_path),
-        "-an", "-sn", "-dn",     # skip audio / subtitle / data streams
-        "-frames:v", "1",
-    ]
+    # Build the -vf filter chain (thumbnail first if requested, then scale).
+    vf_parts: list[str] = []
+    if thumbnail_window_seconds > 0:
+        # batch=999 ensures `thumbnail` emits exactly one output for any
+        # reasonable window size (decodes ≲ a few dozen frames per scene).
+        vf_parts.append("thumbnail=999")
     if long_edge_px is not None and long_edge_px > 0:
         # Cap each axis at `long_edge_px` and let ffmpeg pick the matching
         # dimension on the OTHER axis via force_original_aspect_ratio=decrease.
         # force_divisible_by=2 keeps mjpeg/h264-friendly even dimensions.
-        cmd += [
-            "-vf",
-            (
-                f"scale='min({long_edge_px},iw)':'min({long_edge_px},ih)'"
-                ":force_original_aspect_ratio=decrease"
-                ":force_divisible_by=2:flags=lanczos"
-            ),
+        vf_parts.append(
+            f"scale='min({long_edge_px},iw)':'min({long_edge_px},ih)'"
+            ":force_original_aspect_ratio=decrease"
+            ":force_divisible_by=2:flags=lanczos"
+        )
+
+    if thumbnail_window_seconds > 0:
+        # Decode a small window centered on the requested timestamp.
+        seek_start = max(0.0, timestamp_seconds - thumbnail_window_seconds / 2.0)
+        cmd = [
+            "ffmpeg",
+            "-ss", f"{seek_start:.3f}",
+            "-i", str(video_path),
+            "-t", f"{thumbnail_window_seconds:.3f}",
+            "-an", "-sn", "-dn",
         ]
+    else:
+        # Legacy fast path: single-frame seek at the exact timestamp.
+        cmd = [
+            "ffmpeg",
+            # -ss BEFORE -i is much faster (seek demuxer) but slightly less
+            # precise. For keyframe captures that's fine.
+            "-ss", f"{timestamp_seconds:.3f}",
+            "-i", str(video_path),
+            "-an", "-sn", "-dn",
+        ]
+    if vf_parts:
+        cmd += ["-vf", ",".join(vf_parts)]
     cmd += [
+        # Cap output at 1 frame. With the thumbnail filter this is
+        # belt-and-suspenders against pathological batches; without it,
+        # it's how we tell ffmpeg "just one image, not the whole stream".
+        "-frames:v", "1",
         "-q:v", "2",  # high JPEG quality, ~80% smaller than PNG
         "-y",         # overwrite
         str(out_path),
