@@ -84,6 +84,12 @@ class Settings(BaseSettings):
     # (legacy behavior). 1.0–2.0s is the sweet spot for cleaner keyframes
     # at modest extra decode cost.
     frame_thumbnail_window_seconds: float = 1.0
+    # Maximum number of ffmpeg extract subprocesses to run in parallel
+    # per video. Each subprocess.run() releases the GIL during the child's
+    # I/O wait, so a ThreadPoolExecutor here gives a real speedup. Capped
+    # to avoid flooding small hosts; effective parallelism is also bounded
+    # by the actual frame count.
+    frame_extract_workers: int = 4
     # Phase 16 — Frame-quality pre-filter (runs BETWEEN scene detect and vision call).
     # Defaults chosen to be conservative: drop only frames that are
     # obviously useless. Tune via env vars if the filter is over- or

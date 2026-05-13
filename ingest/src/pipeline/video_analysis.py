@@ -275,23 +275,47 @@ def _detect_and_extract_frames(
     else:
         picks = scene_list
 
-    out: list[_ExtractedFrame] = []
+    # Build the extract task list. Sample the MIDDLE of each scene, not the
+    # cut itself — the first frame after a cut is frequently a partial fade,
+    # motion-blurred, or a transitional thumbnail.
+    tasks: list[tuple[int, float, Path]] = []
     for idx, (start, end) in enumerate(picks):
-        # Sample the MIDDLE of the scene, not the cut itself. The first
-        # frame after a cut is frequently a partial fade, motion-blurred,
-        # or a transitional thumbnail — the middle is much more likely to
-        # be a clean, representative still.
         ts = (start.get_seconds() + end.get_seconds()) / 2.0
-        frame_path = workdir / f"frame-{idx:02d}.jpg"
-        if not _ffmpeg_extract_frame(
+        tasks.append((idx, ts, workdir / f"frame-{idx:02d}.jpg"))
+
+    # Run ffmpeg extracts in parallel. Each subprocess.run releases the GIL
+    # while waiting on the child process, so a ThreadPoolExecutor gives a
+    # near-linear speedup on multi-core hosts. Bounded so we don't spawn
+    # 12 simultaneous ffmpegs on a 2-core box. asyncio.to_thread already
+    # wraps this whole function, so blocking here doesn't block the event loop.
+    from concurrent.futures import ThreadPoolExecutor
+
+    def _do_extract(task: tuple[int, float, Path]) -> tuple[int, float, Path] | None:
+        idx, ts, path = task
+        ok = _ffmpeg_extract_frame(
             video_path,
             ts,
-            frame_path,
+            path,
             long_edge_px=settings.frame_long_edge_px,
             thumbnail_window_seconds=settings.frame_thumbnail_window_seconds,
-        ):
+        )
+        return (idx, ts, path) if ok else None
+
+    worker_count = max(1, min(len(tasks), settings.frame_extract_workers))
+    if worker_count == 1 or len(tasks) <= 1:
+        results = [_do_extract(t) for t in tasks]
+    else:
+        with ThreadPoolExecutor(max_workers=worker_count) as pool:
+            results = list(pool.map(_do_extract, tasks))
+
+    out: list[_ExtractedFrame] = []
+    for r in results:
+        if r is None:
             continue
-        out.append(_ExtractedFrame(path=frame_path, timestamp_seconds=ts, index=idx))
+        idx, ts, path = r
+        out.append(_ExtractedFrame(path=path, timestamp_seconds=ts, index=idx))
+    # Keep chronological order even if extracts finished out of order.
+    out.sort(key=lambda f: f.timestamp_seconds)
     return out
 
 
