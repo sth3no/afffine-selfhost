@@ -166,12 +166,9 @@ async def analyze_video(
         log.info("video_analysis: quality filter dropped all frames; skipping vision call")
         return None, []
 
-    # Stage 3: resize via Pillow (still sync; fold into the to_thread).
-    try:
-        await asyncio.to_thread(_resize_frames_in_place, frames, settings.frame_long_edge_px)
-    except Exception as e:  # noqa: BLE001
-        log.warning("video_analysis: frame resize failed: %s", e)
-        # Continue — original-resolution frames are still usable, just costlier.
+    # Stage 3 (resize) is now folded into ffmpeg extract via the `-vf scale=`
+    # filter in `_ffmpeg_extract_frame`. Frames arrive at the target long-edge
+    # already, so the Pillow re-encode loop has been retired.
 
     # Stage 4: Claude Sonnet 4.6 vision call.
     try:
@@ -265,7 +262,9 @@ def _detect_and_extract_frames(
         # be a clean, representative still.
         ts = (start.get_seconds() + end.get_seconds()) / 2.0
         frame_path = workdir / f"frame-{idx:02d}.jpg"
-        if not _ffmpeg_extract_frame(video_path, ts, frame_path):
+        if not _ffmpeg_extract_frame(
+            video_path, ts, frame_path, long_edge_px=settings.frame_long_edge_px,
+        ):
             continue
         out.append(_ExtractedFrame(path=frame_path, timestamp_seconds=ts, index=idx))
     return out
@@ -298,61 +297,72 @@ def _fallback_fixed_interval_frames(
     for i in range(n):
         ts = duration * (i + 1) / (n + 1)  # 25%, 50%, 75% for n=3
         frame_path = workdir / f"frame-{i:02d}.jpg"
-        if _ffmpeg_extract_frame(video_path, ts, frame_path):
+        if _ffmpeg_extract_frame(
+            video_path, ts, frame_path, long_edge_px=settings.frame_long_edge_px,
+        ):
             out.append(_ExtractedFrame(path=frame_path, timestamp_seconds=ts, index=i))
     return out
 
 
-def _ffmpeg_extract_frame(video_path: Path, timestamp_seconds: float, out_path: Path) -> bool:
-    """Single-frame extract via ffmpeg. Returns True on success."""
+def _ffmpeg_extract_frame(
+    video_path: Path,
+    timestamp_seconds: float,
+    out_path: Path,
+    long_edge_px: int | None = None,
+) -> bool:
+    """Single-frame extract via ffmpeg. Returns True on success.
+
+    When `long_edge_px` is set, the frame is scaled down so its long edge fits
+    within that pixel count in the same ffmpeg invocation — avoiding the
+    extract → JPEG → Pillow → JPEG double-encode that was the previous design.
+    Pure downscale: a frame already smaller than the box is left untouched.
+    """
     import subprocess
 
+    cmd = [
+        "ffmpeg",
+        # -ss BEFORE -i is much faster (seek demuxer) but slightly less
+        # precise. For keyframe captures that's fine.
+        "-ss", f"{timestamp_seconds:.3f}",
+        "-i", str(video_path),
+        "-an", "-sn", "-dn",     # skip audio / subtitle / data streams
+        "-frames:v", "1",
+    ]
+    if long_edge_px is not None and long_edge_px > 0:
+        # Cap each axis at `long_edge_px` and let ffmpeg pick the matching
+        # dimension on the OTHER axis via force_original_aspect_ratio=decrease.
+        # force_divisible_by=2 keeps mjpeg/h264-friendly even dimensions.
+        cmd += [
+            "-vf",
+            (
+                f"scale='min({long_edge_px},iw)':'min({long_edge_px},ih)'"
+                ":force_original_aspect_ratio=decrease"
+                ":force_divisible_by=2:flags=lanczos"
+            ),
+        ]
+    cmd += [
+        "-q:v", "2",  # high JPEG quality, ~80% smaller than PNG
+        "-y",         # overwrite
+        str(out_path),
+    ]
+
     try:
-        proc = subprocess.run(
-            [
-                "ffmpeg",
-                # -ss BEFORE -i is much faster (seek demuxer) but slightly less
-                # precise. For keyframe captures that's fine.
-                "-ss", f"{timestamp_seconds:.3f}",
-                "-i", str(video_path),
-                "-frames:v", "1",
-                "-q:v", "2",  # high JPEG quality, ~80% smaller than PNG
-                "-y",         # overwrite
-                str(out_path),
-            ],
-            capture_output=True, check=False, timeout=15,
-        )
+        proc = subprocess.run(cmd, capture_output=True, check=False, timeout=15)
         return proc.returncode == 0 and out_path.is_file() and out_path.stat().st_size > 0
     except (OSError, subprocess.SubprocessError) as e:
         log.warning("ffmpeg extract failed at t=%.2fs: %s", timestamp_seconds, e)
         return False
 
 
-# ── Stage 3: Pillow resize ────────────────────────────────────────
+# ── Stage 3: Pillow resize (retired — kept as a no-op shim) ───────
 
 
 def _resize_frames_in_place(frames: list[_ExtractedFrame], long_edge_px: int) -> None:
-    """Resize each frame to longest-edge = long_edge_px (preserve aspect)."""
-    try:
-        from PIL import Image
-    except ImportError as e:
-        log.warning("Pillow not installed: %s", e)
-        return
-
-    for frame in frames:
-        try:
-            with Image.open(frame.path) as im:
-                im.load()
-                w, h = im.size
-                long_edge = max(w, h)
-                if long_edge <= long_edge_px:
-                    continue
-                scale = long_edge_px / long_edge
-                new_size = (int(w * scale), int(h * scale))
-                resized = im.resize(new_size, Image.Resampling.LANCZOS)
-                resized.save(frame.path, "JPEG", quality=85, optimize=True)
-        except Exception as e:  # noqa: BLE001
-            log.warning("frame resize skipped (frame %d): %s", frame.index, e)
+    """Deprecated. Resize is now done by ffmpeg's `-vf scale=…` filter
+    inside `_ffmpeg_extract_frame`, eliminating the lossy JPEG re-encode
+    that this function used to perform. Retained as a no-op so that
+    existing test monkeypatch sites keep resolving."""
+    del frames, long_edge_px  # explicit unused
 
 
 # ── Stage 4: Claude Sonnet 4.6 multimodal vision call ─────────────
