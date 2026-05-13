@@ -22,7 +22,9 @@ from src.pipeline.video_analysis import (
     KeyframeRef,
     _ExtractedFrame,
     _FrameCaption,
+    _cuts_to_scene_midpoints,
     _merge_dedup_timestamps,
+    _SCDET_TIME_RE,
     _SILENCE_END_RE,
     _VisionAnalysis,
     analyze_video,
@@ -414,3 +416,40 @@ def test_merge_dedup_timestamps_empty_secondary_returns_primary_copy():
     out = _merge_dedup_timestamps(primary=primary, secondary=[], min_gap_seconds=1.0)
     assert out == primary
     assert out is not primary  # caller can mutate without affecting input
+
+
+# ── ffmpeg scdet helpers ─────────────────────────────────────────────
+
+
+def test_scdet_time_regex_parses_both_log_formats():
+    """ffmpeg scdet emits its `lavfi.scd.time` value in two slightly different
+    log shapes depending on the build — with or without a colon, and with
+    a comma-separated `score: …, time: …` form. One regex catches both."""
+    sample = (
+        "[Parsed_scdet_0 @ 0x55] lavfi.scd.score: 14.234 lavfi.scd.time: 12.345\n"
+        "[Parsed_scdet_0 @ 0x55] lavfi.scd.score: 22.0, lavfi.scd.time: 30.5\n"
+        "[Parsed_scdet_0 @ 0x55] lavfi.scd.time 42.0\n"  # no colon variant
+    )
+    times = [float(m.group(1)) for m in _SCDET_TIME_RE.finditer(sample)]
+    assert times == [12.345, 30.5, 42.0]
+
+
+def test_cuts_to_scene_midpoints_uses_implicit_t0_and_duration():
+    """With cuts at [10, 30] over a 50s video, the resulting scenes are
+    (0,10), (10,30), (30,50) → midpoints 5, 20, 40."""
+    assert _cuts_to_scene_midpoints([10.0, 30.0], duration=50.0) == [5.0, 20.0, 40.0]
+
+
+def test_cuts_to_scene_midpoints_handles_empty_cuts_as_single_scene():
+    """No cuts → whole video is one scene → midpoint at duration/2."""
+    assert _cuts_to_scene_midpoints([], duration=60.0) == [30.0]
+
+
+def test_cuts_to_scene_midpoints_drops_cuts_outside_duration():
+    """Cuts beyond the duration (decoder quirks) shouldn't produce
+    negative-length scenes."""
+    assert _cuts_to_scene_midpoints([10.0, 99.0], duration=50.0) == [5.0, 30.0]
+
+
+def test_cuts_to_scene_midpoints_zero_duration_returns_empty():
+    assert _cuts_to_scene_midpoints([1.0, 2.0], duration=0.0) == []

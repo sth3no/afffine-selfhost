@@ -59,13 +59,23 @@ class Settings(BaseSettings):
     keyframe_importance_threshold: int = 4
     frame_long_edge_px: int = 1024
     scenedetect_threshold: float = 27.0
-    # Which PySceneDetect algorithm to drive the cut list with.
-    #   "adaptive" — `AdaptiveDetector`. Rolling-window comparison; handles
-    #               slow dissolves, gentle camera moves, and gradual lighting
-    #               changes much better than fixed-threshold. New default.
-    #   "content"  — `ContentDetector`. Classic single-threshold cuts. Faster
-    #               on long static videos but over-cuts on pans/dissolves.
+    # Which scene-detection engine to drive the cut list with.
+    #   "adaptive"     — PySceneDetect `AdaptiveDetector`. Rolling-window
+    #                    comparison; handles slow dissolves, gentle camera
+    #                    moves, and gradual lighting changes well. Default.
+    #   "content"      — PySceneDetect `ContentDetector`. Classic single
+    #                    threshold; over-cuts pans/dissolves.
+    #   "ffmpeg_scdet" — ffmpeg's native `scdet` video filter. Several times
+    #                    faster than PySceneDetect because it reuses the
+    #                    decoder without going through OpenCV; less accurate
+    #                    on slow dissolves but plenty good for fast-cut
+    #                    edited content. Recommended once the operator has
+    #                    measured that PySceneDetect is the bottleneck.
     scenedetect_algorithm: str = "adaptive"
+    # ffmpeg_scdet-only: the `threshold` argument passed to ffmpeg's scdet
+    # filter. ffmpeg's scale is 0-100 (mean absolute frame difference); 10
+    # is the upstream default. Higher = fewer cuts.
+    scenedetect_ffmpeg_threshold: float = 10.0
     # AdaptiveDetector-only: how much the rolling content-value average must
     # exceed the window mean to trigger a cut. Higher = fewer cuts. The
     # PySceneDetect default of 3.0 is a good general baseline.

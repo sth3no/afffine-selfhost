@@ -236,59 +236,24 @@ def _detect_and_extract_frames(
     workdir: Path,
     max_frames: int,
 ) -> list[_ExtractedFrame]:
-    """Synchronous: PySceneDetect → ffmpeg seek+extract per scene."""
-    try:
-        from scenedetect import detect, AdaptiveDetector, ContentDetector
-    except ImportError as e:
-        log.warning("scenedetect not installed: %s", e)
-        return []
+    """Synchronous: scene detect (PySceneDetect OR ffmpeg scdet) → ffmpeg
+    seek+extract per scene midpoint."""
+    algorithm = settings.scenedetect_algorithm.lower().strip()
+    if algorithm == "ffmpeg_scdet":
+        scene_timestamps = _detect_scene_timestamps_ffmpeg(video_path)
+    else:
+        scene_timestamps = _detect_scene_timestamps_pyscenedetect(video_path)
 
-    def _build_detector(sensitivity: float):
-        """sensitivity multiplier <1 → more sensitive (lower thresholds → more cuts).
-        Used by the retry path to try again with a more permissive setup before
-        we give up and fall back to fixed-interval samples."""
-        algorithm = settings.scenedetect_algorithm.lower().strip()
-        if algorithm == "content":
-            return ContentDetector(
-                threshold=settings.scenedetect_threshold * sensitivity,
-                min_scene_len=settings.scenedetect_min_scene_len,
-                luma_only=settings.scenedetect_luma_only,
-            )
-        if algorithm != "adaptive":
-            log.warning(
-                "video_analysis: unknown scenedetect_algorithm=%r — falling back to 'adaptive'",
-                settings.scenedetect_algorithm,
-            )
-        return AdaptiveDetector(
-            adaptive_threshold=settings.scenedetect_adaptive_threshold * sensitivity,
-            min_content_val=settings.scenedetect_threshold * sensitivity,
-            min_scene_len=settings.scenedetect_min_scene_len,
-            luma_only=settings.scenedetect_luma_only,
-        )
-
-    scene_list = detect(str(video_path), _build_detector(1.0))
-
-    # First pass found nothing → retry once at half thresholds before
-    # giving up and falling back to fixed intervals. Common case: a
-    # documentary with slow dissolves where the default threshold is
-    # just too conservative. Half-threshold gives us a second chance
-    # at structure-driven sampling.
-    if not scene_list:
-        log.info("video_analysis: 0 scenes at default sensitivity; retrying at 0.5x")
-        scene_list = detect(str(video_path), _build_detector(0.5))
-
-    if not scene_list:
-        # No scene cuts detected. Fall back to fixed-interval samples
-        # (25%, 50%, 75% of video duration) for short / single-shot videos.
+    if not scene_timestamps:
+        # No scene cuts detected by the configured engine. Fall back to
+        # fixed-interval samples (25%, 50%, 75% of video duration) for
+        # short / single-shot videos.
         return _fallback_fixed_interval_frames(video_path, workdir, n=3)
 
-    # Build candidate timestamps. Scene cuts go in first (visual structure is
-    # the strongest signal); silencedetect midpoints, if enabled, augment for
-    # talky content where the visual detector misses topic boundaries.
-    # Sampling at the MIDDLE of each scene avoids cuts / motion-blurred frames.
-    scene_timestamps: list[float] = [
-        (s.get_seconds() + e.get_seconds()) / 2.0 for s, e in scene_list
-    ]
+    # Build the candidate timestamp list. Scene cuts go in first (visual
+    # structure is the strongest signal); silencedetect midpoints, if
+    # enabled, augment for talky content where the visual detector misses
+    # topic boundaries (long screencasts, lectures, talking-head podcasts).
     candidates: list[float] = list(scene_timestamps)
     if settings.frame_silence_cuts_enabled:
         silence_timestamps = _silencedetect_timestamps(video_path)
@@ -362,6 +327,59 @@ def _detect_and_extract_frames(
     return out
 
 
+def _detect_scene_timestamps_pyscenedetect(video_path: Path) -> list[float]:
+    """PySceneDetect path. Returns scene MIDPOINTS as the candidate sampling
+    timestamps. Honors the algorithm + sensitivity-retry logic configured
+    via settings."""
+    try:
+        from scenedetect import detect, AdaptiveDetector, ContentDetector
+    except ImportError as e:
+        log.warning("scenedetect not installed: %s", e)
+        return []
+
+    def _build_detector(sensitivity: float):
+        algorithm = settings.scenedetect_algorithm.lower().strip()
+        if algorithm == "content":
+            return ContentDetector(
+                threshold=settings.scenedetect_threshold * sensitivity,
+                min_scene_len=settings.scenedetect_min_scene_len,
+                luma_only=settings.scenedetect_luma_only,
+            )
+        if algorithm not in ("adaptive", ""):
+            log.warning(
+                "video_analysis: unknown scenedetect_algorithm=%r — falling back to 'adaptive'",
+                settings.scenedetect_algorithm,
+            )
+        return AdaptiveDetector(
+            adaptive_threshold=settings.scenedetect_adaptive_threshold * sensitivity,
+            min_content_val=settings.scenedetect_threshold * sensitivity,
+            min_scene_len=settings.scenedetect_min_scene_len,
+            luma_only=settings.scenedetect_luma_only,
+        )
+
+    scene_list = detect(str(video_path), _build_detector(1.0))
+    if not scene_list:
+        # First pass turned up nothing → retry once with halved thresholds
+        # before the orchestrator falls back to fixed intervals.
+        log.info("video_analysis: 0 scenes at default sensitivity; retrying at 0.5x")
+        scene_list = detect(str(video_path), _build_detector(0.5))
+
+    return [(s.get_seconds() + e.get_seconds()) / 2.0 for s, e in scene_list]
+
+
+def _detect_scene_timestamps_ffmpeg(video_path: Path) -> list[float]:
+    """ffmpeg `scdet` path. Several times faster than PySceneDetect; weaker on
+    slow dissolves. Returns scene MIDPOINTS derived from the cut times +
+    duration boundaries (t=0 and t=duration are implicit boundaries)."""
+    cuts = _scdet_cut_times(video_path)
+    duration = _video_duration_seconds(video_path)
+    if duration <= 0:
+        # No way to compute the final scene's midpoint without duration.
+        # Fall back to cut times themselves (rough but better than nothing).
+        return list(cuts)
+    return _cuts_to_scene_midpoints(cuts, duration)
+
+
 def _fallback_fixed_interval_frames(
     video_path: Path,
     workdir: Path,
@@ -369,17 +387,7 @@ def _fallback_fixed_interval_frames(
 ) -> list[_ExtractedFrame]:
     """When scene detection finds nothing (single-shot videos), sample at
     fixed 25/50/75% positions of duration."""
-    try:
-        # ffprobe to get duration in seconds
-        proc = subprocess.run(
-            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
-             "-of", "default=noprint_wrappers=1:nokey=1", str(video_path)],
-            capture_output=True, text=True, check=False, timeout=10,
-        )
-        duration = float(proc.stdout.strip()) if proc.returncode == 0 else 0.0
-    except (ValueError, OSError):
-        duration = 0.0
-
+    duration = _video_duration_seconds(video_path)
     if duration <= 0:
         return []
 
@@ -493,6 +501,10 @@ def _ffmpeg_extract_frame(
 _SILENCE_END_RE = re.compile(
     r"silence_end:\s*([0-9.]+)\s*\|\s*silence_duration:\s*([0-9.]+)"
 )
+# scdet emits `lavfi.scd.time: 12.345` (sometimes with a colon, sometimes
+# with a comma-separated `score: …, time: …` form depending on the ffmpeg
+# build). One permissive regex catches both.
+_SCDET_TIME_RE = re.compile(r"lavfi\.scd\.time:?\s*([0-9.]+)")
 
 
 def _silencedetect_timestamps(video_path: Path) -> list[float]:
@@ -555,6 +567,90 @@ def _merge_dedup_timestamps(
         if all(abs(ts - kept) >= min_gap_seconds for kept in accepted):
             accepted.append(ts)
     return accepted
+
+
+def _video_duration_seconds(video_path: Path) -> float:
+    """ffprobe-based duration lookup. Returns 0.0 on any failure.
+    Shared between the scdet pre-pass (needs duration to compute the final
+    scene's midpoint) and the fixed-interval fallback path."""
+    try:
+        proc = subprocess.run(
+            [
+                "ffprobe", "-v", "error",
+                "-show_entries", "format=duration",
+                "-of", "default=noprint_wrappers=1:nokey=1",
+                str(video_path),
+            ],
+            capture_output=True, text=True, check=False, timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return 0.0
+    if proc.returncode != 0:
+        return 0.0
+    try:
+        return float((proc.stdout or "").strip())
+    except ValueError:
+        return 0.0
+
+
+def _scdet_cut_times(video_path: Path) -> list[float]:
+    """Run ffmpeg's `scdet` filter and return the list of detected cut times.
+    Several times faster than PySceneDetect — decode is in-process and no
+    OpenCV round-trip — at the cost of weaker behavior on slow dissolves.
+
+    Returns [] on any failure; caller falls back to the fixed-interval path
+    or to the silence-cut signal as configured.
+    """
+    cmd = [
+        "ffmpeg",
+        "-hide_banner",
+        "-nostats",
+        *_hwaccel_args(),
+        "-i", str(video_path),
+        "-vf", f"scdet=threshold={settings.scenedetect_ffmpeg_threshold}",
+        "-an", "-sn", "-dn",
+        "-f", "null",
+        "-",
+    ]
+    try:
+        # scdet decodes the whole video — give it more headroom than the
+        # per-frame extract timeout. Capped so a malicious / corrupt file
+        # can't hang the worker indefinitely.
+        proc = subprocess.run(cmd, capture_output=True, check=False, timeout=600)
+    except (OSError, subprocess.SubprocessError) as e:
+        log.warning("ffmpeg scdet failed: %s", e)
+        return []
+    if proc.returncode != 0:
+        log.warning(
+            "ffmpeg scdet returned %d; stderr (last 500B): %s",
+            proc.returncode,
+            (proc.stderr or b"")[-500:].decode("utf-8", errors="replace"),
+        )
+        return []
+
+    stderr = (proc.stderr or b"").decode("utf-8", errors="replace")
+    out: list[float] = []
+    for m in _SCDET_TIME_RE.finditer(stderr):
+        try:
+            out.append(float(m.group(1)))
+        except ValueError:
+            continue
+    return out
+
+
+def _cuts_to_scene_midpoints(cuts: list[float], duration: float) -> list[float]:
+    """Convert a list of cut TIMES (instants where the scene changes) into the
+    list of scene MIDPOINTS, treating t=0 and t=duration as implicit
+    boundaries. A cut at t=T splits the timeline into a "before" scene ending
+    at T and an "after" scene starting at T. Midpoints are the best single
+    representative timestamp per scene."""
+    if duration <= 0:
+        return []
+    boundaries = sorted({0.0, duration, *(c for c in cuts if 0.0 < c < duration)})
+    midpoints: list[float] = []
+    for start, end in zip(boundaries[:-1], boundaries[1:]):
+        midpoints.append((start + end) / 2.0)
+    return midpoints
 
 
 def _hwaccel_args() -> list[str]:
