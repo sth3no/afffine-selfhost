@@ -237,31 +237,40 @@ def _detect_and_extract_frames(
         log.warning("scenedetect not installed: %s", e)
         return []
 
-    algorithm = settings.scenedetect_algorithm.lower().strip()
-    if algorithm == "content":
-        detector = ContentDetector(
-            threshold=settings.scenedetect_threshold,
-            min_scene_len=settings.scenedetect_min_scene_len,
-            luma_only=settings.scenedetect_luma_only,
-        )
-    else:
-        # Default + any unrecognized value → AdaptiveDetector. `min_content_val`
-        # mirrors the old ContentDetector threshold as an absolute floor so we
-        # don't trigger on near-static frames; `adaptive_threshold` controls
-        # the rolling-window sensitivity (see config docstring).
+    def _build_detector(sensitivity: float):
+        """sensitivity multiplier <1 → more sensitive (lower thresholds → more cuts).
+        Used by the retry path to try again with a more permissive setup before
+        we give up and fall back to fixed-interval samples."""
+        algorithm = settings.scenedetect_algorithm.lower().strip()
+        if algorithm == "content":
+            return ContentDetector(
+                threshold=settings.scenedetect_threshold * sensitivity,
+                min_scene_len=settings.scenedetect_min_scene_len,
+                luma_only=settings.scenedetect_luma_only,
+            )
         if algorithm != "adaptive":
             log.warning(
                 "video_analysis: unknown scenedetect_algorithm=%r — falling back to 'adaptive'",
                 settings.scenedetect_algorithm,
             )
-        detector = AdaptiveDetector(
-            adaptive_threshold=settings.scenedetect_adaptive_threshold,
-            min_content_val=settings.scenedetect_threshold,
+        return AdaptiveDetector(
+            adaptive_threshold=settings.scenedetect_adaptive_threshold * sensitivity,
+            min_content_val=settings.scenedetect_threshold * sensitivity,
             min_scene_len=settings.scenedetect_min_scene_len,
             luma_only=settings.scenedetect_luma_only,
         )
 
-    scene_list = detect(str(video_path), detector)
+    scene_list = detect(str(video_path), _build_detector(1.0))
+
+    # First pass found nothing → retry once at half thresholds before
+    # giving up and falling back to fixed intervals. Common case: a
+    # documentary with slow dissolves where the default threshold is
+    # just too conservative. Half-threshold gives us a second chance
+    # at structure-driven sampling.
+    if not scene_list:
+        log.info("video_analysis: 0 scenes at default sensitivity; retrying at 0.5x")
+        scene_list = detect(str(video_path), _build_detector(0.5))
+
     if not scene_list:
         # No scene cuts detected. Fall back to fixed-interval samples
         # (25%, 50%, 75% of video duration) for short / single-shot videos.
