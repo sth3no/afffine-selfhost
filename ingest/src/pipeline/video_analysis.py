@@ -232,15 +232,30 @@ def _detect_and_extract_frames(
     import subprocess
 
     try:
-        from scenedetect import detect, ContentDetector
+        from scenedetect import detect, AdaptiveDetector, ContentDetector
     except ImportError as e:
         log.warning("scenedetect not installed: %s", e)
         return []
 
-    scene_list = detect(
-        str(video_path),
-        ContentDetector(threshold=settings.scenedetect_threshold),
-    )
+    algorithm = settings.scenedetect_algorithm.lower().strip()
+    if algorithm == "content":
+        detector = ContentDetector(threshold=settings.scenedetect_threshold)
+    else:
+        # Default + any unrecognized value → AdaptiveDetector. `min_content_val`
+        # mirrors the old ContentDetector threshold as an absolute floor so we
+        # don't trigger on near-static frames; `adaptive_threshold` controls
+        # the rolling-window sensitivity (see config docstring).
+        if algorithm != "adaptive":
+            log.warning(
+                "video_analysis: unknown scenedetect_algorithm=%r — falling back to 'adaptive'",
+                settings.scenedetect_algorithm,
+            )
+        detector = AdaptiveDetector(
+            adaptive_threshold=settings.scenedetect_adaptive_threshold,
+            min_content_val=settings.scenedetect_threshold,
+        )
+
+    scene_list = detect(str(video_path), detector)
     if not scene_list:
         # No scene cuts detected. Fall back to fixed-interval samples
         # (25%, 50%, 75% of video duration) for short / single-shot videos.
