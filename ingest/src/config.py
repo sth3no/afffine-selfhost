@@ -90,6 +90,13 @@ class Settings(BaseSettings):
     # to avoid flooding small hosts; effective parallelism is also bounded
     # by the actual frame count.
     frame_extract_workers: int = 4
+    # ffmpeg `-hwaccel` value passed to extract calls. Empty string (default)
+    # disables hwaccel — safest for portable deploys. Set to "auto", "vaapi",
+    # "cuda", "videotoolbox", etc. for hardware decode on hosts that support
+    # it. Wrong values just cause ffmpeg to fall back to software decode with
+    # a stderr warning, but mis-tuned hwaccel can be SLOWER than CPU decode
+    # on very short clips — measure before enabling.
+    ffmpeg_hwaccel: str = ""
     # Phase 16 — Frame-quality pre-filter (runs BETWEEN scene detect and vision call).
     # Defaults chosen to be conservative: drop only frames that are
     # obviously useless. Tune via env vars if the filter is over- or

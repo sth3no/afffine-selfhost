@@ -412,8 +412,7 @@ def _ffmpeg_extract_frame(
     if thumbnail_window_seconds > 0:
         # Decode a small window centered on the requested timestamp.
         seek_start = max(0.0, timestamp_seconds - thumbnail_window_seconds / 2.0)
-        cmd = [
-            "ffmpeg",
+        cmd = ["ffmpeg", *_hwaccel_args(),
             "-ss", f"{seek_start:.3f}",
             "-i", str(video_path),
             "-t", f"{thumbnail_window_seconds:.3f}",
@@ -421,8 +420,7 @@ def _ffmpeg_extract_frame(
         ]
     else:
         # Legacy fast path: single-frame seek at the exact timestamp.
-        cmd = [
-            "ffmpeg",
+        cmd = ["ffmpeg", *_hwaccel_args(),
             # -ss BEFORE -i is much faster (seek demuxer) but slightly less
             # precise. For keyframe captures that's fine.
             "-ss", f"{timestamp_seconds:.3f}",
@@ -466,6 +464,14 @@ def _ffmpeg_extract_frame(
         log.warning("ffmpeg produced an invalid JPEG at t=%.2fs", timestamp_seconds)
         return False
     return True
+
+
+def _hwaccel_args() -> list[str]:
+    """Return `["-hwaccel", value]` if the operator enabled hardware decode,
+    else []. Keeping this in one place so every ffmpeg invocation in this
+    module picks it up consistently — extract, future scdet pre-pass, etc."""
+    val = (settings.ffmpeg_hwaccel or "").strip()
+    return ["-hwaccel", val] if val else []
 
 
 def _is_valid_jpeg(path: Path) -> bool:
