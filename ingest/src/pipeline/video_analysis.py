@@ -24,10 +24,13 @@ import asyncio
 import base64
 import io
 import logging
+import subprocess
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 from anthropic import AsyncAnthropic
 from pydantic import BaseModel, Field
 
@@ -44,6 +47,10 @@ class KeyframeRef:
     blob_source_id: str
     caption: str
     timestamp_seconds: float
+    # Reserved for Tier-3 OCR: when set, the transcribed text from the frame
+    # (slide content, code on screen). Defaulted to None so existing callers
+    # and JSONB snapshots remain compatible.
+    ocr_text: str | None = None
 
 
 @dataclass
@@ -229,8 +236,6 @@ def _detect_and_extract_frames(
     max_frames: int,
 ) -> list[_ExtractedFrame]:
     """Synchronous: PySceneDetect → ffmpeg seek+extract per scene."""
-    import subprocess
-
     try:
         from scenedetect import detect, AdaptiveDetector, ContentDetector
     except ImportError as e:
@@ -281,8 +286,6 @@ def _detect_and_extract_frames(
     # because indices were always [0, step, 2*step, …]. `np.linspace(0, N-1,
     # max_frames)` rounded to int hits both endpoints and stays unbiased.
     if len(scene_list) > max_frames:
-        import numpy as np
-
         idxs = np.linspace(0, len(scene_list) - 1, max_frames, dtype=int)
         # np.linspace can repeat the same index near the endpoints when
         # max_frames is close to len(scene_list); dedup while preserving order.
@@ -309,8 +312,6 @@ def _detect_and_extract_frames(
     # near-linear speedup on multi-core hosts. Bounded so we don't spawn
     # 12 simultaneous ffmpegs on a 2-core box. asyncio.to_thread already
     # wraps this whole function, so blocking here doesn't block the event loop.
-    from concurrent.futures import ThreadPoolExecutor
-
     def _do_extract(task: tuple[int, float, Path]) -> tuple[int, float, Path] | None:
         idx, ts, path = task
         ok = _ffmpeg_extract_frame(
@@ -347,8 +348,6 @@ def _fallback_fixed_interval_frames(
 ) -> list[_ExtractedFrame]:
     """When scene detection finds nothing (single-shot videos), sample at
     fixed 25/50/75% positions of duration."""
-    import subprocess
-
     try:
         # ffprobe to get duration in seconds
         proc = subprocess.run(
@@ -394,8 +393,6 @@ def _ffmpeg_extract_frame(
     exact-midpoint seek when the midpoint happens to land on motion blur
     or a transitional sub-frame.
     """
-    import subprocess
-
     # Build the -vf filter chain (thumbnail first if requested, then scale).
     vf_parts: list[str] = []
     if thumbnail_window_seconds > 0:
@@ -446,9 +443,45 @@ def _ffmpeg_extract_frame(
 
     try:
         proc = subprocess.run(cmd, capture_output=True, check=False, timeout=15)
-        return proc.returncode == 0 and out_path.is_file() and out_path.stat().st_size > 0
     except (OSError, subprocess.SubprocessError) as e:
         log.warning("ffmpeg extract failed at t=%.2fs: %s", timestamp_seconds, e)
+        return False
+
+    if proc.returncode != 0:
+        log.warning(
+            "ffmpeg extract returned %d at t=%.2fs; stderr (last 500B): %s",
+            proc.returncode,
+            timestamp_seconds,
+            (proc.stderr or b"")[-500:].decode("utf-8", errors="replace"),
+        )
+        return False
+    if not (out_path.is_file() and out_path.stat().st_size > 0):
+        return False
+    # Header-level validation. ffmpeg can occasionally return rc=0 while
+    # producing a truncated JPEG (especially mid-thumbnail-batch); Pillow's
+    # `verify()` parses the chunks without decoding pixels — cheap and
+    # catches the corruption case that previously blew up downstream in
+    # the resize / phash path.
+    if not _is_valid_jpeg(out_path):
+        log.warning("ffmpeg produced an invalid JPEG at t=%.2fs", timestamp_seconds)
+        return False
+    return True
+
+
+def _is_valid_jpeg(path: Path) -> bool:
+    """True if the file at `path` parses as a structurally-valid JPEG.
+    `Image.verify()` only walks the headers; it does NOT decode pixels."""
+    try:
+        from PIL import Image
+    except ImportError:
+        # If Pillow is somehow missing, fall back to "any non-empty file
+        # is good enough" rather than rejecting everything.
+        return True
+    try:
+        with Image.open(path) as im:
+            im.verify()
+        return True
+    except Exception:  # noqa: BLE001 — best-effort
         return False
 
 

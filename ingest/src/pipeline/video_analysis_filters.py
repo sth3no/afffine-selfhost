@@ -24,6 +24,8 @@ import logging
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+import numpy as np
+
 if TYPE_CHECKING:
     from src.pipeline.video_analysis import _ExtractedFrame
 
@@ -32,56 +34,69 @@ from src.config import settings
 log = logging.getLogger(__name__)
 
 
+# ── Internal: load grayscale array once per frame ────────────────────
+
+
+def _load_grayscale(frame_path: Path) -> np.ndarray | None:
+    """Open `frame_path`, convert to L-mode (luma), and return a uint8 array.
+    Returns None on any failure — callers treat None as "can't evaluate; keep
+    the frame" rather than raising. Centralized here so blackness + entropy
+    don't each pay the I/O + decode cost separately."""
+    try:
+        from PIL import Image
+    except ImportError as e:
+        log.warning("Pillow unavailable: %s; skipping luma filters", e)
+        return None
+    try:
+        with Image.open(frame_path) as im:
+            gray = im.convert("L")
+            return np.asarray(gray, dtype=np.uint8)
+    except Exception as e:  # noqa: BLE001 — best-effort, never raise
+        log.warning("grayscale load failed for %s: %s; keeping frame", frame_path, e)
+        return None
+
+
 # ── Filter: blackness ────────────────────────────────────────────────
+
+
+def _is_too_black_arr(arr: np.ndarray) -> bool:
+    mean_val = float(arr.mean()) if arr.size else 0.0
+    return mean_val < settings.frame_blackness_threshold
 
 
 def _is_too_black(frame_path: Path) -> bool:
     """True when the frame's mean grayscale pixel value is below the
     blackness threshold. Used to drop intro-fade / transition frames."""
-    import numpy as np
-    from PIL import Image
-
-    try:
-        with Image.open(frame_path) as im:
-            gray = im.convert("L")
-            arr = np.asarray(gray, dtype=np.uint8)
-    except Exception as e:  # noqa: BLE001 — best-effort, never raise
-        log.warning("blackness check failed for %s: %s; keeping frame", frame_path, e)
+    arr = _load_grayscale(frame_path)
+    if arr is None:
         return False
-
-    mean_val = float(arr.mean()) if arr.size else 0.0
-    return mean_val < settings.frame_blackness_threshold
+    return _is_too_black_arr(arr)
 
 
 # ── Filter: entropy ──────────────────────────────────────────────────
+
+
+def _is_too_low_entropy_arr(arr: np.ndarray) -> bool:
+    if arr.size == 0:
+        return True
+    # 256-bin histogram of 0-255 grayscale values, normalized to probability.
+    counts = np.bincount(arr.ravel(), minlength=256).astype(np.float64)
+    probs = counts / counts.sum()
+    # Shannon entropy in bits. Mask zero-probability bins so log2(0)=-inf
+    # doesn't contaminate the sum.
+    nonzero = probs > 0
+    entropy_bits = float(-(probs[nonzero] * np.log2(probs[nonzero])).sum())
+    return entropy_bits < settings.frame_entropy_threshold
 
 
 def _is_too_low_entropy(frame_path: Path) -> bool:
     """True when the Shannon entropy of the frame's grayscale histogram
     is below the configured threshold (bits). Drops blank slides,
     solid-color title cards, single-tone transitions."""
-    import numpy as np
-    from PIL import Image
-
-    try:
-        with Image.open(frame_path) as im:
-            gray = im.convert("L")
-            arr = np.asarray(gray, dtype=np.uint8)
-    except Exception as e:  # noqa: BLE001
-        log.warning("entropy check failed for %s: %s; keeping frame", frame_path, e)
+    arr = _load_grayscale(frame_path)
+    if arr is None:
         return False
-
-    if arr.size == 0:
-        return True
-
-    # 256-bin histogram of 0-255 grayscale values, normalized to probability.
-    counts = np.bincount(arr.ravel(), minlength=256).astype(np.float64)
-    probs = counts / counts.sum()
-    # Shannon entropy in bits. Replace 0-probability bins with 1 so log2(1)=0
-    # contributes nothing (avoids log(0) = -inf NaN).
-    nonzero = probs > 0
-    entropy_bits = float(-(probs[nonzero] * np.log2(probs[nonzero])).sum())
-    return entropy_bits < settings.frame_entropy_threshold
+    return _is_too_low_entropy_arr(arr)
 
 
 # ── Filter: perceptual-hash dedup ────────────────────────────────────
@@ -128,10 +143,12 @@ def filter_low_quality_frames(
     kept_hashes: list = []  # one entry per kept frame; None means "no hash, skip dedup compare"
 
     for f in ordered:
-        if _is_too_black(f.path):
+        # Load grayscale once per frame and reuse for both luma-domain checks.
+        arr = _load_grayscale(f.path)
+        if arr is not None and _is_too_black_arr(arr):
             log.info("frame-filter: drop t=%.2fs (too dark)", f.timestamp_seconds)
             continue
-        if _is_too_low_entropy(f.path):
+        if arr is not None and _is_too_low_entropy_arr(arr):
             log.info("frame-filter: drop t=%.2fs (low entropy)", f.timestamp_seconds)
             continue
         h = _compute_phash(f.path)
