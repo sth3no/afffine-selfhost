@@ -276,11 +276,23 @@ def _detect_and_extract_frames(
         # (25%, 50%, 75% of video duration) for short / single-shot videos.
         return _fallback_fixed_interval_frames(video_path, workdir, n=3)
 
-    # Take the first frame of each scene — cap at max_frames evenly spread.
+    # Cap at max_frames, spreading the picks evenly across the FULL scene
+    # list (endpoints included). `int(i * step)` consistently lost the tail
+    # because indices were always [0, step, 2*step, …]. `np.linspace(0, N-1,
+    # max_frames)` rounded to int hits both endpoints and stays unbiased.
     if len(scene_list) > max_frames:
-        step = len(scene_list) / max_frames
-        picked_indices = [int(i * step) for i in range(max_frames)]
-        picks = [scene_list[i] for i in picked_indices]
+        import numpy as np
+
+        idxs = np.linspace(0, len(scene_list) - 1, max_frames, dtype=int)
+        # np.linspace can repeat the same index near the endpoints when
+        # max_frames is close to len(scene_list); dedup while preserving order.
+        seen: set[int] = set()
+        ordered_unique: list[int] = []
+        for i in idxs.tolist():
+            if i not in seen:
+                seen.add(i)
+                ordered_unique.append(i)
+        picks = [scene_list[i] for i in ordered_unique]
     else:
         picks = scene_list
 
