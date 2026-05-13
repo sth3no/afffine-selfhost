@@ -258,8 +258,12 @@ def _detect_and_extract_frames(
         picks = scene_list
 
     out: list[_ExtractedFrame] = []
-    for idx, (start, _end) in enumerate(picks):
-        ts = start.get_seconds()
+    for idx, (start, end) in enumerate(picks):
+        # Sample the MIDDLE of the scene, not the cut itself. The first
+        # frame after a cut is frequently a partial fade, motion-blurred,
+        # or a transitional thumbnail — the middle is much more likely to
+        # be a clean, representative still.
+        ts = (start.get_seconds() + end.get_seconds()) / 2.0
         frame_path = workdir / f"frame-{idx:02d}.jpg"
         if not _ffmpeg_extract_frame(video_path, ts, frame_path):
             continue
