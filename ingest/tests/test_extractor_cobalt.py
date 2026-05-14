@@ -56,7 +56,8 @@ async def test_cobalt_happy_path_returns_transcript(monkeypatch):
     monkeypatch.setattr(
         cobalt_ext,
         "_whisper_transcribe",
-        AsyncMock(return_value="hello world this is a transcript"),
+        # Phase 18: _whisper_transcribe returns (text, segments).
+        AsyncMock(return_value=("hello world this is a transcript", [])),
     )
 
     result = await cobalt_ext.extract(
@@ -96,7 +97,8 @@ async def test_youtube_captions_first_skips_cobalt_audio(monkeypatch):
     monkeypatch.setattr(cobalt_ext, "fetch_metadata", _metadata, raising=False)
 
     # Spy on Whisper — must NOT be called.
-    whisper_spy = AsyncMock(return_value="should-not-appear")
+    # Phase 18: _whisper_transcribe returns (text, segments).
+    whisper_spy = AsyncMock(return_value=("should-not-appear", []))
     monkeypatch.setattr(cobalt_ext, "_whisper_transcribe", whisper_spy)
 
     result = await cobalt_ext.extract(
@@ -126,7 +128,7 @@ async def test_cobalt_redirect_status_treated_like_tunnel(monkeypatch):
         return httpx.Response(200, content=b"\x00" * 8192)
 
     monkeypatch.setattr(cobalt_ext, "_TEST_TRANSPORT", httpx.MockTransport(_handler), raising=False)
-    monkeypatch.setattr(cobalt_ext, "_whisper_transcribe", AsyncMock(return_value="ok"))
+    monkeypatch.setattr(cobalt_ext, "_whisper_transcribe", AsyncMock(return_value=("ok", [])))
 
     result = await cobalt_ext.extract("https://example.com/x", _platform())
     assert "ok" in result.body_md
@@ -158,7 +160,7 @@ async def test_cobalt_empty_audio_raises_descriptive_error(monkeypatch):
         return httpx.Response(200, content=b"<html>not audio</html>" + b"\x00" * 50)
 
     monkeypatch.setattr(cobalt_ext, "_TEST_TRANSPORT", httpx.MockTransport(_handler), raising=False)
-    monkeypatch.setattr(cobalt_ext, "_whisper_transcribe", AsyncMock(return_value="ok"))
+    monkeypatch.setattr(cobalt_ext, "_whisper_transcribe", AsyncMock(return_value=("ok", [])))
 
     with pytest.raises(RuntimeError, match="cobalt audio too small"):
         await cobalt_ext.extract("https://www.instagram.com/reel/x/", _platform(id_="instagram"))

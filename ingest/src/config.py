@@ -154,6 +154,44 @@ class Settings(BaseSettings):
     frame_dedup_hamming_distance: int = 5     # imagehash pHash distance 0-64; below-or-equal = "duplicate"
     frame_entropy_threshold: float = 4.0      # Shannon entropy of grayscale histogram, bits 0-8; below = "too uniform"
 
+    # Phase 18 — Transcript-guided keyframe selection. When enabled, a cheap
+    # text-only Claude call ranks transcript windows by (importance,
+    # visual_anchor likelihood) BEFORE the vision call. Candidate keyframe
+    # timestamps in low-anchor windows are dropped; surviving frames carry
+    # their motivating speech window as inline context for the vision call,
+    # producing far sharper importance ratings on talky content (tutorials,
+    # documentaries, screencasts) than the pure scene-cut signal alone.
+    transcript_guided_selection_enabled: bool = True
+    # Visual-anchor score (0-10) below which candidate frames are dropped.
+    # Lower the threshold for visually-rich content where most passages have
+    # some on-screen action; raise it for content where you only want
+    # frames at moments the speaker explicitly gestures at something.
+    transcript_visual_anchor_threshold: int = 4
+    # Fraction of the keyframe budget reserved for the highest-IMPORTANCE
+    # frames regardless of visual_anchor score. B-roll safety net — a
+    # documentary with strong voiceover but high-impact unmentioned imagery
+    # would otherwise lose every frame to the speech-anchored filter.
+    transcript_pure_visual_reserve_ratio: float = 0.2
+    # Skip ranking entirely when the full transcript has fewer than this
+    # many words. Avoids paying for a Claude call on music videos / silent
+    # screencasts / "(no transcript)" placeholders. ~50 words ≈ 20s of
+    # speech — below that, ranking can't tell us much anyway.
+    transcript_min_words_for_ranking: int = 50
+    # Width of each ranking window in seconds. Whisper segments come back
+    # ~5-10s wide which is too fine-grained to rank usefully ("this 8s has
+    # no infograph?" is too local). 45s gives the LLM enough context to
+    # recognize deictic markers and topic pivots.
+    transcript_ranking_window_seconds: float = 45.0
+    # Per-window character cap fed to the LLM. A runaway window (e.g. a
+    # speed-talker's 45s of dense speech) is truncated so the ranking call's
+    # token usage stays predictable. The deictic markers we care about are
+    # almost always near the start of a window anyway.
+    transcript_ranking_window_chars: int = 600
+    # Hard cap on the number of windows scored in one ranking call. 80
+    # windows × ~45s = ~60 minutes of speech — beyond this, the ranking is
+    # less useful than just keeping a representative sample of cuts.
+    transcript_ranking_max_windows: int = 80
+
     model_config = SettingsConfigDict(env_file=".env", extra="ignore", case_sensitive=False)
 
 

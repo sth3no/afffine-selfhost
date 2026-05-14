@@ -61,6 +61,36 @@ class _ExtractedFrame:
     path: Path
     timestamp_seconds: float
     index: int  # 0-based, by timestamp asc
+    # Phase 18: the transcript passage that motivated keeping this frame's
+    # timestamp through the candidate filter. Empty string when no segment
+    # ranking was available (empty transcript, ranking call failed) — the
+    # vision call falls back to its pre-Phase-18 behavior in that case.
+    motivation: str = ""
+
+
+@dataclass
+class _TranscriptSegment:
+    """A speech segment with start/end seconds and the text spoken in that
+    window. Unified across sources: Whisper `verbose_json` segments, parsed
+    YouTube caption-paragraph markers, both feed into this shape."""
+
+    start_seconds: float
+    end_seconds: float
+    text: str
+
+
+@dataclass
+class _RankedWindow:
+    """Output of the transcript-ranking LLM call. Wraps a coalesced window
+    of segments (one window typically spans 20-60s) with the scores assigned
+    to that window. The window text is preserved so candidate frames inside
+    the window can attach it as motivation for the downstream vision call."""
+
+    start_seconds: float
+    end_seconds: float
+    text: str
+    importance: int           # 0-10, "does this passage matter at all"
+    visual_anchor: int        # 0-10, "is there likely a visual on screen here"
 
 
 class _FrameCaption(BaseModel):
@@ -138,13 +168,27 @@ async def analyze_video(
     transcript: str,
     capture_id: str,
     mcp_client: Any,
+    whisper_segments: list[dict] | None = None,
 ) -> tuple[str | None, list[KeyframeRef]]:
     """Run the full pipeline. Returns (grounded_summary, keyframes).
 
     `grounded_summary` is None when the vision call fails — the orchestrator
     falls back to the text-only summarizer in that case. `keyframes` is
     empty when nothing reaches the importance threshold.
+
+    `whisper_segments` (optional): when present, Phase 18 transcript-guided
+    keyframe selection runs a cheap text-only LLM ranking pass on the
+    speech timeline and uses the per-window `visual_anchor` scores to
+    prune candidate keyframe timestamps BEFORE the expensive vision call.
+    None / empty list / ranking-disabled → pipeline behaves exactly as
+    before (pre-Phase-18 path).
     """
+    # Phase 18: parse transcript segments early — the YT-captions path embeds
+    # timestamp markers in the markdown body; the Whisper path passes them
+    # explicitly via the `whisper_segments` kwarg. We unify both into the
+    # `_TranscriptSegment` shape that the ranker consumes.
+    transcript_segments = _build_transcript_segments(transcript, whisper_segments)
+
     # Stage 1+2: scene detect + frame extract (sync libs, run in thread).
     try:
         frames = await asyncio.to_thread(
@@ -159,6 +203,41 @@ async def analyze_video(
 
     if not frames:
         log.info("video_analysis: no scenes detected; skipping vision call")
+        return None, []
+
+    # Phase 18: transcript-guided candidate filter. When we have a usable
+    # transcript with timestamp info, ask a text-only LLM to score each
+    # speech window for (importance, visual_anchor_likelihood), then prune
+    # candidate frames whose window's visual_anchor score is too low. Each
+    # surviving frame also picks up a `motivation` string — the passage the
+    # speaker uttered in that window — which the vision call uses as
+    # per-frame context for a sharper importance rating.
+    if (
+        settings.transcript_guided_selection_enabled
+        and transcript_segments
+        and _has_enough_words_for_ranking(transcript_segments)
+    ):
+        try:
+            ranked = await _rank_transcript_segments(transcript_segments)
+        except Exception as e:  # noqa: BLE001 — best-effort
+            log.warning("video_analysis: transcript ranking failed (continuing without): %s", e)
+            ranked = []
+        if ranked:
+            frames = _filter_frames_by_ranking(
+                frames=frames,
+                ranked_windows=ranked,
+                visual_anchor_threshold=settings.transcript_visual_anchor_threshold,
+                pure_visual_reserve_ratio=settings.transcript_pure_visual_reserve_ratio,
+                max_frames=settings.max_frames_per_video,
+            )
+            log.info(
+                "video_analysis: transcript-guided filter kept %d frames "
+                "(visual_anchor_threshold=%d)",
+                len(frames), settings.transcript_visual_anchor_threshold,
+            )
+
+    if not frames:
+        log.info("video_analysis: transcript-guided filter dropped all frames; skipping vision call")
         return None, []
 
     # Stage 2.5 — Phase 16 quality pre-filter (cheap heuristics; runs sync in a thread).
@@ -226,6 +305,367 @@ async def analyze_video(
             log.warning("video_analysis: blob upload failed for frame %d: %s", frame.index, e)
 
     return analysis.summary, keyframe_refs
+
+
+# ── Phase 18: transcript-guided keyframe selection ────────────────
+
+
+# Matches the markdown anchor that `fetch_youtube_transcript` injects at
+# the start of each ~30s paragraph: `[**0:42**](https://.../?v=ABC&t=42s) text`.
+# The `t=Ns` group is the authoritative start-second value (`mm:ss` is
+# display-only); we capture it as an integer count of seconds.
+_YT_TRANSCRIPT_ANCHOR_RE = re.compile(
+    r"\[\*\*\d+(?::\d{2}){1,2}\*\*\]\([^)]*?[?&]t=(\d+)s\)\s*"
+)
+
+
+def _build_transcript_segments(
+    transcript: str,
+    whisper_segments: list[dict] | None,
+) -> list[_TranscriptSegment]:
+    """Unify both transcript sources into the same shape.
+
+    Order of preference:
+      1. Explicit Whisper segments (verbose_json) when present.
+      2. YouTube-caption markdown anchors parsed out of the transcript
+         body — produced by `_youtube_transcript._format_transcript_with_timestamps`.
+      3. Otherwise empty list: caller bypasses ranking.
+    """
+    if whisper_segments:
+        out: list[_TranscriptSegment] = []
+        for s in whisper_segments:
+            try:
+                start = float(s["start"])
+                end = float(s["end"])
+                text = (s.get("text") or "").strip()
+            except (KeyError, TypeError, ValueError):
+                continue
+            if text:
+                out.append(_TranscriptSegment(start_seconds=start, end_seconds=end, text=text))
+        return out
+
+    if not transcript:
+        return []
+    # Parse the YT-captions markdown shape:
+    #   [**0:00**](url&t=0s) first paragraph text
+    #   \n\n
+    #   [**0:30**](url&t=30s) second paragraph text
+    matches = list(_YT_TRANSCRIPT_ANCHOR_RE.finditer(transcript))
+    if not matches:
+        return []
+    parsed: list[_TranscriptSegment] = []
+    for i, m in enumerate(matches):
+        try:
+            start = float(m.group(1))
+        except ValueError:
+            continue
+        body_start = m.end()
+        body_end = matches[i + 1].start() if i + 1 < len(matches) else len(transcript)
+        text = transcript[body_start:body_end].strip()
+        # End of THIS paragraph is the start of the next anchor — or, for
+        # the final paragraph, an estimate based on word count at ~150 wpm.
+        if i + 1 < len(matches):
+            try:
+                end = float(matches[i + 1].group(1))
+            except ValueError:
+                end = start + max(1.0, len(text.split()) * 60.0 / 150.0)
+        else:
+            end = start + max(1.0, len(text.split()) * 60.0 / 150.0)
+        if text:
+            parsed.append(_TranscriptSegment(start_seconds=start, end_seconds=end, text=text))
+    return parsed
+
+
+def _has_enough_words_for_ranking(segments: list[_TranscriptSegment]) -> bool:
+    """Skip ranking on transcripts that are too short to give the LLM any
+    useful signal — saves a call on tiny/music/silent videos. The threshold
+    is intentionally low: the ranking is robust to a few low-information
+    windows, so we mostly want to weed out "(no transcript)" and
+    near-empty cases."""
+    total = sum(len(s.text.split()) for s in segments)
+    return total >= settings.transcript_min_words_for_ranking
+
+
+def _coalesce_segments_for_ranking(
+    segments: list[_TranscriptSegment],
+    window_seconds: float,
+) -> list[_TranscriptSegment]:
+    """Merge consecutive Whisper / caption segments into larger windows
+    (~window_seconds each) so the ranking LLM gets readable chunks. Whisper
+    segments are often 5-10 seconds — too fine-grained to rank usefully on
+    their own ("this 8s window has no infographic" is too local). 30-60s
+    windows give the LLM enough context to spot deictic markers."""
+    if not segments:
+        return []
+    windows: list[_TranscriptSegment] = []
+    current_start = segments[0].start_seconds
+    current_end = segments[0].end_seconds
+    current_parts: list[str] = [segments[0].text]
+    for s in segments[1:]:
+        if s.end_seconds - current_start <= window_seconds:
+            current_end = s.end_seconds
+            current_parts.append(s.text)
+        else:
+            windows.append(_TranscriptSegment(
+                start_seconds=current_start,
+                end_seconds=current_end,
+                text=" ".join(current_parts).strip(),
+            ))
+            current_start = s.start_seconds
+            current_end = s.end_seconds
+            current_parts = [s.text]
+    windows.append(_TranscriptSegment(
+        start_seconds=current_start,
+        end_seconds=current_end,
+        text=" ".join(current_parts).strip(),
+    ))
+    return windows
+
+
+class _RankedWindowOut(BaseModel):
+    """LLM response shape for one window. The model is told to mirror
+    `window_index` from the input so we can join scores back to windows
+    without depending on response ordering."""
+
+    window_index: int = Field(description="0-based index of the window as numbered in the input.")
+    importance: int = Field(
+        ge=0, le=10,
+        description=(
+            "0-10. How much does this passage matter to a reader who only sees "
+            "a summary? 10 = key insight, surprising fact, actionable advice. "
+            "0 = filler / pleasantries / repeating the previous point."
+        ),
+    )
+    visual_anchor: int = Field(
+        ge=0, le=10,
+        description=(
+            "0-10. How likely is it that a meaningful visual was on screen "
+            "during this passage? Reward DEICTIC MARKERS ('as you can see', "
+            "'look at this', 'here's', 'the chart shows', 'on screen', 'let "
+            "me bring up'), NUMERICAL CLAIMS that beg for a chart, and TOPIC "
+            "PIVOTS that often coincide with a new slide. 10 = the speaker "
+            "is literally pointing at a slide/chart/UI/code. 0 = pure "
+            "talking-head with no visual cue."
+        ),
+    )
+
+
+class _RankingResult(BaseModel):
+    """Full response: one entry per window, in window_index order."""
+
+    windows: list[_RankedWindowOut]
+
+
+_RANKING_SYSTEM_PROMPT = """You are scoring transcript windows from a video for an
+automated keyframe-picking system.
+
+You will be given N speech windows, each numbered with a `window_index` and a
+`[start-end]s` time range. For EACH window, output two scores 0-10:
+
+  importance (0-10) — How much does this passage matter to a reader who only
+    sees a summary? 10 = key insight, surprising fact, actionable advice,
+    explicit conclusion. 5 = useful context. 0 = filler, intro greetings,
+    repeating an earlier point, mid-sentence pleasantries.
+
+  visual_anchor (0-10) — How likely is it that a meaningful visual was on
+    screen during this passage? Look for:
+      • Deictic markers: "as you can see", "look at this", "here", "this
+        shows", "the chart", "on screen", "let me bring up", "as shown".
+      • Numerical specificity that begs for a chart: "47.3%", "the second
+        result was X", explicit comparisons.
+      • Topic pivots: "now, the interesting part" — new slide cues in
+        screencasts.
+    Score 10 when the speaker is literally pointing at a slide/chart/UI.
+    Score 0 for pure talking-head passages with no visual cue.
+
+Return strict JSON matching the RankingResult schema. ONE entry per input
+window, in window_index order. Do not invent extra entries.
+"""
+
+
+async def _rank_transcript_segments(
+    segments: list[_TranscriptSegment],
+) -> list[_RankedWindow]:
+    """Single text-only Claude call. Returns the ranked windows in time
+    order. Errors propagate up — caller treats them as "no ranking" and
+    falls back to the pre-Phase-18 path."""
+    if not settings.anthropic_api_key:
+        raise RuntimeError("ANTHROPIC_API_KEY missing — cannot run transcript ranking")
+
+    windows = _coalesce_segments_for_ranking(
+        segments,
+        window_seconds=settings.transcript_ranking_window_seconds,
+    )
+    if not windows:
+        return []
+
+    # Build the user message. Cap at a reasonable count to keep one ranking
+    # call cheap on hour-long videos. 80 windows × ~45s ≈ 60 minutes.
+    cap = max(1, settings.transcript_ranking_max_windows)
+    if len(windows) > cap:
+        log.info(
+            "video_analysis: transcript ranking capped at %d / %d windows",
+            cap, len(windows),
+        )
+        windows = windows[:cap]
+
+    listing_lines: list[str] = []
+    for i, w in enumerate(windows):
+        # Truncate per-window text so a runaway window doesn't dominate the
+        # token budget; the ranker just needs enough context to spot
+        # deictic markers, not the full transcript verbatim.
+        snippet = w.text[: settings.transcript_ranking_window_chars].replace("\n", " ").strip()
+        listing_lines.append(
+            f"[window_index={i}] [{w.start_seconds:.1f}s-{w.end_seconds:.1f}s] {snippet}"
+        )
+    user_text = (
+        f"Score these {len(windows)} transcript windows. Output one "
+        f"RankedWindowOut per window, in window_index order.\n\n"
+        + "\n\n".join(listing_lines)
+    )
+
+    client = AsyncAnthropic(api_key=settings.anthropic_api_key)
+    response = await client.messages.parse(
+        model=settings.vision_model,
+        max_tokens=2048,
+        system=[
+            {
+                "type": "text",
+                "text": _RANKING_SYSTEM_PROMPT,
+                "cache_control": {"type": "ephemeral"},
+            }
+        ],
+        messages=[{"role": "user", "content": user_text}],
+        output_format=_RankingResult,
+    )
+    if response.parsed_output is None:
+        raise RuntimeError("transcript ranking: parsed_output is None")
+
+    by_idx = {w.window_index: w for w in response.parsed_output.windows}
+    out: list[_RankedWindow] = []
+    for i, w in enumerate(windows):
+        scored = by_idx.get(i)
+        if scored is None:
+            # Model dropped a window; treat as middling so we neither force-keep
+            # nor force-drop frames inside it.
+            importance = 5
+            visual_anchor = 5
+        else:
+            importance = scored.importance
+            visual_anchor = scored.visual_anchor
+        out.append(_RankedWindow(
+            start_seconds=w.start_seconds,
+            end_seconds=w.end_seconds,
+            text=w.text,
+            importance=importance,
+            visual_anchor=visual_anchor,
+        ))
+    return out
+
+
+def _window_for_timestamp(
+    timestamp: float, windows: list[_RankedWindow],
+) -> _RankedWindow | None:
+    """Locate the ranked window covering `timestamp`. Linear scan — the
+    window count is small (≤ transcript_ranking_max_windows, default 80)
+    so a binary search isn't worth the complexity. Returns None when the
+    timestamp falls outside all windows (rare; happens when the candidate
+    landed in a silence gap not covered by Whisper)."""
+    for w in windows:
+        if w.start_seconds <= timestamp <= w.end_seconds:
+            return w
+    return None
+
+
+def _filter_frames_by_ranking(
+    *,
+    frames: list[_ExtractedFrame],
+    ranked_windows: list[_RankedWindow],
+    visual_anchor_threshold: int,
+    pure_visual_reserve_ratio: float,
+    max_frames: int,
+) -> list[_ExtractedFrame]:
+    """Apply Phase 18's two-stage candidate filter.
+
+    Stage 1: Keep frames whose ranked window has `visual_anchor >=
+    threshold`. These are speech-anchored picks — moments where the
+    speaker probably gestured at a visual.
+
+    Stage 2: Reserve a fraction of `max_frames` (default 20%) for the
+    HIGHEST-importance frames REGARDLESS of visual_anchor score. This is
+    the B-roll safety net: a documentary with strong voiceover but
+    high-importance unmentioned imagery shouldn't lose every frame.
+
+    Frames in silent gaps (no covering window) get neither score — they
+    survive only if the speech-anchored pool is empty (true fallback path).
+    """
+    # Score each frame by (visual_anchor, importance) from its window.
+    scored: list[tuple[_ExtractedFrame, int, int, _RankedWindow | None]] = []
+    for f in frames:
+        w = _window_for_timestamp(f.timestamp_seconds, ranked_windows)
+        if w is None:
+            scored.append((f, -1, -1, None))
+        else:
+            scored.append((f, w.visual_anchor, w.importance, w))
+
+    # Stage 1 — speech-anchored picks.
+    speech_anchored = [
+        s for s in scored if s[1] >= visual_anchor_threshold
+    ]
+    speech_anchored.sort(key=lambda s: (-s[1], -s[2]))
+
+    # Stage 2 — pure-visual reserve, filled from the highest-importance
+    # frames that DIDN'T already make Stage 1.
+    reserve_quota = max(0, int(round(max_frames * pure_visual_reserve_ratio)))
+    chosen_ts = {id(s[0]) for s in speech_anchored[: max(0, max_frames - reserve_quota)]}
+    remainder = [
+        s for s in scored
+        if id(s[0]) not in chosen_ts
+    ]
+    # When the speech-anchored pool fills the whole budget, the reserve
+    # collapses to 0 — that's fine, we already have a strong selection.
+    remainder.sort(key=lambda s: -s[2])  # importance, descending
+
+    out_frames: list[_ExtractedFrame] = []
+    for s in speech_anchored[: max(0, max_frames - reserve_quota)]:
+        f, _, _, w = s
+        if w is not None:
+            f.motivation = _summarize_window_text(w.text)
+        out_frames.append(f)
+    for s in remainder[:reserve_quota]:
+        f, _, _, w = s
+        if w is not None:
+            f.motivation = _summarize_window_text(w.text)
+        out_frames.append(f)
+
+    # If BOTH pools came up empty (low-anchor video that also has no
+    # importance signal), fall back to keeping the top frames by raw
+    # importance score so the vision call still has something to look at.
+    if not out_frames:
+        scored.sort(key=lambda s: -s[2])
+        for s in scored[:max_frames]:
+            f, _, _, w = s
+            if w is not None:
+                f.motivation = _summarize_window_text(w.text)
+            out_frames.append(f)
+
+    out_frames.sort(key=lambda f: f.timestamp_seconds)
+    return out_frames
+
+
+def _summarize_window_text(text: str, max_chars: int = 200) -> str:
+    """Trim a transcript window down to a short motivation string for the
+    vision call. We just want the speaker's actual words near the timestamp
+    — no LLM call needed. Heuristic: keep the first ~max_chars and break on
+    the nearest word boundary so we don't end mid-token."""
+    cleaned = " ".join(text.split())
+    if len(cleaned) <= max_chars:
+        return cleaned
+    cut = cleaned[: max_chars]
+    space = cut.rfind(" ")
+    if space > max_chars * 0.6:
+        cut = cut[:space]
+    return cut + "…"
 
 
 # ── Stage 1+2: scene detect + ffmpeg extract ──────────────────────
@@ -793,10 +1233,15 @@ async def _vision_call(
     ]
     for frame in frames:
         b64 = base64.b64encode(frame.path.read_bytes()).decode("ascii")
-        content.append({
-            "type": "text",
-            "text": f"Frame {frame.index} (t={frame.timestamp_seconds:.1f}s):",
-        })
+        # Phase 18: when transcript-guided selection chose this frame, attach
+        # the speech window that motivated it as inline context for the
+        # vision call. Sharpens the importance rating by telling the model
+        # WHY this timestamp was singled out (e.g. "speaker said 'as you
+        # can see in this chart'").
+        header = f"Frame {frame.index} (t={frame.timestamp_seconds:.1f}s):"
+        if frame.motivation:
+            header += f"\nSpoken nearby: {frame.motivation}"
+        content.append({"type": "text", "text": header})
         content.append({
             "type": "image",
             "source": {

@@ -112,6 +112,13 @@ async def extract(
         # responses from `_download_audio` (cobalt's silent upstream
         # failure mode) get the same YT recovery treatment as the
         # explicit `error.api.youtube.login` block.
+        # Phase 18: when available, raw Whisper / YT-caption segments
+        # accompany the transcript so the transcript-guided keyframe
+        # selection can rank speech windows by visual-anchor likelihood.
+        # Empty list on either branch is a valid "no timing info" sentinel
+        # — the downstream ranking step falls back to non-timestamp-aware
+        # candidate picking when segments are missing.
+        whisper_segments: list[dict] = []
         try:
             if captions_transcript:
                 # Captions worked — skip the cobalt audio download AND the
@@ -131,7 +138,7 @@ async def extract(
                     fetch_metadata(url),
                 )
                 audio_path = await _download_audio(tunnel_url, workdir)
-                transcript = await _whisper_transcribe(audio_path)
+                transcript, whisper_segments = await _whisper_transcribe(audio_path)
                 transcript_heading = "## Transcript (Whisper via cobalt)"
                 log.info("transcript via cobalt + Whisper (no captions available)",
                          extra={"char_count": len(transcript)})
@@ -157,10 +164,14 @@ async def extract(
         # Phase 13: optional video frame analysis. Best-effort — failures
         # leave the audio-only path untouched. Independent of which
         # transcript path was used (downloads video separately).
+        # Phase 18: whisper_segments (when present) carries Whisper's
+        # per-segment timestamps; for the YT-captions path the segments
+        # are parsed from the markdown transcript inside analyze_video.
         video_summary, keyframes = await _maybe_run_video_analysis(
             url=url,
             workdir=workdir,
             transcript=transcript,
+            whisper_segments=whisper_segments,
             mcp_client=mcp_client,
             capture_id=capture_id,
         )
@@ -226,6 +237,7 @@ async def _maybe_run_video_analysis(
     url: str,
     workdir: Path,
     transcript: str,
+    whisper_segments: list[dict] | None = None,
     mcp_client: object | None,
     capture_id: str | None,
 ):
@@ -276,6 +288,7 @@ async def _maybe_run_video_analysis(
             video_path=video_path,
             workdir=workdir,
             transcript=transcript,
+            whisper_segments=whisper_segments,
             capture_id=capture_id,
             mcp_client=mcp_client,
         )

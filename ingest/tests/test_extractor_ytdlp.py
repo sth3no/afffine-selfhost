@@ -85,7 +85,10 @@ async def test_ytdlp_no_caption_short_video_calls_whisper(tmp_path):
          patch("src.pipeline.extractors.ytdlp_ext._whisper_transcribe", new_callable=AsyncMock) as whisper:
         run.return_value = tmp_path
         audio.return_value = audio_path
-        whisper.return_value = "transcribed text from whisper"
+        # Phase 18: _whisper_transcribe now returns (text, segments).
+        # This test doesn't exercise segment-aware code paths so an empty
+        # segment list keeps existing body_md assertions intact.
+        whisper.return_value = ("transcribed text from whisper", [])
 
         e = await extract("https://www.youtube.com/watch?v=short", _platform())
 

@@ -22,6 +22,7 @@ import shutil
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 from openai import AsyncOpenAI
 
@@ -84,7 +85,7 @@ async def _build_body(url: str, workdir: Path, info: dict, duration: int) -> str
     # Short video, no caption -- fall back to Whisper.
     audio_path = await _run_ytdlp_audio(url, workdir)
     try:
-        transcript = await _whisper_transcribe(audio_path)
+        transcript, _segments = await _whisper_transcribe(audio_path)
         parts.append("\n## Transcript (Whisper)\n\n" + transcript)
     finally:
         try:
@@ -190,9 +191,18 @@ async def _run_ytdlp_audio(url: str, workdir: Path) -> Path:
     return files[0]
 
 
-async def _whisper_transcribe(audio_path: Path) -> str:
-    """OpenAI Whisper API. Constructs the client lazily so missing keys
-    surface only when transcription is actually attempted."""
+async def _whisper_transcribe(audio_path: Path) -> tuple[str, list[dict[str, Any]]]:
+    """OpenAI Whisper API. Returns (full_text, segments).
+
+    `segments` is a list of `{"start": float, "end": float, "text": str}`
+    dicts derived from Whisper's `verbose_json` response — each ~5-30s of
+    speech. Downstream callers (Phase 18 transcript-guided keyframe
+    selection) aggregate these into larger ranking windows.
+
+    Empty list if `verbose_json` parsing fails — callers must treat that
+    as "no timing info available" and fall back to non-timestamp-aware
+    behavior.
+    """
     if not settings.openai_api_key:
         raise RuntimeError("OPENAI_API_KEY not set; cannot transcribe")
     client = AsyncOpenAI(api_key=settings.openai_api_key)
@@ -200,8 +210,28 @@ async def _whisper_transcribe(audio_path: Path) -> str:
         result = await client.audio.transcriptions.create(
             model="whisper-1",
             file=f,
+            response_format="verbose_json",
+            timestamp_granularities=["segment"],
         )
-    return (result.text or "").strip()
+    text = (result.text or "").strip()
+    segs: list[dict[str, Any]] = []
+    raw_segments = getattr(result, "segments", None) or []
+    for s in raw_segments:
+        # OpenAI SDK returns Pydantic models; older / mocked paths may pass dicts.
+        try:
+            if hasattr(s, "start"):
+                start = float(s.start)
+                end = float(s.end)
+                seg_text = (s.text or "").strip()
+            else:
+                start = float(s["start"])
+                end = float(s["end"])
+                seg_text = (s.get("text") or "").strip()
+        except (TypeError, ValueError, KeyError):
+            continue
+        if seg_text:
+            segs.append({"start": start, "end": end, "text": seg_text})
+    return text, segs
 
 
 register_extractor("ytdlp", extract)
