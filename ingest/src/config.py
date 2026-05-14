@@ -71,11 +71,31 @@ class Settings(BaseSettings):
     #                    on slow dissolves but plenty good for fast-cut
     #                    edited content. Recommended once the operator has
     #                    measured that PySceneDetect is the bottleneck.
+    #   "transnetv2"   — CNN+LSTM shot-boundary model (Souček & Lokoč,
+    #                    ACM Multimedia 2024). Materially better on slow
+    #                    dissolves and fades — the same cases where
+    #                    PySceneDetect needs the half-sensitivity retry
+    #                    and ffmpeg `scdet` misses entirely. Requires the
+    #                    optional `transnetv2-pytorch` package (and the
+    #                    accompanying weights file); auto-uses CUDA when
+    #                    available and falls back to CPU otherwise.
     scenedetect_algorithm: str = "adaptive"
     # ffmpeg_scdet-only: the `threshold` argument passed to ffmpeg's scdet
     # filter. ffmpeg's scale is 0-100 (mean absolute frame difference); 10
     # is the upstream default. Higher = fewer cuts.
     scenedetect_ffmpeg_threshold: float = 10.0
+    # transnetv2-only: probability above which the model's per-frame "is a
+    # cut" prediction is treated as an actual shot boundary. The 0.5 default
+    # matches the paper's threshold and works for most content; lower it
+    # (e.g. 0.3) for material with subtle dissolves where shots blend more
+    # gradually.
+    scenedetect_transnet_threshold: float = 0.5
+    # transnetv2-only: optional filesystem path to a `transnetv2-pytorch-
+    # weights.pth` file. Leave empty to let the installed package's bundled
+    # / auto-resolved weights be used. Operators who pin the weights to a
+    # known location (read-only mount, vendored asset) set this; everyone
+    # else can ignore it.
+    scenedetect_transnet_weights: str = ""
     # AdaptiveDetector-only: how much the rolling content-value average must
     # exceed the window mean to trigger a cut. Higher = fewer cuts. The
     # PySceneDetect default of 3.0 is a good general baseline.

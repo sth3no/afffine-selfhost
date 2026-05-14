@@ -23,6 +23,7 @@ from src.pipeline.video_analysis import (
     _ExtractedFrame,
     _FrameCaption,
     _cuts_to_scene_midpoints,
+    _detect_scene_timestamps_transnetv2,
     _merge_dedup_timestamps,
     _SCDET_TIME_RE,
     _SILENCE_END_RE,
@@ -453,3 +454,188 @@ def test_cuts_to_scene_midpoints_drops_cuts_outside_duration():
 
 def test_cuts_to_scene_midpoints_zero_duration_returns_empty():
     assert _cuts_to_scene_midpoints([1.0, 2.0], duration=0.0) == []
+
+
+# ── TransNetV2 detector ─────────────────────────────────────────────
+
+
+def test_transnetv2_returns_empty_when_package_missing(tmp_path, monkeypatch):
+    """The optional dep isn't a hard requirement; missing it must NOT
+    crash — just log a warning and return [] so the orchestrator falls
+    through to the fixed-interval path."""
+    import builtins
+
+    real_import = builtins.__import__
+
+    def _fake_import(name, *args, **kwargs):
+        if name in ("transnetv2_pytorch", "torch"):
+            raise ImportError(f"simulated missing dependency: {name}")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", _fake_import)
+    assert _detect_scene_timestamps_transnetv2(tmp_path / "video.mp4") == []
+
+
+def test_transnetv2_returns_empty_when_high_level_api_missing(tmp_path, monkeypatch):
+    """If the operator installed a TransNetV2 build that doesn't ship
+    `detect_scenes` (e.g. the upstream `inference-pytorch` repo's bare
+    model), we want a clean warning + empty list, not an AttributeError
+    crashing the pipeline."""
+    fake_torch = MagicMock()
+    fake_torch.cuda.is_available.return_value = False
+
+    class _BareModel:
+        def eval(self):
+            return self
+
+        def cuda(self):
+            return self
+
+    fake_pkg = MagicMock()
+    fake_pkg.TransNetV2 = _BareModel
+
+    monkeypatch.setitem(__import__("sys").modules, "torch", fake_torch)
+    monkeypatch.setitem(__import__("sys").modules, "transnetv2_pytorch", fake_pkg)
+
+    assert _detect_scene_timestamps_transnetv2(tmp_path / "video.mp4") == []
+
+
+def test_transnetv2_returns_scene_midpoints_from_detect_scenes(tmp_path, monkeypatch):
+    """When the high-level API is present, scenes with (start_time, end_time)
+    convert to their midpoints. Verifies both the call shape (threshold is
+    passed) and the conversion logic."""
+    fake_torch = MagicMock()
+    fake_torch.cuda.is_available.return_value = False
+    # Context manager protocol for `with torch.no_grad()`.
+    no_grad_cm = MagicMock()
+    no_grad_cm.__enter__ = MagicMock(return_value=None)
+    no_grad_cm.__exit__ = MagicMock(return_value=False)
+    fake_torch.no_grad = MagicMock(return_value=no_grad_cm)
+
+    detect_scenes = MagicMock(return_value=[
+        {"shot_id": 0, "start_time": 0.0, "end_time": 10.0},
+        {"shot_id": 1, "start_time": 10.0, "end_time": 30.0},
+        {"shot_id": 2, "start_time": 30.0, "end_time": 50.0},
+    ])
+
+    class _Model:
+        def __init__(self) -> None:
+            self.detect_scenes = detect_scenes
+
+        def eval(self):
+            return self
+
+        def cuda(self):  # never called: cuda.is_available() → False
+            return self
+
+    fake_pkg = MagicMock()
+    fake_pkg.TransNetV2 = _Model
+
+    monkeypatch.setitem(__import__("sys").modules, "torch", fake_torch)
+    monkeypatch.setitem(__import__("sys").modules, "transnetv2_pytorch", fake_pkg)
+    monkeypatch.setattr(
+        "src.pipeline.video_analysis.settings.scenedetect_transnet_threshold",
+        0.42,
+    )
+
+    video = tmp_path / "video.mp4"
+    video.write_bytes(b"fake mp4")
+
+    midpoints = _detect_scene_timestamps_transnetv2(video)
+
+    assert midpoints == [5.0, 20.0, 40.0]
+    # Threshold from settings propagates into the model call.
+    detect_scenes.assert_called_once()
+    args, kwargs = detect_scenes.call_args
+    assert kwargs.get("threshold") == 0.42 or (len(args) >= 2 and args[1] == 0.42)
+
+
+def test_transnetv2_swallows_inference_exception(tmp_path, monkeypatch):
+    """Any error during model load / inference must NOT crash the pipeline —
+    it returns [] so the caller falls through to fixed-interval sampling."""
+    fake_torch = MagicMock()
+    fake_torch.cuda.is_available.return_value = False
+
+    class _Boom:
+        def __init__(self) -> None:
+            raise RuntimeError("simulated model load failure")
+
+    fake_pkg = MagicMock()
+    fake_pkg.TransNetV2 = _Boom
+
+    monkeypatch.setitem(__import__("sys").modules, "torch", fake_torch)
+    monkeypatch.setitem(__import__("sys").modules, "transnetv2_pytorch", fake_pkg)
+
+    assert _detect_scene_timestamps_transnetv2(tmp_path / "video.mp4") == []
+
+
+def test_transnetv2_skips_malformed_scene_entries(tmp_path, monkeypatch):
+    """If the upstream lib changes its scene dict shape (missing key /
+    wrong type), each bad entry is skipped silently rather than poisoning
+    the candidate timestamp list with NaNs or KeyErrors."""
+    fake_torch = MagicMock()
+    fake_torch.cuda.is_available.return_value = False
+    no_grad_cm = MagicMock()
+    no_grad_cm.__enter__ = MagicMock(return_value=None)
+    no_grad_cm.__exit__ = MagicMock(return_value=False)
+    fake_torch.no_grad = MagicMock(return_value=no_grad_cm)
+
+    detect_scenes = MagicMock(return_value=[
+        {"shot_id": 0, "start_time": 0.0, "end_time": 10.0},   # valid
+        {"shot_id": 1, "start_time": "bogus"},                  # missing end + wrong type
+        {"shot_id": 2, "start_time": 30.0, "end_time": 50.0},  # valid
+        "not a dict",                                            # totally malformed
+    ])
+
+    class _Model:
+        def __init__(self) -> None:
+            self.detect_scenes = detect_scenes
+
+        def eval(self):
+            return self
+
+        def cuda(self):
+            return self
+
+    fake_pkg = MagicMock()
+    fake_pkg.TransNetV2 = _Model
+
+    monkeypatch.setitem(__import__("sys").modules, "torch", fake_torch)
+    monkeypatch.setitem(__import__("sys").modules, "transnetv2_pytorch", fake_pkg)
+
+    midpoints = _detect_scene_timestamps_transnetv2(tmp_path / "video.mp4")
+    assert midpoints == [5.0, 40.0]
+
+
+def test_detect_and_extract_frames_dispatches_to_transnetv2(tmp_path, monkeypatch):
+    """When SCENEDETECT_ALGORITHM=transnetv2, the dispatcher in
+    _detect_and_extract_frames routes to the transnetv2 detector — not to
+    PySceneDetect or ffmpeg scdet. Verifies the wiring without touching
+    the real model."""
+    from src.pipeline import video_analysis as va
+
+    called = {"pyscenedetect": 0, "ffmpeg": 0, "transnetv2": 0}
+
+    def _pyscenedetect(path):
+        called["pyscenedetect"] += 1
+        return []
+
+    def _ffmpeg(path):
+        called["ffmpeg"] += 1
+        return []
+
+    def _transnetv2(path):
+        called["transnetv2"] += 1
+        return [10.0, 30.0]
+
+    monkeypatch.setattr(va, "_detect_scene_timestamps_pyscenedetect", _pyscenedetect)
+    monkeypatch.setattr(va, "_detect_scene_timestamps_ffmpeg", _ffmpeg)
+    monkeypatch.setattr(va, "_detect_scene_timestamps_transnetv2", _transnetv2)
+    # Don't actually extract frames — just verify the detector dispatch.
+    monkeypatch.setattr(va, "_ffmpeg_extract_frame", lambda *a, **k: False)
+    monkeypatch.setattr(va.settings, "scenedetect_algorithm", "transnetv2")
+    monkeypatch.setattr(va.settings, "frame_silence_cuts_enabled", False)
+
+    va._detect_and_extract_frames(tmp_path / "video.mp4", tmp_path, max_frames=4)
+
+    assert called == {"pyscenedetect": 0, "ffmpeg": 0, "transnetv2": 1}

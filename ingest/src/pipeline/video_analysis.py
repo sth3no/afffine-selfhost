@@ -241,6 +241,8 @@ def _detect_and_extract_frames(
     algorithm = settings.scenedetect_algorithm.lower().strip()
     if algorithm == "ffmpeg_scdet":
         scene_timestamps = _detect_scene_timestamps_ffmpeg(video_path)
+    elif algorithm == "transnetv2":
+        scene_timestamps = _detect_scene_timestamps_transnetv2(video_path)
     else:
         scene_timestamps = _detect_scene_timestamps_pyscenedetect(video_path)
 
@@ -378,6 +380,77 @@ def _detect_scene_timestamps_ffmpeg(video_path: Path) -> list[float]:
         # Fall back to cut times themselves (rough but better than nothing).
         return list(cuts)
     return _cuts_to_scene_midpoints(cuts, duration)
+
+
+def _detect_scene_timestamps_transnetv2(video_path: Path) -> list[float]:
+    """TransNetV2 path. CNN+LSTM shot-boundary detector — materially better
+    on slow dissolves than PySceneDetect or ffmpeg `scdet`. Returns scene
+    MIDPOINTS computed from the model's per-scene (start, end) ranges.
+
+    Optional dependency. When `transnetv2-pytorch` is not installed, returns
+    [] so the caller falls back to the fixed-interval sampling path (same
+    behavior as PySceneDetect missing — operator gets a warning, never a
+    crash).
+
+    Auto-selects CUDA when `torch.cuda.is_available()`, otherwise CPU. The
+    7-layer model is small enough that CPU inference is tractable for short
+    clips even though GPU is recommended for video > ~5 minutes.
+    """
+    try:
+        import torch
+        from transnetv2_pytorch import TransNetV2
+    except ImportError as e:
+        log.warning(
+            "transnetv2-pytorch not installed; install via "
+            "`pip install transnetv2-pytorch`. Returning empty so caller "
+            "falls back to the fixed-interval path: %s",
+            e,
+        )
+        return []
+
+    weights_path = (settings.scenedetect_transnet_weights or "").strip() or None
+    threshold = settings.scenedetect_transnet_threshold
+
+    try:
+        model = TransNetV2()
+        if weights_path:
+            # Operator pinned a specific weights file (vendored asset or
+            # read-only mount). Load it explicitly. Otherwise we trust the
+            # package to resolve / download its own weights.
+            state = torch.load(weights_path, map_location="cpu")
+            model.load_state_dict(state)
+        if torch.cuda.is_available():
+            model = model.cuda()
+        model.eval()
+
+        # The maintained `transnetv2-pytorch` PyPI package exposes a
+        # `detect_scenes(video_path, threshold=...)` convenience method
+        # that handles frame decoding + 100-frame chunking internally.
+        # The upstream `soCzech/TransNetV2` repo's `inference-pytorch`
+        # only ships the raw model forward — operators using that path
+        # get a clear warning and graceful fallback rather than a crash.
+        if not hasattr(model, "detect_scenes"):
+            log.warning(
+                "transnetv2 model has no detect_scenes() method — use the "
+                "maintained PyPI package (`pip install transnetv2-pytorch`). "
+                "Returning empty."
+            )
+            return []
+        with torch.no_grad():
+            scenes = model.detect_scenes(str(video_path), threshold=threshold)
+    except Exception as e:  # noqa: BLE001 — best-effort
+        log.warning("transnetv2 detection failed: %s", e)
+        return []
+
+    midpoints: list[float] = []
+    for scene in scenes or []:
+        try:
+            start = float(scene["start_time"])
+            end = float(scene["end_time"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        midpoints.append((start + end) / 2.0)
+    return midpoints
 
 
 def _fallback_fixed_interval_frames(
