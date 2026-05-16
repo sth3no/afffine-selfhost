@@ -1,0 +1,110 @@
+{
+  "name": "affine-mcp-server",
+  "version": "2.0.0",
+  "private": false,
+  "type": "module",
+  "description": "Model Context Protocol server for AFFiNE - enables AI assistants to interact with AFFiNE workspaces, documents, and collaboration features.",
+  "author": "dawncr0w",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/dawncr0w/affine-mcp-server.git"
+  },
+  "bugs": {
+    "url": "https://github.com/dawncr0w/affine-mcp-server/issues"
+  },
+  "homepage": "https://github.com/dawncr0w/affine-mcp-server#readme",
+  "keywords": [
+    "mcp",
+    "affine",
+    "model-context-protocol",
+    "ai",
+    "claude",
+    "knowledge-base"
+  ],
+  "main": "dist/index.js",
+  "bin": {
+    "affine-mcp": "bin/affine-mcp"
+  },
+  "scripts": {
+    "clean": "node -e \"require('fs').rmSync('dist',{ recursive: true, force: true })\"",
+    "build": "npm run clean && tsc -p tsconfig.json",
+    "dev": "tsx watch src/index.ts",
+    "start": "node dist/index.js",
+    "start:http": "MCP_TRANSPORT=http node dist/index.js",
+    "test": "npm run test:tool-manifest",
+    "test:cli-version": "node tests/test-cli-version.mjs",
+    "test:cli-commands": "node tests/test-cli-commands.mjs",
+    "test:cli-live": "node tests/test-cli-live.mjs",
+    "test:tool-manifest": "node scripts/verify-tool-manifest.mjs",
+    "test:tool-filtering": "node tests/test-tool-filtering.mjs",
+    "test:comprehensive": "bash tests/run-comprehensive.sh",
+    "test:comprehensive:raw": "node test-comprehensive.mjs",
+    "test:e2e": "bash tests/run-e2e.sh",
+    "test:db-create": "node tests/test-database-creation.mjs",
+    "test:db-cells": "node tests/test-database-cells.mjs",
+    "test:db-ui-rows": "node tests/test-database-ui-rows.mjs",
+    "test:db-schema": "node tests/test-database-schema.mjs",
+    "test:data-view": "node tests/test-data-view.mjs",
+    "test:doc-discovery": "node tests/test-doc-discovery.mjs",
+    "test:find-doc-by-title": "node tests/test-find-doc-by-title.mjs",
+    "test:create-placement": "node tests/test-create-placement.mjs",
+    "test:surface-elements": "node tests/test-surface-elements.mjs",
+    "test:surface-element-gating": "node scripts/verify-surface-element-gating.mjs",
+    "test:edgeless-seed": "node tests/test-edgeless-canvas-setup.mjs",
+    "test:edgeless-ui": "npx playwright test tests/playwright/verify-edgeless-canvas.pw.ts --config tests/playwright/playwright.config.ts",
+    "test:capabilities-fidelity": "node tests/test-capabilities-fidelity.mjs",
+    "test:native-template": "node tests/test-native-template-instantiation.mjs",
+    "test:data-view-ui": "npx playwright test tests/playwright/verify-data-view.pw.ts --config tests/playwright/playwright.config.ts",
+    "test:bearer": "node tests/test-bearer-auth.mjs",
+    "test:http-email-password": "node tests/test-http-email-password.mjs",
+    "test:http-bearer": "node tests/test-http-bearer.mjs",
+    "test:oauth-http": "node tests/test-oauth-http.mjs",
+    "test:organize": "node tests/test-organize-tools.mjs",
+    "test:supporting-tools": "node tests/test-supporting-tools.mjs",
+    "test:tag-visibility": "node tests/test-tag-visibility.mjs",
+    "test:markdown-roundtrip": "node tests/test-markdown-roundtrip.mjs",
+    "test:markdown-rich-text-import": "node tests/test-markdown-rich-text-import.mjs",
+    "test:playwright": "npx playwright test --config tests/playwright/playwright.config.ts",
+    "pack:check": "npm pack --dry-run",
+    "ci": "npm run build && npm run test:tool-manifest && npm run pack:check",
+    "prepublishOnly": "npm run ci"
+  },
+  "files": [
+    "bin",
+    "dist",
+    "docs",
+    "README.md",
+    "tool-manifest.json",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.17.2",
+    "cors": "^2.8.6",
+    "express": "^5.2.1",
+    "form-data": "^4.0.4",
+    "jose": "^6.2.1",
+    "fractional-indexing": "^3.2.0",
+    "markdown-it": "^14.1.0",
+    "node-fetch": "^3.3.2",
+    "socket.io-client": "^4.8.1",
+    "undici": "^8.0.2",
+    "yjs": "^13.6.27",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.50.0",
+    "@types/cors": "^2.8.19",
+    "@types/express": "^5.0.6",
+    "@types/markdown-it": "^14.1.2",
+    "@types/node": "^25.2.3",
+    "tsx": "^4.16.2",
+    "typescript": "^6.0.2"
+  }
+}
