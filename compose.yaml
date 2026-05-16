@@ -180,6 +180,63 @@ services:
       - affine_net
       - shared_net  # so n8n (and other stacks) can reach the proxy too
 
+  # Full AFFiNE MCP server — the DAWNCR0W/affine-mcp-server fork, staged into
+  # ./mcp-server as a build context. The live contribution clone lives
+  # separately at ../dawncrow/affine-mcp-server (that's the OSS-PR workspace;
+  # this copy is the deployable one — re-sync it when fork code changes).
+  #
+  # This is the COMPREHENSIVE surface — 85 tools across docs, edgeless canvas,
+  # databases, templates, tags, collections, workspace/auth. It runs ALONGSIDE
+  # mcp_ext (the lean custom proxy), not as a replacement — mcp_agent still
+  # talks to mcp_ext. Point each client at whichever endpoint it needs.
+  #
+  # HTTP bearer mode: clients hit http://<host>:${MCP_SERVER_PORT}/mcp with
+  #   Authorization: Bearer <AFFINE_MCP_HTTP_TOKEN>
+  mcp_server:
+    build:
+      context: ./mcp-server
+      dockerfile: Dockerfile
+    image: affine-mcp-server:local
+    # Built locally — never pull from a registry (the :local tag exists nowhere).
+    pull_policy: build
+    container_name: affine_mcp_server
+    depends_on:
+      affine:
+        condition: service_healthy
+    # Host port for the MCP HTTP endpoint. 3100 is mcp_ext, 3200 is ingest —
+    # this one uses 3300. Set MCP_SERVER_BIND=127.0.0.1 to restrict to localhost.
+    ports:
+      - '${MCP_SERVER_BIND:-0.0.0.0}:${MCP_SERVER_PORT:-3300}:3000'
+    environment:
+      # Transport — HTTP, so it's reachable like mcp_ext.
+      - MCP_TRANSPORT=http
+      - AFFINE_MCP_HTTP_HOST=0.0.0.0
+      - PORT=3000
+      # AFFiNE connection over the internal docker network.
+      - AFFINE_BASE_URL=http://affine:3010
+      - AFFINE_API_TOKEN=${AFFINE_ACCESS_TOKEN:-}
+      - AFFINE_WORKSPACE_ID=${AFFINE_WORKSPACE_ID:-}
+      # Bearer auth — clients must send this shared secret on every request.
+      # REQUIRED: set AFFINE_MCP_HTTP_TOKEN in the stack env to a strong
+      # random string. With it blank the server has no /mcp access control.
+      - AFFINE_MCP_AUTH_MODE=bearer
+      - AFFINE_MCP_HTTP_TOKEN=${AFFINE_MCP_HTTP_TOKEN:-}
+      # Tool surface — `full` exposes ALL 85 tools, including destructive
+      # (delete_*) and admin operations. Narrow it per deployment via
+      # AFFINE_MCP_TOOL_PROFILE (authoring / core / read_only) if desired.
+      - AFFINE_TOOL_PROFILE=${AFFINE_MCP_TOOL_PROFILE:-full}
+      - TZ=${TZ:-UTC}
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:3000/healthz', r => process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    networks:
+      - affine_net
+      - shared_net  # reachable from n8n / laptop MCP clients
+
   mcp_agent:
     build:
       context: ./mcp-agent
