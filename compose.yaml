@@ -498,6 +498,11 @@ services:
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
       - MAX_TRANSCRIPT_MIN=${MAX_TRANSCRIPT_MIN:-30}
       - REORG_THRESHOLD_DEFAULT=${REORG_THRESHOLD_DEFAULT:-15}
+      # Hard per-capture ceiling — a hung extraction is failed (with the
+      # normal retry backoff) instead of blocking a worker slot forever.
+      - CAPTURE_TIMEOUT_SEC=${CAPTURE_TIMEOUT_SEC:-1800}
+      # Number of concurrent worker loops pumping the captures queue.
+      - WORKER_CONCURRENCY=${WORKER_CONCURRENCY:-2}
       - TZ=${TZ:-UTC}
       # Phase 12.5 fix #7: residential-proxy support for outbound calls
       # to youtube-transcript-api + the yt-dlp metadata fetcher running
