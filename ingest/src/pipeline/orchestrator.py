@@ -237,16 +237,15 @@ async def process_capture(
     log.info("transition", extra={"step": "done"})
 
 
-async def _replace_doc_body_templated(
+async def build_doc_blocks(
     *,
-    filer: Filer,
-    doc_id: str,
+    mcp: Any,
     rendered: TemplatedOutput | None,
     keyframes: list[dict[str, Any]],
     url: str | None,
     extracted: Extracted | None = None,
-) -> None:
-    """Delete the stub block and append the templated layout:
+) -> list[dict[str, Any]]:
+    """Assemble the templated doc layout as a block list:
         [embed url]
         [callout: lede]           (when rendered.lede is non-empty)
         ## Summary
@@ -261,12 +260,10 @@ async def _replace_doc_body_templated(
 
     The transcript appendix is the user's primary signal — LLM summaries
     are useful but the raw source must be preserved so nothing is lost.
-    """
-    try:
-        await _delete_stub_block(filer=filer, doc_id=doc_id)
-    except Exception as e:  # noqa: BLE001
-        log.warning("stub block cleanup failed (continuing): %s", e)
 
+    Shared by the orchestrator (initial render) and the /rerender endpoint
+    so the two layouts can't drift apart.
+    """
     blocks: list[dict[str, Any]] = []
     if url:
         blocks.append(url_embed_block(url))
@@ -287,11 +284,11 @@ async def _replace_doc_body_templated(
         if rendered.summary_md:
             blocks.append({"type": "paragraph", "style": "h2", "text": "Summary"})
             blocks.extend(
-                await markdown_to_blocks(rendered.summary_md, keyframes=keyframes, mcp_client=filer._mcp)
+                await markdown_to_blocks(rendered.summary_md, keyframes=keyframes, mcp_client=mcp)
             )
         if rendered.body_md:
             blocks.extend(
-                await markdown_to_blocks(rendered.body_md, keyframes=keyframes, mcp_client=filer._mcp)
+                await markdown_to_blocks(rendered.body_md, keyframes=keyframes, mcp_client=mcp)
             )
 
     # Phase 15 fallback: when keyframes are available but body_md referenced
@@ -323,7 +320,7 @@ async def _replace_doc_body_templated(
         if transcript_md.strip():
             blocks.append({"type": "paragraph", "style": "h2", "text": "Transcript"})
             blocks.extend(
-                await markdown_to_blocks(transcript_md, keyframes=keyframes, mcp_client=filer._mcp)
+                await markdown_to_blocks(transcript_md, keyframes=keyframes, mcp_client=mcp)
             )
 
     if url:
@@ -336,6 +333,31 @@ async def _replace_doc_body_templated(
     if not blocks:
         blocks.append({"type": "paragraph", "style": "text", "text": "(no rendered content)"})
 
+    return blocks
+
+
+async def _replace_doc_body_templated(
+    *,
+    filer: Filer,
+    doc_id: str,
+    rendered: TemplatedOutput | None,
+    keyframes: list[dict[str, Any]],
+    url: str | None,
+    extracted: Extracted | None = None,
+) -> None:
+    """Delete the stub block and append the templated layout (build_doc_blocks)."""
+    try:
+        await _delete_stub_block(filer=filer, doc_id=doc_id)
+    except Exception as e:  # noqa: BLE001
+        log.warning("stub block cleanup failed (continuing): %s", e)
+
+    blocks = await build_doc_blocks(
+        mcp=filer._mcp,
+        rendered=rendered,
+        keyframes=keyframes,
+        url=url,
+        extracted=extracted,
+    )
     await filer._mcp.append_blocks(doc_id, blocks)
 
 

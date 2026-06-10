@@ -808,80 +808,21 @@ async def rerender_capture(
             output_raw=rendered.body_md,
         )
 
-        # Replace blocks in the AFFiNE doc.
+        # Replace blocks in the AFFiNE doc. Layout assembly is shared with
+        # the orchestrator (build_doc_blocks) so the two can't drift apart.
         if app_state.mcp is None or row.doc_id is None:
             log.warning(
                 "rerender: MCP unavailable or doc_id missing; skipped block update"
             )
         else:
-            from src.pipeline.markdown_render import count_keyframe_refs, markdown_to_blocks
-            from src.pipeline.orchestrator import url_embed_block
-            blocks: list[dict] = []
-            if row.url:
-                blocks.append(url_embed_block(row.url))
-            if rendered.lede and rendered.lede.strip():
-                blocks.append({"type": "callout", "text": rendered.lede.strip()})
-            if rendered.summary_md:
-                blocks.append({"type": "paragraph", "style": "h2", "text": "Summary"})
-                blocks.extend(
-                    await markdown_to_blocks(
-                        rendered.summary_md,
-                        keyframes=keyframes,
-                        mcp_client=app_state.mcp,
-                    )
-                )
-            if rendered.body_md:
-                blocks.extend(
-                    await markdown_to_blocks(
-                        rendered.body_md,
-                        keyframes=keyframes,
-                        mcp_client=app_state.mcp,
-                    )
-                )
-
-            # Phase 15 fallback: append ## Keyframes when body_md referenced
-            # zero kf:N refs out of N available keyframes. Mirrors the
-            # orchestrator's behaviour in _replace_doc_body_templated.
-            if (
-                keyframes
-                and rendered.body_md
-                and not count_keyframe_refs(rendered.body_md)
-            ):
-                blocks.append({"type": "paragraph", "style": "h2", "text": "Keyframes"})
-                for kf in keyframes:
-                    source_id = kf.get("blob_source_id")
-                    if not source_id:
-                        continue
-                    blocks.append({
-                        "type": "image",
-                        "sourceId": source_id,
-                        "caption": kf.get("caption") or "",
-                    })
-
-            # Always append the raw transcript/body as a separate section so
-            # the source signal is preserved even when the template's body_md
-            # is a compressed summary. Strip extractor metadata first so we
-            # don't get duplicate Title/Source/## Transcript blocks.
-            if extracted.body_md and extracted.body_md.strip():
-                from src.pipeline.orchestrator import strip_extractor_metadata
-                transcript_md = strip_extractor_metadata(extracted.body_md)
-                if transcript_md.strip():
-                    blocks.append({"type": "paragraph", "style": "h2", "text": "Transcript"})
-                    blocks.extend(
-                        await markdown_to_blocks(
-                            transcript_md,
-                            keyframes=keyframes,
-                            mcp_client=app_state.mcp,
-                        )
-                    )
-            if row.url:
-                blocks.append({
-                    "type": "paragraph", "style": "text",
-                    "text": [
-                        {"text": "Source: "},
-                        {"text": row.url, "italic": True, "link": row.url},
-                    ],
-                })
+            from src.pipeline.orchestrator import build_doc_blocks
+            blocks = await build_doc_blocks(
+                mcp=app_state.mcp,
+                rendered=rendered,
+                keyframes=keyframes,
+                url=row.url,
+                extracted=extracted,
+            )
             # Naive: append blocks after existing ones (v2 will diff/replace).
             await app_state.mcp.append_blocks(row.doc_id, blocks)
 

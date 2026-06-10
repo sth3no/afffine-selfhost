@@ -1,6 +1,14 @@
 # Ingest Service — Improvement Proposal
 
-**Status:** Proposal · **Date:** 2026-06-10 · **Scope:** `ingest/` only
+**Status:** Largely implemented (same day) · **Date:** 2026-06-10 · **Scope:** `ingest/` only
+
+> **Implementation status:** items #1–#7 and #10–#12 are implemented on this
+> branch, plus the shared-layout half of #8 (`build_doc_blocks`) and the
+> folder-creation lock + worker concurrency from #9. Still open:
+> rerender replace-semantics (#8, still append-only), per-query pool
+> acquisition during long pipelines (#9, a connection is still held for the
+> capture's duration), cost accounting (#13), and the P3 hygiene items
+> (topics.yaml hot-reload, api.py router split).
 
 A review of the ingest service as implemented (post Phase 16). The pipeline
 works end-to-end; the items below are reliability gaps, cost leaks, and API
