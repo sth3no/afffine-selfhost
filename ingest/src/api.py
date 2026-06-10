@@ -61,7 +61,7 @@ class AppState:
     filer: Filer | None = None
     router: PlatformRouter | None = None
     worker: Worker | None = None
-    worker_task: asyncio.Task | None = None
+    worker_tasks: list[asyncio.Task] = []
     templates_repo: TemplatesRepository | None = None
 
 
@@ -156,20 +156,24 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
             repo_factory=lambda conn: CaptureRepository(conn),
             process_fn=_process_fn,
             platform_for=_platform_for,
-            topics=load_topics(),
+            topics=topics,
+            capture_timeout_sec=float(settings.capture_timeout_sec),
         )
-        app_state.worker_task = asyncio.create_task(app_state.worker._loop())
+        n_loops = max(1, settings.worker_concurrency)
+        app_state.worker_tasks = [
+            asyncio.create_task(app_state.worker._loop()) for _ in range(n_loops)
+        ]
 
     yield
 
-    # Shutdown: stop worker first, then close pool and MCP.
+    # Shutdown: stop worker loops first, then close pool and MCP.
     if app_state.worker is not None:
         app_state.worker.stop()
-    if app_state.worker_task is not None:
-        try:
-            await asyncio.wait_for(app_state.worker_task, timeout=5.0)
-        except asyncio.TimeoutError:
-            app_state.worker_task.cancel()
+    if app_state.worker_tasks:
+        _, pending = await asyncio.wait(app_state.worker_tasks, timeout=5.0)
+        for t in pending:
+            t.cancel()
+        app_state.worker_tasks = []
     if app_state.pool is not None:
         await app_state.pool.close()
     if app_state.mcp is not None:
@@ -232,17 +236,28 @@ def get_platform_router() -> PlatformRouter:
 
 
 @app.get("/health")
-async def health() -> dict:
+async def health() -> JSONResponse:
+    """Liveness check. Returns 503 when the worker was started but its loop
+    has died — the compose healthcheck tests for HTTP 200, so a dead worker
+    now gets the container restarted instead of silently queueing captures
+    forever. When no worker was started at all (dev mode without a DB pool),
+    the service is still "ok" — there is nothing to pump."""
     queue_depth = 0
     if app_state.pool is not None:
         async with app_state.pool.acquire() as conn:
             queue_depth = await CaptureRepository(conn).count_active()
-    return {
-        "ok": True,
-        "queue_depth": queue_depth,
-        "worker_alive": bool(app_state.worker and app_state.worker.alive),
-        "version": settings.version,
-    }
+    worker_started = app_state.worker is not None
+    worker_alive = bool(app_state.worker and app_state.worker.alive)
+    ok = worker_alive or not worker_started
+    return JSONResponse(
+        status_code=200 if ok else 503,
+        content={
+            "ok": ok,
+            "queue_depth": queue_depth,
+            "worker_alive": worker_alive,
+            "version": settings.version,
+        },
+    )
 
 
 @app.get("/diagnostic/logging")
@@ -405,6 +420,10 @@ async def capture(
         topic_path="/".join(initial_path),
     )
     await repo.insert(row)
+
+    # Skip the worker's idle poll delay — pickup is immediate.
+    if app_state.worker is not None:
+        app_state.worker.wake()
 
     return _row_to_response(row, router)
 

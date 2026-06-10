@@ -148,6 +148,156 @@ async def test_worker_handles_failure_with_backoff():
 
 
 @pytest.mark.asyncio
+async def test_worker_survives_claim_failure():
+    """A transient DB error during claim (e.g. Postgres restart) must not
+    kill the loop — the worker retries after the poll interval."""
+    repo = AsyncMock()
+    calls = [0]
+
+    async def _claim(*args, **kwargs):
+        calls[0] += 1
+        if calls[0] == 1:
+            raise ConnectionError("db restarting")
+        if calls[0] == 2:
+            return _row()
+        return None
+
+    repo.claim_next_queued.side_effect = _claim
+    repo.claim_due_failed.return_value = None
+
+    process_fn = AsyncMock()
+    w = Worker(
+        pool=_make_pool(),
+        repo_factory=lambda conn: repo,
+        process_fn=process_fn,
+        platform_for=lambda row: Platform(
+            id="article", group="Articles", folder_name="Web",
+            hosts=["*"], extractor="markitdown"
+        ),
+        topics=TopicsConfig(platforms=[Platform(
+            id="article", group="Articles", folder_name="Web",
+            hosts=["*"], extractor="markitdown"
+        )]),
+        poll_interval_sec=0.01,
+    )
+    task = asyncio.create_task(w._loop())
+    await asyncio.sleep(0.1)
+    assert w.alive, "loop must survive the claim failure"
+    w.stop()
+    await task
+
+    process_fn.assert_awaited_once()  # row claimed after the failed attempt
+
+
+@pytest.mark.asyncio
+async def test_worker_times_out_hung_capture():
+    """A capture that exceeds capture_timeout_sec is failed with backoff
+    instead of blocking the worker slot forever."""
+    repo = AsyncMock()
+    repo.claim_next_queued.side_effect = _exhausted_returns_none([_row()])
+    repo.claim_due_failed.return_value = None
+
+    async def _hangs(*args, **kwargs):
+        await asyncio.sleep(60)
+
+    w = Worker(
+        pool=_make_pool(),
+        repo_factory=lambda conn: repo,
+        process_fn=_hangs,
+        platform_for=lambda row: Platform(
+            id="article", group="Articles", folder_name="Web",
+            hosts=["*"], extractor="markitdown"
+        ),
+        topics=TopicsConfig(platforms=[Platform(
+            id="article", group="Articles", folder_name="Web",
+            hosts=["*"], extractor="markitdown"
+        )]),
+        poll_interval_sec=0.01,
+        capture_timeout_sec=0.05,
+    )
+    task = asyncio.create_task(w._loop())
+    await asyncio.sleep(0.2)
+    w.stop()
+    await task
+
+    repo.mark_failed.assert_awaited_once()
+    kwargs = repo.mark_failed.call_args.kwargs
+    assert "timed out" in kwargs["error"]
+    assert kwargs["next_attempt_at"] is not None  # retryable, not permanent
+
+
+@pytest.mark.asyncio
+async def test_worker_wake_skips_idle_poll():
+    """wake() interrupts the idle sleep so a fresh capture is claimed
+    immediately instead of after up to poll_interval_sec."""
+    repo = AsyncMock()
+    rows = []
+
+    async def _claim(*args, **kwargs):
+        return rows.pop(0) if rows else None
+
+    repo.claim_next_queued.side_effect = _claim
+    repo.claim_due_failed.return_value = None
+
+    process_fn = AsyncMock()
+    w = Worker(
+        pool=_make_pool(),
+        repo_factory=lambda conn: repo,
+        process_fn=process_fn,
+        platform_for=lambda row: Platform(
+            id="article", group="Articles", folder_name="Web",
+            hosts=["*"], extractor="markitdown"
+        ),
+        topics=TopicsConfig(platforms=[Platform(
+            id="article", group="Articles", folder_name="Web",
+            hosts=["*"], extractor="markitdown"
+        )]),
+        poll_interval_sec=30.0,  # poll alone would never fire within the test
+    )
+    task = asyncio.create_task(w._loop())
+    await asyncio.sleep(0.05)  # worker is now idle, waiting up to 30s
+
+    rows.append(_row())
+    w.wake()
+    await asyncio.sleep(0.05)
+    w.stop()
+    w.wake()  # unblock the idle wait so stop is seen immediately
+    await asyncio.wait_for(task, timeout=1.0)
+
+    process_fn.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_worker_error_string_is_truncated():
+    repo = AsyncMock()
+    repo.claim_next_queued.side_effect = _exhausted_returns_none([_row()])
+    repo.claim_due_failed.return_value = None
+
+    process_fn = AsyncMock(side_effect=RuntimeError("x" * 10_000))
+    w = Worker(
+        pool=_make_pool(),
+        repo_factory=lambda conn: repo,
+        process_fn=process_fn,
+        platform_for=lambda row: Platform(
+            id="article", group="Articles", folder_name="Web",
+            hosts=["*"], extractor="markitdown"
+        ),
+        topics=TopicsConfig(platforms=[Platform(
+            id="article", group="Articles", folder_name="Web",
+            hosts=["*"], extractor="markitdown"
+        )]),
+        poll_interval_sec=0.01,
+    )
+    task = asyncio.create_task(w._loop())
+    await asyncio.sleep(0.05)
+    w.stop()
+    await task
+
+    kwargs = repo.mark_failed.call_args.kwargs
+    assert len(kwargs["error"]) <= 2000
+
+
+@pytest.mark.asyncio
 async def test_worker_third_failure_marks_permanent():
     repo = AsyncMock()
     repo.claim_next_queued.side_effect = _exhausted_returns_none([_row(retry_count=3)])

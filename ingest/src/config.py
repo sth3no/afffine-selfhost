@@ -46,6 +46,14 @@ class Settings(BaseSettings):
     # outliers (e.g. a 3-hour podcast transcript). Beyond this we
     # truncate and emit a note in the rendered doc.
     max_chunks_per_capture: int = 16
+    # Hard per-capture ceiling. A hung extraction (stalled stream, wedged
+    # subprocess) otherwise blocks a worker slot forever. 30 min comfortably
+    # covers the worst legitimate case (long podcast → chunked render).
+    capture_timeout_sec: int = 1800
+    # Number of concurrent worker loops pumping the captures queue. The DB
+    # claim is FOR UPDATE SKIP LOCKED-safe; folder creation is serialized
+    # in-process by the Filer's lock.
+    worker_concurrency: int = 2
     embedding_model: str = "text-embedding-3-small"
     confidence_floor: float = 0.6
     similarity_threshold: float = 0.85

@@ -231,10 +231,15 @@ class CaptureRepository:
         )
 
     async def count_active(self) -> int:
+        """Rows the worker still owes work on. Permanently-failed rows
+        (status='failed' with next_attempt_at IS NULL) are excluded — they
+        are only revived by manual POST /retry, and counting them would make
+        /health's queue_depth never drain to 0."""
         return int(await self._conn.fetchval(
             """
             SELECT count(*) FROM captures
-            WHERE status IN ('queued','extracting','classifying','filing','failed')
+            WHERE status IN ('queued','extracting','classifying','filing')
+               OR (status = 'failed' AND next_attempt_at IS NOT NULL)
             """
         ))
 
