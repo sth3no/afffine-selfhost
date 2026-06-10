@@ -164,6 +164,62 @@ async def test_process_capture_extractor_failure_calls_mark_failed(deps):
 
 
 @pytest.mark.asyncio
+async def test_process_capture_reuses_extracted_snapshot_on_retry(deps):
+    """A retry of a row whose extraction already succeeded (failure was in a
+    later step) must NOT re-extract — extraction is the billable step
+    (Whisper minutes, vision calls)."""
+    plat = _platform()
+    deps["filer"].move_to_topic_folder.return_value = "f-tech"
+
+    row = _row()
+    row.extracted_snapshot = {
+        "title": "From snapshot",
+        "body_md": "snapshot body",
+        "author": "snap-author",
+        "published_at": None,
+        "media_kind": "text",
+        "extra": {},
+    }
+
+    await process_capture(
+        row, platform=plat, topics=_topics(plat),
+        repo=deps["repo"], filer=deps["filer"],
+        extract_fn=deps["extract_fn"], classify_fn=deps["classify_fn"],
+        templates_repo=deps["templates_repo"], render_fn=deps["render_fn"],
+    )
+
+    deps["extract_fn"].assert_not_called()
+    # Snapshot is not re-saved when reused.
+    deps["repo"].save_extracted_snapshot.assert_not_called()
+    # The pipeline still runs to completion off the snapshot content.
+    deps["classify_fn"].assert_awaited_once()
+    classify_kwargs = deps["classify_fn"].await_args.kwargs
+    assert classify_kwargs["extracted"].title == "From snapshot"
+    deps["repo"].mark_done.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_process_capture_snapshots_immediately_after_extraction(deps):
+    """The snapshot must be persisted before classification/render, so a
+    failure in any later step never forces re-extraction."""
+    plat = _platform()
+    deps["filer"].move_to_topic_folder.return_value = "f-tech"
+    deps["classify_fn"].side_effect = RuntimeError("anthropic down")
+
+    with pytest.raises(RuntimeError, match="anthropic down"):
+        await process_capture(
+            _row(), platform=plat, topics=_topics(plat),
+            repo=deps["repo"], filer=deps["filer"],
+            extract_fn=deps["extract_fn"], classify_fn=deps["classify_fn"],
+            templates_repo=deps["templates_repo"], render_fn=deps["render_fn"],
+        )
+
+    deps["repo"].save_extracted_snapshot.assert_awaited_once()
+    snapshot = deps["repo"].save_extracted_snapshot.await_args.kwargs["snapshot"]
+    assert snapshot["title"] == "Hello"
+
+
+@pytest.mark.asyncio
 async def test_process_capture_skips_classify_when_already_classified(deps):
     """Idempotency: row with classifier_topic already set → don't call classify_fn."""
     plat = _platform()

@@ -53,3 +53,36 @@ def truncate_body(body: str, *, limit: int) -> str:
     if len(body) <= limit:
         return body
     return body[:limit] + "\n\n[...truncated]"
+
+
+def to_snapshot(extracted: Extracted) -> dict[str, Any]:
+    """Serialize an Extracted record to a JSON-able dict for the
+    captures.extracted_snapshot column.
+
+    `url` is intentionally omitted — it lives on the parent capture row.
+    """
+    return {
+        "title": extracted.title,
+        "body_md": extracted.body_md,
+        "author": extracted.author,
+        "published_at": extracted.published_at.isoformat() if extracted.published_at else None,
+        "media_kind": extracted.media_kind.value,
+        "extra": extracted.extra,
+    }
+
+
+def from_snapshot(snap: dict[str, Any] | str) -> Extracted:
+    """Deserialize an extracted_snapshot (dict or JSON string, depending on
+    the asyncpg codec in play) back into an Extracted record."""
+    if isinstance(snap, str):
+        import json
+        snap = json.loads(snap)
+    published_at = snap.get("published_at")
+    return Extracted(
+        title=snap.get("title"),
+        body_md=snap.get("body_md", ""),
+        author=snap.get("author"),
+        published_at=datetime.fromisoformat(published_at) if published_at else None,
+        media_kind=MediaKind(snap.get("media_kind", "video")),
+        extra=snap.get("extra") or {},
+    )

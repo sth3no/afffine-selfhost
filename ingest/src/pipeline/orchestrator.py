@@ -18,7 +18,7 @@ from typing import Any
 from src.config import Platform, TopicsConfig, settings
 from src.db import CaptureRepository, CaptureRow
 from src.pipeline.classification import ClassificationResult
-from src.pipeline.extracted import Extracted
+from src.pipeline.extracted import Extracted, from_snapshot, to_snapshot
 from src.pipeline.filer import Filer
 from src.pipeline.markdown_render import count_keyframe_refs, markdown_to_blocks
 from src.pipeline.chunked_render import chunked_render
@@ -56,30 +56,49 @@ async def process_capture(
     render_fn = render_fn or templated_render
     synth_fn = synth_fn or synthesize_template
 
-    if not row.url:
-        # Phase 3 supports text-only captures (shared_text). Phase 6's
-        # extractors all expect URLs; text-only goes straight to classifying
-        # using shared_text as the body.
-        extracted = Extracted(
-            title=row.shared_title,
-            body_md=row.shared_text or "",
-            author=None,
-            published_at=None,
-            media_kind=_media_kind_for_text(),
-            extra={"text_only": True},
+    if row.extracted_snapshot:
+        # Retry of a row that already extracted successfully (failure was in
+        # a later step). Reuse the snapshot instead of re-paying the source
+        # fetch + Whisper + video-analysis cost. Manual POST /retry clears
+        # the snapshot, so "force re-extract" still works.
+        extracted = from_snapshot(row.extracted_snapshot)
+        log.info(
+            "transition",
+            extra={"step": "extracted", "platform": platform.id, "reused_snapshot": True},
         )
     else:
-        # Phase 13: pass mcp_client + capture_id so extractors that
-        # support video frame analysis (cobalt_ext) can upload keyframe
-        # blobs. All extractors swallow unknown kwargs via **_kwargs.
-        extracted = await extract_fn(
-            row.url,
-            platform,
-            mcp_client=filer._mcp,
-            capture_id=row.id,
-        )
+        if not row.url:
+            # Phase 3 supports text-only captures (shared_text). Phase 6's
+            # extractors all expect URLs; text-only goes straight to classifying
+            # using shared_text as the body.
+            extracted = Extracted(
+                title=row.shared_title,
+                body_md=row.shared_text or "",
+                author=None,
+                published_at=None,
+                media_kind=_media_kind_for_text(),
+                extra={"text_only": True},
+            )
+        else:
+            # Phase 13: pass mcp_client + capture_id so extractors that
+            # support video frame analysis (cobalt_ext) can upload keyframe
+            # blobs. All extractors swallow unknown kwargs via **_kwargs.
+            extracted = await extract_fn(
+                row.url,
+                platform,
+                mcp_client=filer._mcp,
+                capture_id=row.id,
+            )
 
-    log.info("transition", extra={"step": "extracted", "platform": platform.id})
+        # Snapshot immediately — extraction is the expensive, billable step
+        # (Whisper minutes, vision calls). Persisting it here means a retry
+        # after a later-step failure replays for free, and the rerender
+        # endpoint has inputs even for captures that failed mid-pipeline.
+        await repo.save_extracted_snapshot(
+            capture_id=row.id,
+            snapshot=to_snapshot(extracted),
+        )
+        log.info("transition", extra={"step": "extracted", "platform": platform.id})
 
     # ── Classify (or reuse cached classifier output on retry) ────────
     if row.classifier_topic is not None or row.classifier_conf is not None:
@@ -126,12 +145,6 @@ async def process_capture(
                     "No (*, *) seed template exists and synthesis failed — "
                     "cannot render this capture."
                 ) from e
-
-    # ── Snapshot inputs for replay ─────────────────────────────────────
-    await repo.save_extracted_snapshot(
-        capture_id=row.id,
-        snapshot=_extracted_to_dict(extracted),
-    )
 
     # ── Templated render ───────────────────────────────────────────────
     # For long transcripts we route through chunked_render (map-reduce
@@ -204,22 +217,6 @@ async def process_capture(
 
     await repo.mark_done(row.id)
     log.info("transition", extra={"step": "done"})
-
-
-def _extracted_to_dict(extracted: Extracted) -> dict:
-    """Serialize an Extracted record to a JSON-able dict for snapshotting.
-
-    `url` is intentionally omitted — it lives on the parent capture row,
-    not on Extracted, so the rerender endpoint reads it from row.url.
-    """
-    return {
-        "title": extracted.title,
-        "body_md": extracted.body_md,
-        "author": extracted.author,
-        "published_at": extracted.published_at.isoformat() if extracted.published_at else None,
-        "media_kind": extracted.media_kind.value,
-        "extra": extracted.extra,
-    }
 
 
 async def _replace_doc_body_templated(

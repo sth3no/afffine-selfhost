@@ -7,7 +7,6 @@ endpoints land in Phase 7. Worker loop in Phase 6.
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import os
 from contextlib import asynccontextmanager
@@ -40,7 +39,7 @@ from src.models import (
     normalized_url,
     url_hash,
 )
-from src.pipeline.extracted import Extracted, MediaKind
+from src.pipeline.extracted import from_snapshot
 from src.pipeline.template_synth import synthesize_template
 from src.pipeline.templates import ContentTemplate, TemplatesRepository
 from src.pipeline.templated_render import render as templated_render
@@ -673,22 +672,6 @@ async def synth_endpoint(
     return _template_to_view(tmpl, 0)
 
 
-def _snapshot_to_extracted(snap) -> Extracted:
-    """Deserialize a JSONB extracted_snapshot (dict or JSON string) to an
-    Extracted record. Returns a fresh dataclass instance."""
-    if isinstance(snap, str):
-        snap = json.loads(snap)
-    published_at = snap.get("published_at")
-    return Extracted(
-        title=snap.get("title"),
-        body_md=snap.get("body_md", ""),
-        author=snap.get("author"),
-        published_at=datetime.fromisoformat(published_at) if published_at else None,
-        media_kind=MediaKind(snap.get("media_kind", "video")),
-        extra=snap.get("extra") or {},
-    )
-
-
 async def _load_sample_extracted(
     *,
     sample_capture_id: str | None,
@@ -718,7 +701,7 @@ async def _load_sample_extracted(
             )
     if row is None or row["extracted_snapshot"] is None:
         return None
-    return _snapshot_to_extracted(row["extracted_snapshot"])
+    return from_snapshot(row["extracted_snapshot"])
 
 
 @app.post("/captures/{capture_id}/rerender", response_model=CaptureDetail)
@@ -770,7 +753,7 @@ async def rerender_capture(
                 ),
             )
 
-        extracted = _snapshot_to_extracted(snapshot)
+        extracted = from_snapshot(snapshot)
 
         # Resolve current template for this capture's (platform, topic).
         topic = getattr(row, "classifier_topic", None) or "*"
@@ -1024,7 +1007,7 @@ def _article_platform(router: PlatformRouter):
     return plat
 
 
-def _row_to_item(row: CaptureRow, *, completed_at: "datetime | None" = None) -> CaptureItem:
+def _row_to_item(row: CaptureRow) -> CaptureItem:
     return CaptureItem(
         capture_id=row.id,
         url=row.url,
@@ -1034,7 +1017,7 @@ def _row_to_item(row: CaptureRow, *, completed_at: "datetime | None" = None) -> 
         web_url=row.web_url,
         topic_path=row.topic_path,
         created_at=row.created_at,
-        completed_at=completed_at,
+        completed_at=row.completed_at,
     )
 
 
@@ -1048,8 +1031,8 @@ def _row_to_detail(row: CaptureRow) -> CaptureDetail:
         web_url=row.web_url,
         topic_path=row.topic_path,
         created_at=row.created_at,
-        completed_at=None,  # Phase 6 schema has completed_at; fetch later
-        error=None,         # error column read in mark_failed but not exposed in CaptureRow yet
+        completed_at=row.completed_at,
+        error=row.error,
         retry_count=row.retry_count,
         classifier_reasoning=row.classifier_reasoning,
     )
