@@ -199,13 +199,11 @@ async def test_capture_unhandled_exception_returns_internal_envelope():
     the latter is what currently makes iOS show 'Server error, retry.'
     with no diagnostic.
     """
+    # DB raises before anything else — simulates Postgres being unreachable.
     repo = AsyncMock()
-    repo.get_by_url_hash.return_value = None
+    repo.get_by_url_hash.side_effect = RuntimeError("postgres unreachable: connect timeout")
 
-    # Filer raises mid-handler — simulates mcp_ext being unreachable.
     filer = AsyncMock()
-    filer.resolve_or_create_folder.side_effect = RuntimeError("mcp_ext unreachable: connect timeout")
-
     router = MagicMock()
     plat = MagicMock(id="article", group="Articles", folder_name="Web", extractor="markitdown")
     router.detect.return_value = plat
@@ -229,8 +227,99 @@ async def test_capture_unhandled_exception_returns_internal_envelope():
         assert body["error"]["code"] == "INTERNAL"
         # Useful for grep in iOS Diagnostics → server logs.
         assert "RuntimeError" in body["error"]["message"]
-        assert "mcp_ext unreachable" in body["error"]["message"]
+        assert "postgres unreachable" in body["error"]["message"]
         assert body["error"]["trace_id"]
         assert r.headers.get("x-trace-id") == body["error"]["trace_id"]
+    finally:
+        app.dependency_overrides.clear()
+
+
+@pytest.mark.asyncio
+async def test_capture_accepts_row_when_affine_is_down():
+    """mcp_ext/AFFiNE being briefly unreachable must NOT lose the capture:
+    the row is inserted with doc_id=NULL and 202 is returned; the worker
+    creates the doc when it picks the row up."""
+    repo = AsyncMock()
+    repo.get_by_url_hash.return_value = None
+
+    filer = AsyncMock()
+    filer.resolve_or_create_folder.side_effect = RuntimeError("mcp_ext unreachable: connect timeout")
+
+    router = MagicMock()
+    plat = MagicMock(id="article", group="Articles", folder_name="Web", extractor="markitdown")
+    router.detect.return_value = plat
+    router.initial_path.return_value = ["Sources", "Articles", "Web"]
+
+    app = _build_test_app(repo=repo, filer=filer, router=router)
+    try:
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+            r = await client.post(
+                "/capture",
+                json={"url": "https://example.com/page"},
+                headers={"Authorization": f"Bearer {settings.ingest_api_token}"},
+            )
+        assert r.status_code == 202, r.text
+        body = r.json()
+        assert body["status"] == "queued"
+        assert body["doc_id"] == ""   # not created yet
+        assert body["web_url"] == ""
+
+        repo.insert.assert_called_once()
+        inserted_row = repo.insert.call_args.args[0]
+        assert inserted_row.doc_id is None
+        assert inserted_row.web_url is None
+    finally:
+        app.dependency_overrides.clear()
+
+
+@pytest.mark.asyncio
+async def test_capture_concurrent_duplicate_returns_winner_and_cleans_orphan():
+    """Two concurrent POSTs of the same URL: the loser of the url_hash
+    UNIQUE race must return the winner's capture (not 500) and trash its
+    own orphaned stub doc."""
+    import asyncpg
+    from datetime import datetime, timezone
+    from src.db import CaptureRow
+
+    winner = CaptureRow(
+        id="01J-winner", url="https://example.com/page", url_hash="h",
+        source_app=None, shared_title=None, shared_text=None,
+        platform="article", status="queued", doc_id="winner-doc",
+        web_url="https://affine/.../winner-doc",
+        topic_path="Sources/Articles/Web",
+        created_at=datetime(2026, 6, 10, tzinfo=timezone.utc),
+    )
+
+    repo = AsyncMock()
+    # First lookup (idempotency probe) misses; second (after the unique
+    # violation) finds the winner inserted by the concurrent request.
+    repo.get_by_url_hash.side_effect = [None, winner]
+    repo.insert.side_effect = asyncpg.UniqueViolationError("duplicate key value")
+
+    filer = AsyncMock()
+    filer.resolve_or_create_folder.return_value = "f-web"
+    mcp = AsyncMock()
+    mcp.create_doc.return_value = {"docId": "loser-doc"}
+    filer._mcp = mcp
+
+    router = MagicMock()
+    plat = MagicMock(id="article", group="Articles", folder_name="Web", extractor="markitdown")
+    router.detect.return_value = plat
+    router.initial_path.return_value = ["Sources", "Articles", "Web"]
+
+    app = _build_test_app(repo=repo, filer=filer, router=router)
+    try:
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+            r = await client.post(
+                "/capture",
+                json={"url": "https://example.com/page"},
+                headers={"Authorization": f"Bearer {settings.ingest_api_token}"},
+            )
+        assert r.status_code == 202, r.text
+        body = r.json()
+        assert body["capture_id"] == "01J-winner"
+        assert body["doc_id"] == "winner-doc"
+        # The loser's stub doc was cleaned up.
+        mcp.delete_doc.assert_awaited_once_with("loser-doc")
     finally:
         app.dependency_overrides.clear()

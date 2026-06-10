@@ -164,6 +164,35 @@ async def test_process_capture_extractor_failure_calls_mark_failed(deps):
 
 
 @pytest.mark.asyncio
+async def test_process_capture_creates_doc_when_stub_was_deferred(deps):
+    """Rows accepted while AFFiNE was down arrive with doc_id=NULL — the
+    orchestrator must create the doc first and persist it via repo.set_doc."""
+    plat = _platform()
+    deps["filer"].move_to_topic_folder.return_value = "f-tech"
+    deps["filer"].resolve_or_create_folder.return_value = "f-platform"
+    deps["filer"]._mcp.create_doc.return_value = {"docId": "d-late"}
+
+    row = _row(doc_id=None, web_url=None)
+
+    await process_capture(
+        row, platform=plat, topics=_topics(plat),
+        repo=deps["repo"], filer=deps["filer"],
+        extract_fn=deps["extract_fn"], classify_fn=deps["classify_fn"],
+        templates_repo=deps["templates_repo"], render_fn=deps["render_fn"],
+    )
+
+    deps["filer"]._mcp.create_doc.assert_awaited_once()
+    deps["repo"].set_doc.assert_awaited_once()
+    set_doc_kwargs = deps["repo"].set_doc.await_args.kwargs
+    assert set_doc_kwargs["doc_id"] == "d-late"
+    assert "d-late" in set_doc_kwargs["web_url"]
+    # The rest of the pipeline ran against the late-created doc.
+    deps["repo"].mark_done.assert_awaited_once()
+    deps["filer"]._mcp.set_doc_title.assert_awaited_once()
+    assert deps["filer"]._mcp.set_doc_title.await_args.args[0] == "d-late"
+
+
+@pytest.mark.asyncio
 async def test_process_capture_reuses_extracted_snapshot_on_retry(deps):
     """A retry of a row whose extraction already succeeded (failure was in a
     later step) must NOT re-extract — extraction is the billable step

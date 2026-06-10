@@ -15,7 +15,7 @@ import logging
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-from src.config import Platform, TopicsConfig, settings
+from src.config import Platform, TopicsConfig, build_web_url, settings
 from src.db import CaptureRepository, CaptureRow
 from src.pipeline.classification import ClassificationResult
 from src.pipeline.extracted import Extracted, from_snapshot, to_snapshot
@@ -55,6 +55,24 @@ async def process_capture(
     """
     render_fn = render_fn or templated_render
     synth_fn = synth_fn or synthesize_template
+
+    # Deferred stub creation: POST /capture accepts rows even when
+    # mcp_ext/AFFiNE is down (doc_id=NULL). Create the doc now — every
+    # later step (title, move, body) needs it.
+    if not row.doc_id:
+        platform_folder = await filer.resolve_or_create_folder(
+            ["Sources", platform.group, platform.folder_name],
+        )
+        created = await filer._mcp.create_doc(
+            row.shared_title or row.url or "captured note",
+        )
+        doc_id = str(created["docId"])
+        await filer._mcp.move_document(doc_id, folder_id=platform_folder)
+        web_url = build_web_url(doc_id)
+        await repo.set_doc(capture_id=row.id, doc_id=doc_id, web_url=web_url)
+        row.doc_id = doc_id
+        row.web_url = web_url
+        log.info("transition", extra={"step": "stub_created_deferred", "doc_id": doc_id})
 
     if row.extracted_snapshot:
         # Retry of a row that already extracted successfully (failure was in

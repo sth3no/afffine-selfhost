@@ -127,6 +127,18 @@ class CaptureRepository:
         rec = await self._conn.fetchrow(sql)
         return None if rec is None else CaptureRow(**dict(rec))
 
+    async def set_doc(self, *, capture_id: str, doc_id: str, web_url: str) -> None:
+        """Attach the AFFiNE doc to a row whose stub creation was deferred
+        (POST /capture accepted the row while mcp_ext/AFFiNE was down)."""
+        await self._conn.execute(
+            """
+            UPDATE captures
+            SET doc_id = $2, web_url = $3, updated_at = NOW()
+            WHERE id = $1
+            """,
+            capture_id, doc_id, web_url,
+        )
+
     async def mark_classifying(
         self, *, capture_id: str, topic: str | None, confidence: float, reasoning: str
     ) -> None:

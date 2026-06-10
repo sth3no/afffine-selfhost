@@ -21,7 +21,7 @@ from ulid import ULID
 
 from src import error_envelope
 from src.auth import require_token
-from src.config import load_topics, settings
+from src.config import build_web_url, load_topics, settings
 from src.db import CaptureRepository, CaptureRow, create_pool
 from src.logging_setup import trace_id_var
 from src.mcp_client import MCPClient
@@ -390,21 +390,38 @@ async def capture(
     platform = router.detect(body.url) if body.url else _article_platform(router)
     initial_path = router.initial_path(platform)
 
-    # 3. Resolve/create the platform folder, create stub doc.
-    folder_id = await filer.resolve_or_create_folder(initial_path)
+    # 3. Resolve/create the platform folder, create stub doc. Best-effort:
+    #    when mcp_ext/AFFiNE is briefly down, the capture is still accepted
+    #    (the iOS share would otherwise 5xx and the URL would be LOST) and
+    #    the worker creates the doc when it picks the row up.
+    doc_id: str | None = None
+    web_url: str | None = None
     title = body.shared_title or (body.url or "captured note")
-    created = await filer._mcp.create_doc(title)
-    doc_id = str(created["docId"])
-    await filer._mcp.move_document(doc_id, folder_id=folder_id)
-    await filer._mcp.append_blocks(
-        doc_id,
-        [{"type": "paragraph", "text": f"> Capturing... ({datetime.now(timezone.utc).isoformat()})"}],
-    )
+    try:
+        folder_id = await filer.resolve_or_create_folder(initial_path)
+        # initial_blocks rides along with create_doc — one MCP round-trip
+        # fewer on the latency-sensitive share-extension path.
+        created = await filer._mcp.create_doc(
+            title,
+            initial_blocks=[{
+                "type": "paragraph",
+                "text": f"> Capturing... ({datetime.now(timezone.utc).isoformat()})",
+            }],
+        )
+        doc_id = str(created["docId"])
+        await filer._mcp.move_document(doc_id, folder_id=folder_id)
+        web_url = _build_web_url(doc_id)
+    except Exception as e:  # noqa: BLE001 — degrade, don't drop the capture
+        log.warning(
+            "stub doc creation failed (%s: %s) — capture accepted anyway, "
+            "worker will create the doc", type(e).__name__, e,
+        )
 
-    web_url = _build_web_url(doc_id)
     capture_id = str(ULID())
 
-    # 4. Insert capture row.
+    # 4. Insert capture row. A concurrent duplicate of the same URL loses
+    #    the url_hash UNIQUE race here — return the winner's row instead of
+    #    500ing, and trash our now-orphaned stub doc.
     row = CaptureRow(
         id=capture_id,
         url=body.url,
@@ -418,7 +435,18 @@ async def capture(
         web_url=web_url,
         topic_path="/".join(initial_path),
     )
-    await repo.insert(row)
+    try:
+        await repo.insert(row)
+    except asyncpg.UniqueViolationError:
+        existing = await repo.get_by_url_hash(hash_value)
+        if existing is None:
+            raise  # unique violation but no row? — surface as 500
+        if doc_id:
+            try:
+                await filer._mcp.delete_doc(doc_id)
+            except Exception as e:  # noqa: BLE001
+                log.warning("orphan stub cleanup failed for doc %s: %s", doc_id, e)
+        return _row_to_response(existing, router)
 
     # Skip the worker's idle poll delay — pickup is immediate.
     if app_state.worker is not None:
@@ -1038,17 +1066,6 @@ def _row_to_detail(row: CaptureRow) -> CaptureDetail:
     )
 
 
-def _build_web_url(doc_id: str) -> str:
-    """Construct the AFFiNE workspace doc URL from settings.
-
-    Logs a warning (does not raise) when AFFINE_WORKSPACE_ID is empty —
-    the URL is non-functional without a workspace, but we want the API
-    to keep responding so iOS can record the capture and the operator
-    can fix the missing env. Phase 9 hardens this into a startup check.
-    """
-    base = settings.affine_server_external_url
-    workspace = settings.affine_workspace_id
-    if not workspace:
-        # Non-fatal at request time; flag for the operator.
-        return f"{base.rstrip('/')}/{doc_id}"
-    return f"{base.rstrip('/')}/workspace/{workspace}/{doc_id}"
+# Kept as an alias — moved to config.py so the orchestrator can build the
+# URL too (deferred stub creation) without importing the FastAPI module.
+_build_web_url = build_web_url
