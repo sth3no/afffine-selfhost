@@ -28,10 +28,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from anthropic import AsyncAnthropic
 from pydantic import BaseModel, Field
 
 from src.config import settings
+from src.llm_clients import anthropic_client
 from src.pipeline.video_analysis_filters import filter_low_quality_frames
 
 log = logging.getLogger(__name__)
@@ -367,7 +367,7 @@ async def _vision_call(
     if not settings.anthropic_api_key:
         raise RuntimeError("ANTHROPIC_API_KEY missing — cannot run vision call")
 
-    client = AsyncAnthropic(api_key=settings.anthropic_api_key)
+    client = anthropic_client()
 
     # Build the multimodal user content.
     transcript_excerpt = (transcript or "").strip()[:8000] or "(no transcript available)"

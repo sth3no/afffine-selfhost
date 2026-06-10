@@ -23,9 +23,9 @@ import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
-from openai import AsyncOpenAI
 
 from src.config import Platform, settings
+from src.llm_clients import openai_client
 from src.pipeline.extracted import Extracted, MediaKind, truncate_body
 from src.pipeline.extractors import register_extractor
 
@@ -195,7 +195,7 @@ async def _whisper_transcribe(audio_path: Path) -> str:
     surface only when transcription is actually attempted."""
     if not settings.openai_api_key:
         raise RuntimeError("OPENAI_API_KEY not set; cannot transcribe")
-    client = AsyncOpenAI(api_key=settings.openai_api_key)
+    client = openai_client()
     with audio_path.open("rb") as f:
         result = await client.audio.transcriptions.create(
             model="whisper-1",

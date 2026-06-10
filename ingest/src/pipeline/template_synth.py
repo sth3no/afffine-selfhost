@@ -11,10 +11,10 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timezone
 
-from anthropic import AsyncAnthropic
 from pydantic import BaseModel, Field, field_validator
 
 from src.config import settings
+from src.llm_clients import anthropic_client
 from src.pipeline.extracted import Extracted
 from src.pipeline.templates import ContentTemplate, TemplatesRepository
 
@@ -136,7 +136,7 @@ async def synthesize_template(
     Concurrent calls for the same (platform_id, topic) resolve to a single
     winner via the partial UNIQUE index on `content_templates`.
     """
-    client = AsyncAnthropic(api_key=settings.anthropic_api_key)
+    client = anthropic_client()
     user_msg = _build_user_message(
         platform_id=platform_id, topic=topic, sample=sample_extracted
     )

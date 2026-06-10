@@ -70,7 +70,7 @@ async def test_synthesize_template_calls_sonnet_and_inserts_row():
     repo = AsyncMock()
     repo.insert_if_absent = AsyncMock(return_value=_template(platform_id="youtube", topic="Recipes"))
 
-    with patch("src.pipeline.template_synth.AsyncAnthropic") as Client, \
+    with patch("src.pipeline.template_synth.anthropic_client") as Client, \
          patch("src.pipeline.template_synth.settings") as settings_mock:
         settings_mock.anthropic_api_key = "sk-ant-test"
         settings_mock.vision_model = "claude-sonnet-4-6"
@@ -112,7 +112,7 @@ async def test_synthesize_template_passes_sample_in_user_message():
     repo = AsyncMock()
     repo.insert_if_absent = AsyncMock(return_value=_template())
 
-    with patch("src.pipeline.template_synth.AsyncAnthropic") as Client, \
+    with patch("src.pipeline.template_synth.anthropic_client") as Client, \
          patch("src.pipeline.template_synth.settings") as settings_mock:
         settings_mock.anthropic_api_key = "sk-ant-test"
         settings_mock.vision_model = "claude-sonnet-4-6"
@@ -137,7 +137,7 @@ async def test_synthesize_template_raises_when_parsed_output_is_none():
     fake = MagicMock()
     fake.parsed_output = None
     repo = AsyncMock()
-    with patch("src.pipeline.template_synth.AsyncAnthropic") as Client, \
+    with patch("src.pipeline.template_synth.anthropic_client") as Client, \
          patch("src.pipeline.template_synth.settings") as settings_mock:
         settings_mock.anthropic_api_key = "sk-ant-test"
         settings_mock.vision_model = "claude-sonnet-4-6"

@@ -11,16 +11,16 @@ from __future__ import annotations
 from collections.abc import Sequence
 
 import numpy as np
-from openai import AsyncOpenAI
 
 from src.config import settings
+from src.llm_clients import openai_client
 
 
 async def embed(text: str) -> list[float]:
     """Return the embedding vector for `text`. Raises if OPENAI_API_KEY missing."""
     if not settings.openai_api_key:
         raise RuntimeError("OPENAI_API_KEY not set; cannot compute embedding")
-    client = AsyncOpenAI(api_key=settings.openai_api_key)
+    client = openai_client()
     result = await client.embeddings.create(
         model=settings.embedding_model,
         input=text,

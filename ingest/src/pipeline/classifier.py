@@ -3,6 +3,9 @@
 Single call per Extracted record. The system prompt explains the JSON
 contract, the alias_of mechanism, and the confidence floor; it's marked
 with cache_control: ephemeral so subsequent calls reuse the prefix.
+Output shape is enforced by structured outputs (messages.parse) — the
+same pattern templated_render uses — so fence-stripping/JSON-repair
+heuristics are no longer needed.
 
 The user message is fresh per call: platform, existing siblings, topic
 hints, and the captured content excerpt.
@@ -10,12 +13,8 @@ hints, and the captured content excerpt.
 
 from __future__ import annotations
 
-import json
-from typing import Any
-
-from anthropic import AsyncAnthropic
-
 from src.config import Platform, settings
+from src.llm_clients import anthropic_client
 from src.pipeline.classification import ClassificationResult
 from src.pipeline.extracted import Extracted
 
@@ -109,8 +108,8 @@ async def classify(
     sibling_topics: list[str],
     topic_hints: list[str],
 ) -> ClassificationResult:
-    """Single Anthropic call → ClassificationResult."""
-    client = AsyncAnthropic(api_key=settings.anthropic_api_key)
+    """Single Anthropic call → ClassificationResult (schema-enforced)."""
+    client = anthropic_client()
     user_msg = build_user_message(
         extracted=extracted,
         platform=platform,
@@ -118,7 +117,7 @@ async def classify(
         topic_hints=topic_hints,
     )
 
-    response = await client.messages.create(
+    response = await client.messages.parse(
         model=settings.classifier_model,
         max_tokens=512,
         system=[
@@ -129,15 +128,12 @@ async def classify(
             }
         ],
         messages=[{"role": "user", "content": user_msg}],
+        output_format=ClassificationResult,
     )
 
-    text = response.content[0].text.strip()
-    # Strip optional code-fence if the model wrapped output.
-    if text.startswith("```"):
-        text = text.strip("`")
-        if text.startswith("json"):
-            text = text[4:]
-        text = text.strip()
-    payload: dict[str, Any] = json.loads(text)
-
-    return ClassificationResult.model_validate(payload)
+    if response.parsed_output is None:
+        raise RuntimeError(
+            "classifier: parsed_output is None — schema-enforced parse failed; "
+            "check classifier_model supports structured outputs"
+        )
+    return response.parsed_output

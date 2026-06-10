@@ -134,7 +134,7 @@ async def test_chunked_render_makes_n_plus_one_anthropic_calls():
     parse_side = AsyncMock()
     parse_side.side_effect = [chunk_response] * 3 + [reduce_response]
 
-    with patch("src.pipeline.chunked_render.AsyncAnthropic") as Client, \
+    with patch("src.pipeline.chunked_render.anthropic_client") as Client, \
          patch("src.pipeline.chunked_render.settings") as settings_mock:
         settings_mock.anthropic_api_key = "sk-ant-test"
         settings_mock.summarizer_model = "claude-sonnet-4-6"
@@ -180,7 +180,7 @@ async def test_reducer_receives_reveals_block_when_chunks_have_reveals():
     parse_side = AsyncMock()
     parse_side.side_effect = [chunk_plain, chunk_with_reveal, reduce_response]
 
-    with patch("src.pipeline.chunked_render.AsyncAnthropic") as Client, \
+    with patch("src.pipeline.chunked_render.anthropic_client") as Client, \
          patch("src.pipeline.chunked_render.settings") as settings_mock:
         settings_mock.anthropic_api_key = "sk-ant-test"
         settings_mock.summarizer_model = "claude-sonnet-4-6"
@@ -220,7 +220,7 @@ async def test_reducer_uses_template_system_prompt():
     parse_side = AsyncMock()
     parse_side.side_effect = [chunk_response, chunk_response, reduce_response]
 
-    with patch("src.pipeline.chunked_render.AsyncAnthropic") as Client, \
+    with patch("src.pipeline.chunked_render.anthropic_client") as Client, \
          patch("src.pipeline.chunked_render.settings") as settings_mock:
         settings_mock.anthropic_api_key = "sk-ant-test"
         settings_mock.summarizer_model = "claude-sonnet-4-6"
@@ -260,7 +260,7 @@ async def test_reducer_includes_keyframes_in_user_message():
     parse_side = AsyncMock()
     parse_side.side_effect = [chunk_response, chunk_response, reduce_response]
 
-    with patch("src.pipeline.chunked_render.AsyncAnthropic") as Client, \
+    with patch("src.pipeline.chunked_render.anthropic_client") as Client, \
          patch("src.pipeline.chunked_render.settings") as settings_mock:
         settings_mock.anthropic_api_key = "sk-ant-test"
         settings_mock.summarizer_model = "claude-sonnet-4-6"
@@ -294,7 +294,7 @@ async def test_reducer_raises_when_parsed_output_is_none():
     parse_side = AsyncMock()
     parse_side.side_effect = [chunk_response, chunk_response, none_response]
 
-    with patch("src.pipeline.chunked_render.AsyncAnthropic") as Client, \
+    with patch("src.pipeline.chunked_render.anthropic_client") as Client, \
          patch("src.pipeline.chunked_render.settings") as settings_mock:
         settings_mock.anthropic_api_key = "sk-ant-test"
         settings_mock.summarizer_model = "claude-sonnet-4-6"

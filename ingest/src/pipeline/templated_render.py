@@ -14,10 +14,10 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from anthropic import AsyncAnthropic
 from pydantic import BaseModel, Field
 
 from src.config import settings
+from src.llm_clients import anthropic_client
 from src.pipeline.extracted import Extracted
 from src.pipeline.templates import ContentTemplate
 
@@ -112,7 +112,7 @@ async def render(
     keyframes: list[dict[str, Any]],
 ) -> TemplatedOutput:
     """Single Haiku call → TemplatedOutput."""
-    client = AsyncAnthropic(api_key=settings.anthropic_api_key)
+    client = anthropic_client()
     user_msg = _build_user_message(extracted, keyframes)
 
     response = await client.messages.parse(
