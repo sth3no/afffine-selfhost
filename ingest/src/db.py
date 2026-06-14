@@ -28,6 +28,9 @@ class CaptureRow:
     classifier_reasoning: str | None = None
     retry_count: int = 0
     extracted_snapshot: Any | None = None
+    error: str | None = None
+    completed_at: datetime | None = None
+    next_attempt_at: datetime | None = None
 
 
 _INSERT_SQL = """
@@ -42,7 +45,8 @@ _CAPTURE_COLS = (
     "id, url, url_hash, source_app, shared_title, shared_text, "
     "platform, status, doc_id, web_url, topic_path, "
     "classifier_topic, classifier_conf, classifier_reasoning, "
-    "retry_count, created_at, extracted_snapshot"
+    "retry_count, created_at, extracted_snapshot, "
+    "error, completed_at, next_attempt_at"
 )
 
 _BASE_SELECT = f"""
@@ -122,6 +126,18 @@ class CaptureRepository:
         """
         rec = await self._conn.fetchrow(sql)
         return None if rec is None else CaptureRow(**dict(rec))
+
+    async def set_doc(self, *, capture_id: str, doc_id: str, web_url: str) -> None:
+        """Attach the AFFiNE doc to a row whose stub creation was deferred
+        (POST /capture accepted the row while mcp_ext/AFFiNE was down)."""
+        await self._conn.execute(
+            """
+            UPDATE captures
+            SET doc_id = $2, web_url = $3, updated_at = NOW()
+            WHERE id = $1
+            """,
+            capture_id, doc_id, web_url,
+        )
 
     async def mark_classifying(
         self, *, capture_id: str, topic: str | None, confidence: float, reasoning: str
@@ -231,10 +247,15 @@ class CaptureRepository:
         )
 
     async def count_active(self) -> int:
+        """Rows the worker still owes work on. Permanently-failed rows
+        (status='failed' with next_attempt_at IS NULL) are excluded — they
+        are only revived by manual POST /retry, and counting them would make
+        /health's queue_depth never drain to 0."""
         return int(await self._conn.fetchval(
             """
             SELECT count(*) FROM captures
-            WHERE status IN ('queued','extracting','classifying','filing','failed')
+            WHERE status IN ('queued','extracting','classifying','filing')
+               OR (status = 'failed' AND next_attempt_at IS NOT NULL)
             """
         ))
 
@@ -291,9 +312,13 @@ class CaptureRepository:
     async def mark_for_retry(self, capture_id: str) -> "CaptureRow | None":
         """Reset the row for re-processing by the worker.
 
-        Clears classifier output + error + retry_count + next_attempt_at, and
-        sets status back to 'queued'. Soft-deleted rows are NOT retried — the
-        WHERE clause excludes them.
+        Clears classifier output + extracted snapshot + error + retry_count +
+        next_attempt_at, and sets status back to 'queued'. Soft-deleted rows
+        are NOT retried — the WHERE clause excludes them.
+
+        The snapshot is cleared deliberately: manual retry means "re-extract
+        from the source" (e.g. cookies were fixed, the source changed).
+        Automatic worker retries keep the snapshot and replay it for free.
         """
         sql = f"""
             UPDATE captures
@@ -303,6 +328,7 @@ class CaptureRepository:
                 classifier_topic = NULL,
                 classifier_conf = NULL,
                 classifier_reasoning = NULL,
+                extracted_snapshot = NULL,
                 error = NULL,
                 updated_at = NOW()
             WHERE id = $1 AND status <> 'deleted'

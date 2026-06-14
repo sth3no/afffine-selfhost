@@ -7,7 +7,6 @@ endpoints land in Phase 7. Worker loop in Phase 6.
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import os
 from contextlib import asynccontextmanager
@@ -22,7 +21,7 @@ from ulid import ULID
 
 from src import error_envelope
 from src.auth import require_token
-from src.config import load_topics, settings
+from src.config import build_web_url, load_topics, settings
 from src.db import CaptureRepository, CaptureRow, create_pool
 from src.logging_setup import trace_id_var
 from src.mcp_client import MCPClient
@@ -40,7 +39,7 @@ from src.models import (
     normalized_url,
     url_hash,
 )
-from src.pipeline.extracted import Extracted, MediaKind
+from src.pipeline.extracted import from_snapshot
 from src.pipeline.template_synth import synthesize_template
 from src.pipeline.templates import ContentTemplate, TemplatesRepository
 from src.pipeline.templated_render import render as templated_render
@@ -61,7 +60,7 @@ class AppState:
     filer: Filer | None = None
     router: PlatformRouter | None = None
     worker: Worker | None = None
-    worker_task: asyncio.Task | None = None
+    worker_tasks: list[asyncio.Task] = []
     templates_repo: TemplatesRepository | None = None
 
 
@@ -156,20 +155,24 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
             repo_factory=lambda conn: CaptureRepository(conn),
             process_fn=_process_fn,
             platform_for=_platform_for,
-            topics=load_topics(),
+            topics=topics,
+            capture_timeout_sec=float(settings.capture_timeout_sec),
         )
-        app_state.worker_task = asyncio.create_task(app_state.worker._loop())
+        n_loops = max(1, settings.worker_concurrency)
+        app_state.worker_tasks = [
+            asyncio.create_task(app_state.worker._loop()) for _ in range(n_loops)
+        ]
 
     yield
 
-    # Shutdown: stop worker first, then close pool and MCP.
+    # Shutdown: stop worker loops first, then close pool and MCP.
     if app_state.worker is not None:
         app_state.worker.stop()
-    if app_state.worker_task is not None:
-        try:
-            await asyncio.wait_for(app_state.worker_task, timeout=5.0)
-        except asyncio.TimeoutError:
-            app_state.worker_task.cancel()
+    if app_state.worker_tasks:
+        _, pending = await asyncio.wait(app_state.worker_tasks, timeout=5.0)
+        for t in pending:
+            t.cancel()
+        app_state.worker_tasks = []
     if app_state.pool is not None:
         await app_state.pool.close()
     if app_state.mcp is not None:
@@ -232,17 +235,28 @@ def get_platform_router() -> PlatformRouter:
 
 
 @app.get("/health")
-async def health() -> dict:
+async def health() -> JSONResponse:
+    """Liveness check. Returns 503 when the worker was started but its loop
+    has died — the compose healthcheck tests for HTTP 200, so a dead worker
+    now gets the container restarted instead of silently queueing captures
+    forever. When no worker was started at all (dev mode without a DB pool),
+    the service is still "ok" — there is nothing to pump."""
     queue_depth = 0
     if app_state.pool is not None:
         async with app_state.pool.acquire() as conn:
             queue_depth = await CaptureRepository(conn).count_active()
-    return {
-        "ok": True,
-        "queue_depth": queue_depth,
-        "worker_alive": bool(app_state.worker and app_state.worker.alive),
-        "version": settings.version,
-    }
+    worker_started = app_state.worker is not None
+    worker_alive = bool(app_state.worker and app_state.worker.alive)
+    ok = worker_alive or not worker_started
+    return JSONResponse(
+        status_code=200 if ok else 503,
+        content={
+            "ok": ok,
+            "queue_depth": queue_depth,
+            "worker_alive": worker_alive,
+            "version": settings.version,
+        },
+    )
 
 
 @app.get("/diagnostic/logging")
@@ -376,21 +390,38 @@ async def capture(
     platform = router.detect(body.url) if body.url else _article_platform(router)
     initial_path = router.initial_path(platform)
 
-    # 3. Resolve/create the platform folder, create stub doc.
-    folder_id = await filer.resolve_or_create_folder(initial_path)
+    # 3. Resolve/create the platform folder, create stub doc. Best-effort:
+    #    when mcp_ext/AFFiNE is briefly down, the capture is still accepted
+    #    (the iOS share would otherwise 5xx and the URL would be LOST) and
+    #    the worker creates the doc when it picks the row up.
+    doc_id: str | None = None
+    web_url: str | None = None
     title = body.shared_title or (body.url or "captured note")
-    created = await filer._mcp.create_doc(title)
-    doc_id = str(created["docId"])
-    await filer._mcp.move_document(doc_id, folder_id=folder_id)
-    await filer._mcp.append_blocks(
-        doc_id,
-        [{"type": "paragraph", "text": f"> Capturing... ({datetime.now(timezone.utc).isoformat()})"}],
-    )
+    try:
+        folder_id = await filer.resolve_or_create_folder(initial_path)
+        # initial_blocks rides along with create_doc — one MCP round-trip
+        # fewer on the latency-sensitive share-extension path.
+        created = await filer._mcp.create_doc(
+            title,
+            initial_blocks=[{
+                "type": "paragraph",
+                "text": f"> Capturing... ({datetime.now(timezone.utc).isoformat()})",
+            }],
+        )
+        doc_id = str(created["docId"])
+        await filer._mcp.move_document(doc_id, folder_id=folder_id)
+        web_url = _build_web_url(doc_id)
+    except Exception as e:  # noqa: BLE001 — degrade, don't drop the capture
+        log.warning(
+            "stub doc creation failed (%s: %s) — capture accepted anyway, "
+            "worker will create the doc", type(e).__name__, e,
+        )
 
-    web_url = _build_web_url(doc_id)
     capture_id = str(ULID())
 
-    # 4. Insert capture row.
+    # 4. Insert capture row. A concurrent duplicate of the same URL loses
+    #    the url_hash UNIQUE race here — return the winner's row instead of
+    #    500ing, and trash our now-orphaned stub doc.
     row = CaptureRow(
         id=capture_id,
         url=body.url,
@@ -404,7 +435,22 @@ async def capture(
         web_url=web_url,
         topic_path="/".join(initial_path),
     )
-    await repo.insert(row)
+    try:
+        await repo.insert(row)
+    except asyncpg.UniqueViolationError:
+        existing = await repo.get_by_url_hash(hash_value)
+        if existing is None:
+            raise  # unique violation but no row? — surface as 500
+        if doc_id:
+            try:
+                await filer._mcp.delete_doc(doc_id)
+            except Exception as e:  # noqa: BLE001
+                log.warning("orphan stub cleanup failed for doc %s: %s", doc_id, e)
+        return _row_to_response(existing, router)
+
+    # Skip the worker's idle poll delay — pickup is immediate.
+    if app_state.worker is not None:
+        app_state.worker.wake()
 
     return _row_to_response(row, router)
 
@@ -654,22 +700,6 @@ async def synth_endpoint(
     return _template_to_view(tmpl, 0)
 
 
-def _snapshot_to_extracted(snap) -> Extracted:
-    """Deserialize a JSONB extracted_snapshot (dict or JSON string) to an
-    Extracted record. Returns a fresh dataclass instance."""
-    if isinstance(snap, str):
-        snap = json.loads(snap)
-    published_at = snap.get("published_at")
-    return Extracted(
-        title=snap.get("title"),
-        body_md=snap.get("body_md", ""),
-        author=snap.get("author"),
-        published_at=datetime.fromisoformat(published_at) if published_at else None,
-        media_kind=MediaKind(snap.get("media_kind", "video")),
-        extra=snap.get("extra") or {},
-    )
-
-
 async def _load_sample_extracted(
     *,
     sample_capture_id: str | None,
@@ -699,7 +729,7 @@ async def _load_sample_extracted(
             )
     if row is None or row["extracted_snapshot"] is None:
         return None
-    return _snapshot_to_extracted(row["extracted_snapshot"])
+    return from_snapshot(row["extracted_snapshot"])
 
 
 @app.post("/captures/{capture_id}/rerender", response_model=CaptureDetail)
@@ -751,7 +781,7 @@ async def rerender_capture(
                 ),
             )
 
-        extracted = _snapshot_to_extracted(snapshot)
+        extracted = from_snapshot(snapshot)
 
         # Resolve current template for this capture's (platform, topic).
         topic = getattr(row, "classifier_topic", None) or "*"
@@ -778,80 +808,21 @@ async def rerender_capture(
             output_raw=rendered.body_md,
         )
 
-        # Replace blocks in the AFFiNE doc.
+        # Replace blocks in the AFFiNE doc. Layout assembly is shared with
+        # the orchestrator (build_doc_blocks) so the two can't drift apart.
         if app_state.mcp is None or row.doc_id is None:
             log.warning(
                 "rerender: MCP unavailable or doc_id missing; skipped block update"
             )
         else:
-            from src.pipeline.markdown_render import count_keyframe_refs, markdown_to_blocks
-            from src.pipeline.orchestrator import url_embed_block
-            blocks: list[dict] = []
-            if row.url:
-                blocks.append(url_embed_block(row.url))
-            if rendered.lede and rendered.lede.strip():
-                blocks.append({"type": "callout", "text": rendered.lede.strip()})
-            if rendered.summary_md:
-                blocks.append({"type": "paragraph", "style": "h2", "text": "Summary"})
-                blocks.extend(
-                    await markdown_to_blocks(
-                        rendered.summary_md,
-                        keyframes=keyframes,
-                        mcp_client=app_state.mcp,
-                    )
-                )
-            if rendered.body_md:
-                blocks.extend(
-                    await markdown_to_blocks(
-                        rendered.body_md,
-                        keyframes=keyframes,
-                        mcp_client=app_state.mcp,
-                    )
-                )
-
-            # Phase 15 fallback: append ## Keyframes when body_md referenced
-            # zero kf:N refs out of N available keyframes. Mirrors the
-            # orchestrator's behaviour in _replace_doc_body_templated.
-            if (
-                keyframes
-                and rendered.body_md
-                and not count_keyframe_refs(rendered.body_md)
-            ):
-                blocks.append({"type": "paragraph", "style": "h2", "text": "Keyframes"})
-                for kf in keyframes:
-                    source_id = kf.get("blob_source_id")
-                    if not source_id:
-                        continue
-                    blocks.append({
-                        "type": "image",
-                        "sourceId": source_id,
-                        "caption": kf.get("caption") or "",
-                    })
-
-            # Always append the raw transcript/body as a separate section so
-            # the source signal is preserved even when the template's body_md
-            # is a compressed summary. Strip extractor metadata first so we
-            # don't get duplicate Title/Source/## Transcript blocks.
-            if extracted.body_md and extracted.body_md.strip():
-                from src.pipeline.orchestrator import strip_extractor_metadata
-                transcript_md = strip_extractor_metadata(extracted.body_md)
-                if transcript_md.strip():
-                    blocks.append({"type": "paragraph", "style": "h2", "text": "Transcript"})
-                    blocks.extend(
-                        await markdown_to_blocks(
-                            transcript_md,
-                            keyframes=keyframes,
-                            mcp_client=app_state.mcp,
-                        )
-                    )
-            if row.url:
-                blocks.append({
-                    "type": "paragraph", "style": "text",
-                    "text": [
-                        {"text": "Source: "},
-                        {"text": row.url, "italic": True, "link": row.url},
-                    ],
-                })
+            from src.pipeline.orchestrator import build_doc_blocks
+            blocks = await build_doc_blocks(
+                mcp=app_state.mcp,
+                rendered=rendered,
+                keyframes=keyframes,
+                url=row.url,
+                extracted=extracted,
+            )
             # Naive: append blocks after existing ones (v2 will diff/replace).
             await app_state.mcp.append_blocks(row.doc_id, blocks)
 
@@ -1005,7 +976,7 @@ def _article_platform(router: PlatformRouter):
     return plat
 
 
-def _row_to_item(row: CaptureRow, *, completed_at: "datetime | None" = None) -> CaptureItem:
+def _row_to_item(row: CaptureRow) -> CaptureItem:
     return CaptureItem(
         capture_id=row.id,
         url=row.url,
@@ -1015,7 +986,7 @@ def _row_to_item(row: CaptureRow, *, completed_at: "datetime | None" = None) -> 
         web_url=row.web_url,
         topic_path=row.topic_path,
         created_at=row.created_at,
-        completed_at=completed_at,
+        completed_at=row.completed_at,
     )
 
 
@@ -1029,24 +1000,13 @@ def _row_to_detail(row: CaptureRow) -> CaptureDetail:
         web_url=row.web_url,
         topic_path=row.topic_path,
         created_at=row.created_at,
-        completed_at=None,  # Phase 6 schema has completed_at; fetch later
-        error=None,         # error column read in mark_failed but not exposed in CaptureRow yet
+        completed_at=row.completed_at,
+        error=row.error,
         retry_count=row.retry_count,
         classifier_reasoning=row.classifier_reasoning,
     )
 
 
-def _build_web_url(doc_id: str) -> str:
-    """Construct the AFFiNE workspace doc URL from settings.
-
-    Logs a warning (does not raise) when AFFINE_WORKSPACE_ID is empty —
-    the URL is non-functional without a workspace, but we want the API
-    to keep responding so iOS can record the capture and the operator
-    can fix the missing env. Phase 9 hardens this into a startup check.
-    """
-    base = settings.affine_server_external_url
-    workspace = settings.affine_workspace_id
-    if not workspace:
-        # Non-fatal at request time; flag for the operator.
-        return f"{base.rstrip('/')}/{doc_id}"
-    return f"{base.rstrip('/')}/workspace/{workspace}/{doc_id}"
+# Kept as an alias — moved to config.py so the orchestrator can build the
+# URL too (deferred stub creation) without importing the FastAPI module.
+_build_web_url = build_web_url

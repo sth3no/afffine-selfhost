@@ -46,6 +46,14 @@ class Settings(BaseSettings):
     # outliers (e.g. a 3-hour podcast transcript). Beyond this we
     # truncate and emit a note in the rendered doc.
     max_chunks_per_capture: int = 16
+    # Hard per-capture ceiling. A hung extraction (stalled stream, wedged
+    # subprocess) otherwise blocks a worker slot forever. 30 min comfortably
+    # covers the worst legitimate case (long podcast → chunked render).
+    capture_timeout_sec: int = 1800
+    # Number of concurrent worker loops pumping the captures queue. The DB
+    # claim is FOR UPDATE SKIP LOCKED-safe; folder creation is serialized
+    # in-process by the Filer's lock.
+    worker_concurrency: int = 2
     embedding_model: str = "text-embedding-3-small"
     confidence_floor: float = 0.6
     similarity_threshold: float = 0.85
@@ -71,6 +79,20 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+
+
+def build_web_url(doc_id: str) -> str:
+    """Construct the AFFiNE workspace doc URL from settings.
+
+    Returns a degraded (host-only) URL when AFFINE_WORKSPACE_ID is empty —
+    the URL is non-functional without a workspace, but callers keep working
+    so the operator can fix the missing env without dropped captures.
+    """
+    base = settings.affine_server_external_url.rstrip("/")
+    workspace = settings.affine_workspace_id
+    if not workspace:
+        return f"{base}/{doc_id}"
+    return f"{base}/workspace/{workspace}/{doc_id}"
 
 
 # ── Topics config (loaded from topics.yaml) ───────────────────────────

@@ -107,6 +107,31 @@ async def test_get_capture_by_id_returns_detail():
 
 
 @pytest.mark.asyncio
+async def test_get_capture_detail_exposes_error_and_completed_at():
+    """The iOS detail screen needs to show WHY a capture failed (and when a
+    successful one finished) without the operator grepping server logs."""
+    app, repo = _build_app()
+    completed = datetime(2026, 5, 7, 12, 30, tzinfo=timezone.utc)
+    repo.get_by_id.return_value = _row(
+        status="failed",
+        error="cobalt error: error.api.youtube.login",
+        completed_at=completed,
+        retry_count=3,
+    )
+    try:
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as c:
+            r = await c.get("/captures/01J",
+                            headers={"Authorization": f"Bearer {settings.ingest_api_token}"})
+        assert r.status_code == 200
+        body = r.json()
+        assert body["error"] == "cobalt error: error.api.youtube.login"
+        assert body["completed_at"] is not None
+        assert body["retry_count"] == 3
+    finally:
+        app.dependency_overrides.clear()
+
+
+@pytest.mark.asyncio
 async def test_get_capture_404():
     app, repo = _build_app()
     repo.get_by_id.return_value = None

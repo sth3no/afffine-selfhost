@@ -14,6 +14,7 @@ dedup to prevent duplicate folders.
 
 from __future__ import annotations
 
+import asyncio
 import time
 from collections.abc import Callable
 from typing import Any
@@ -57,6 +58,12 @@ class Filer:
         self._clock = clock
         self._tree_snapshot: list[dict] | None = None
         self._tree_fetched_at: float = 0.0
+        # Serializes check-then-create folder operations. With multiple
+        # worker loops, two captures classifying into the same new topic
+        # would otherwise both miss the tree-snapshot lookup and create
+        # duplicate folders. Folder ops are fast relative to extraction,
+        # so the serialization cost is negligible.
+        self._folder_lock = asyncio.Lock()
         self._pool = pool
         self._embeddings_repo = embeddings_repo
         self._aliases_repo = aliases_repo
@@ -65,6 +72,13 @@ class Filer:
 
     async def resolve_or_create_folder(self, path: list[str]) -> str:
         """Walk path; create missing folders. Return the leaf folderId."""
+        async with self._folder_lock:
+            return await self._resolve_or_create_folder_unlocked(path)
+
+    async def _resolve_or_create_folder_unlocked(self, path: list[str]) -> str:
+        """Lock-free body of resolve_or_create_folder. Callers that already
+        hold _folder_lock (move_to_topic_folder) use this directly —
+        asyncio.Lock is not reentrant."""
         if not path:
             raise ValueError("path must contain at least one segment")
 
@@ -139,32 +153,35 @@ class Filer:
         if self._embed_fn is None:
             raise RuntimeError("move_to_topic_folder requires embed_fn")
 
-        # Test wiring: repos pre-injected → use them directly.
-        if self._embeddings_repo is not None and self._aliases_repo is not None:
-            return await self._do_move(
-                platform_path=platform_path,
-                result=result,
-                embeddings_repo=self._embeddings_repo,
-                aliases_repo=self._aliases_repo,
-            )
+        # The whole check-then-create sequence runs under the folder lock so
+        # concurrent worker loops can't race to create the same topic folder.
+        async with self._folder_lock:
+            # Test wiring: repos pre-injected → use them directly.
+            if self._embeddings_repo is not None and self._aliases_repo is not None:
+                return await self._do_move(
+                    platform_path=platform_path,
+                    result=result,
+                    embeddings_repo=self._embeddings_repo,
+                    aliases_repo=self._aliases_repo,
+                )
 
-        # Production wiring: acquire a fresh connection per call so
-        # concurrent classifications don't serialize on one shared conn.
-        if self._pool is None:
-            raise RuntimeError(
-                "move_to_topic_folder requires either pool or "
-                "embeddings_repo + aliases_repo to be provided",
-            )
+            # Production wiring: acquire a fresh connection per call so
+            # concurrent classifications don't serialize on one shared conn.
+            if self._pool is None:
+                raise RuntimeError(
+                    "move_to_topic_folder requires either pool or "
+                    "embeddings_repo + aliases_repo to be provided",
+                )
 
-        from src.db import FolderEmbeddingRepository, TopicAliasRepository
+            from src.db import FolderEmbeddingRepository, TopicAliasRepository
 
-        async with self._pool.acquire() as conn:
-            return await self._do_move(
-                platform_path=platform_path,
-                result=result,
-                embeddings_repo=FolderEmbeddingRepository(conn),
-                aliases_repo=TopicAliasRepository(conn),
-            )
+            async with self._pool.acquire() as conn:
+                return await self._do_move(
+                    platform_path=platform_path,
+                    result=result,
+                    embeddings_repo=FolderEmbeddingRepository(conn),
+                    aliases_repo=TopicAliasRepository(conn),
+                )
 
     async def _do_move(
         self,
@@ -176,8 +193,8 @@ class Filer:
     ) -> str | None:
         """Topic-folder resolution + creation logic. Repos are passed in so
         the same logic works whether they're long-lived (tests) or per-call
-        (production via pool acquisition)."""
-        platform_folder_id = await self.resolve_or_create_folder(platform_path)
+        (production via pool acquisition). Caller holds _folder_lock."""
+        platform_folder_id = await self._resolve_or_create_folder_unlocked(platform_path)
         parent_path = "/".join(platform_path)
 
         # 1. Pre-recorded alias hit?

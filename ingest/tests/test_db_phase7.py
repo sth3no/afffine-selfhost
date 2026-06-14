@@ -96,6 +96,7 @@ async def test_mark_for_retry_resets_classifier_and_returns_row():
     # Verify all the resets are in the SQL.
     for token in ("classifier_topic = NULL", "classifier_conf = NULL",
                   "classifier_reasoning = NULL", "error = NULL",
+                  "extracted_snapshot = NULL",  # manual retry = force re-extract
                   "retry_count = 0", "next_attempt_at = NULL", "status = 'queued'"):
         assert token in sql.replace("  ", " "), f"missing: {token}"
 

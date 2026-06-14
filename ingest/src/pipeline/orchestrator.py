@@ -15,10 +15,10 @@ import logging
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-from src.config import Platform, TopicsConfig, settings
+from src.config import Platform, TopicsConfig, build_web_url, settings
 from src.db import CaptureRepository, CaptureRow
 from src.pipeline.classification import ClassificationResult
-from src.pipeline.extracted import Extracted
+from src.pipeline.extracted import Extracted, from_snapshot, to_snapshot
 from src.pipeline.filer import Filer
 from src.pipeline.markdown_render import count_keyframe_refs, markdown_to_blocks
 from src.pipeline.chunked_render import chunked_render
@@ -56,30 +56,67 @@ async def process_capture(
     render_fn = render_fn or templated_render
     synth_fn = synth_fn or synthesize_template
 
-    if not row.url:
-        # Phase 3 supports text-only captures (shared_text). Phase 6's
-        # extractors all expect URLs; text-only goes straight to classifying
-        # using shared_text as the body.
-        extracted = Extracted(
-            title=row.shared_title,
-            body_md=row.shared_text or "",
-            author=None,
-            published_at=None,
-            media_kind=_media_kind_for_text(),
-            extra={"text_only": True},
+    # Deferred stub creation: POST /capture accepts rows even when
+    # mcp_ext/AFFiNE is down (doc_id=NULL). Create the doc now — every
+    # later step (title, move, body) needs it.
+    if not row.doc_id:
+        platform_folder = await filer.resolve_or_create_folder(
+            ["Sources", platform.group, platform.folder_name],
+        )
+        created = await filer._mcp.create_doc(
+            row.shared_title or row.url or "captured note",
+        )
+        doc_id = str(created["docId"])
+        await filer._mcp.move_document(doc_id, folder_id=platform_folder)
+        web_url = build_web_url(doc_id)
+        await repo.set_doc(capture_id=row.id, doc_id=doc_id, web_url=web_url)
+        row.doc_id = doc_id
+        row.web_url = web_url
+        log.info("transition", extra={"step": "stub_created_deferred", "doc_id": doc_id})
+
+    if row.extracted_snapshot:
+        # Retry of a row that already extracted successfully (failure was in
+        # a later step). Reuse the snapshot instead of re-paying the source
+        # fetch + Whisper + video-analysis cost. Manual POST /retry clears
+        # the snapshot, so "force re-extract" still works.
+        extracted = from_snapshot(row.extracted_snapshot)
+        log.info(
+            "transition",
+            extra={"step": "extracted", "platform": platform.id, "reused_snapshot": True},
         )
     else:
-        # Phase 13: pass mcp_client + capture_id so extractors that
-        # support video frame analysis (cobalt_ext) can upload keyframe
-        # blobs. All extractors swallow unknown kwargs via **_kwargs.
-        extracted = await extract_fn(
-            row.url,
-            platform,
-            mcp_client=filer._mcp,
-            capture_id=row.id,
-        )
+        if not row.url:
+            # Phase 3 supports text-only captures (shared_text). Phase 6's
+            # extractors all expect URLs; text-only goes straight to classifying
+            # using shared_text as the body.
+            extracted = Extracted(
+                title=row.shared_title,
+                body_md=row.shared_text or "",
+                author=None,
+                published_at=None,
+                media_kind=_media_kind_for_text(),
+                extra={"text_only": True},
+            )
+        else:
+            # Phase 13: pass mcp_client + capture_id so extractors that
+            # support video frame analysis (cobalt_ext) can upload keyframe
+            # blobs. All extractors swallow unknown kwargs via **_kwargs.
+            extracted = await extract_fn(
+                row.url,
+                platform,
+                mcp_client=filer._mcp,
+                capture_id=row.id,
+            )
 
-    log.info("transition", extra={"step": "extracted", "platform": platform.id})
+        # Snapshot immediately — extraction is the expensive, billable step
+        # (Whisper minutes, vision calls). Persisting it here means a retry
+        # after a later-step failure replays for free, and the rerender
+        # endpoint has inputs even for captures that failed mid-pipeline.
+        await repo.save_extracted_snapshot(
+            capture_id=row.id,
+            snapshot=to_snapshot(extracted),
+        )
+        log.info("transition", extra={"step": "extracted", "platform": platform.id})
 
     # ── Classify (or reuse cached classifier output on retry) ────────
     if row.classifier_topic is not None or row.classifier_conf is not None:
@@ -126,12 +163,6 @@ async def process_capture(
                     "No (*, *) seed template exists and synthesis failed — "
                     "cannot render this capture."
                 ) from e
-
-    # ── Snapshot inputs for replay ─────────────────────────────────────
-    await repo.save_extracted_snapshot(
-        capture_id=row.id,
-        snapshot=_extracted_to_dict(extracted),
-    )
 
     # ── Templated render ───────────────────────────────────────────────
     # For long transcripts we route through chunked_render (map-reduce
@@ -206,32 +237,15 @@ async def process_capture(
     log.info("transition", extra={"step": "done"})
 
 
-def _extracted_to_dict(extracted: Extracted) -> dict:
-    """Serialize an Extracted record to a JSON-able dict for snapshotting.
-
-    `url` is intentionally omitted — it lives on the parent capture row,
-    not on Extracted, so the rerender endpoint reads it from row.url.
-    """
-    return {
-        "title": extracted.title,
-        "body_md": extracted.body_md,
-        "author": extracted.author,
-        "published_at": extracted.published_at.isoformat() if extracted.published_at else None,
-        "media_kind": extracted.media_kind.value,
-        "extra": extracted.extra,
-    }
-
-
-async def _replace_doc_body_templated(
+async def build_doc_blocks(
     *,
-    filer: Filer,
-    doc_id: str,
+    mcp: Any,
     rendered: TemplatedOutput | None,
     keyframes: list[dict[str, Any]],
     url: str | None,
     extracted: Extracted | None = None,
-) -> None:
-    """Delete the stub block and append the templated layout:
+) -> list[dict[str, Any]]:
+    """Assemble the templated doc layout as a block list:
         [embed url]
         [callout: lede]           (when rendered.lede is non-empty)
         ## Summary
@@ -246,12 +260,10 @@ async def _replace_doc_body_templated(
 
     The transcript appendix is the user's primary signal — LLM summaries
     are useful but the raw source must be preserved so nothing is lost.
-    """
-    try:
-        await _delete_stub_block(filer=filer, doc_id=doc_id)
-    except Exception as e:  # noqa: BLE001
-        log.warning("stub block cleanup failed (continuing): %s", e)
 
+    Shared by the orchestrator (initial render) and the /rerender endpoint
+    so the two layouts can't drift apart.
+    """
     blocks: list[dict[str, Any]] = []
     if url:
         blocks.append(url_embed_block(url))
@@ -272,11 +284,11 @@ async def _replace_doc_body_templated(
         if rendered.summary_md:
             blocks.append({"type": "paragraph", "style": "h2", "text": "Summary"})
             blocks.extend(
-                await markdown_to_blocks(rendered.summary_md, keyframes=keyframes, mcp_client=filer._mcp)
+                await markdown_to_blocks(rendered.summary_md, keyframes=keyframes, mcp_client=mcp)
             )
         if rendered.body_md:
             blocks.extend(
-                await markdown_to_blocks(rendered.body_md, keyframes=keyframes, mcp_client=filer._mcp)
+                await markdown_to_blocks(rendered.body_md, keyframes=keyframes, mcp_client=mcp)
             )
 
     # Phase 15 fallback: when keyframes are available but body_md referenced
@@ -308,7 +320,7 @@ async def _replace_doc_body_templated(
         if transcript_md.strip():
             blocks.append({"type": "paragraph", "style": "h2", "text": "Transcript"})
             blocks.extend(
-                await markdown_to_blocks(transcript_md, keyframes=keyframes, mcp_client=filer._mcp)
+                await markdown_to_blocks(transcript_md, keyframes=keyframes, mcp_client=mcp)
             )
 
     if url:
@@ -321,6 +333,31 @@ async def _replace_doc_body_templated(
     if not blocks:
         blocks.append({"type": "paragraph", "style": "text", "text": "(no rendered content)"})
 
+    return blocks
+
+
+async def _replace_doc_body_templated(
+    *,
+    filer: Filer,
+    doc_id: str,
+    rendered: TemplatedOutput | None,
+    keyframes: list[dict[str, Any]],
+    url: str | None,
+    extracted: Extracted | None = None,
+) -> None:
+    """Delete the stub block and append the templated layout (build_doc_blocks)."""
+    try:
+        await _delete_stub_block(filer=filer, doc_id=doc_id)
+    except Exception as e:  # noqa: BLE001
+        log.warning("stub block cleanup failed (continuing): %s", e)
+
+    blocks = await build_doc_blocks(
+        mcp=filer._mcp,
+        rendered=rendered,
+        keyframes=keyframes,
+        url=url,
+        extracted=extracted,
+    )
     await filer._mcp.append_blocks(doc_id, blocks)
 
 

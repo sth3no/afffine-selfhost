@@ -41,7 +41,7 @@ async def test_embed_calls_openai_with_correct_args(monkeypatch):
         MagicMock(openai_api_key="sk-test", embedding_model="text-embedding-3-small"),
     )
 
-    with patch("src.pipeline.embeddings.AsyncOpenAI") as Client:
+    with patch("src.pipeline.embeddings.openai_client") as Client:
         instance = Client.return_value
         instance.embeddings.create = AsyncMock(return_value=fake_response)
 

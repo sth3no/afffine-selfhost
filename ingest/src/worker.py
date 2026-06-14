@@ -31,6 +31,8 @@ log = logging.getLogger(__name__)
 
 POLL_INTERVAL_SEC = 2.0
 BACKOFF_SCHEDULE_SEC = [60, 300, 1800]  # retry 1, 2, 3
+CAPTURE_TIMEOUT_SEC = 1800.0  # hard ceiling per capture; overridable via Settings
+MAX_ERROR_CHARS = 2000  # cap on the error string persisted to captures.error
 
 
 def compute_next_attempt_at(*, retry_count: int, now: datetime) -> datetime | None:
@@ -74,6 +76,7 @@ class Worker:
         platform_for: PlatformLookup,
         topics: TopicsConfig,
         poll_interval_sec: float = POLL_INTERVAL_SEC,
+        capture_timeout_sec: float = CAPTURE_TIMEOUT_SEC,
     ) -> None:
         self._pool = pool
         self._repo_factory = repo_factory
@@ -81,29 +84,62 @@ class Worker:
         self._platform_for = platform_for
         self._topics = topics
         self._poll = poll_interval_sec
+        self._capture_timeout = capture_timeout_sec
         self._stop = asyncio.Event()
-        self._alive = False
+        self._wake = asyncio.Event()
+        self._running_loops = 0
 
     @property
     def alive(self) -> bool:
-        return self._alive
+        return self._running_loops > 0
 
     def stop(self) -> None:
-        """Signal the worker loop to exit after its current iteration."""
+        """Signal all worker loops to exit after their current iteration."""
         self._stop.set()
 
+    def wake(self) -> None:
+        """Skip the idle poll delay — called by the API right after a row
+        is inserted so pickup latency is ~0 instead of up to poll_interval."""
+        self._wake.set()
+
+    async def _idle(self) -> None:
+        """Sleep until poll timeout, stop(), or wake() — whichever first."""
+        self._wake.clear()
+        stop_t = asyncio.ensure_future(self._stop.wait())
+        wake_t = asyncio.ensure_future(self._wake.wait())
+        try:
+            await asyncio.wait(
+                {stop_t, wake_t},
+                timeout=self._poll,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+        finally:
+            for t in (stop_t, wake_t):
+                t.cancel()
+
     async def _loop(self) -> None:
-        """Main worker loop. Runs until stop() is called."""
-        self._alive = True
+        """Main worker loop. Runs until stop() is called.
+
+        Resilient by design: a failed claim (e.g. Postgres restarting) is
+        logged and retried after the poll interval — it must never kill the
+        loop, because nothing restarts it and /health would go red until the
+        container is bounced.
+        """
+        self._running_loops += 1
         try:
             while not self._stop.is_set():
-                row = await self._claim_next()
+                try:
+                    row = await self._claim_next()
+                except Exception as exc:  # noqa: BLE001 — claim must not kill the loop
+                    log.warning(
+                        "claim failed (transient DB error?) — retrying in %.1fs: %s: %s",
+                        self._poll, type(exc).__name__, exc,
+                    )
+                    await self._idle()
+                    continue
                 if row is None:
-                    # Nothing to do — idle until next poll or stop.
-                    try:
-                        await asyncio.wait_for(self._stop.wait(), timeout=self._poll)
-                    except asyncio.TimeoutError:
-                        pass
+                    # Nothing to do — idle until next poll, stop, or wake.
+                    await self._idle()
                     continue
 
                 # Dispatch to the process function with the repo bound to the
@@ -116,16 +152,27 @@ class Worker:
                         platform = self._platform_for(row)
                         async with self._pool.acquire() as conn:
                             repo = self._repo_factory(conn)
-                            await self._process(
-                                row,
-                                platform=platform,
-                                topics=self._topics,
-                                repo=repo,
+                            await asyncio.wait_for(
+                                self._process(
+                                    row,
+                                    platform=platform,
+                                    topics=self._topics,
+                                    repo=repo,
+                                ),
+                                timeout=self._capture_timeout,
                             )
+                    except asyncio.TimeoutError:
+                        await self._handle_failure_safe(
+                            row,
+                            TimeoutError(
+                                f"capture processing timed out after "
+                                f"{int(self._capture_timeout)}s"
+                            ),
+                        )
                     except Exception as exc:
-                        await self._handle_failure(row, exc)
+                        await self._handle_failure_safe(row, exc)
         finally:
-            self._alive = False
+            self._running_loops -= 1
 
     async def _claim_next(self) -> CaptureRow | None:
         """Acquire a connection, try queued then due-failed."""
@@ -135,6 +182,19 @@ class Worker:
             if row is not None:
                 return row
             return await repo.claim_due_failed()
+
+    async def _handle_failure_safe(self, row: CaptureRow, exc: Exception) -> None:
+        """_handle_failure, but a failure to persist the failure (DB down at
+        exactly the wrong moment) must not kill the loop. The row stays
+        'extracting' and is re-queued by crash recovery on next startup."""
+        try:
+            await self._handle_failure(row, exc)
+        except Exception as persist_exc:  # noqa: BLE001
+            log.error(
+                "could not persist failure for capture %s (row stays in-flight "
+                "until next startup recovery): %s: %s",
+                row.id, type(persist_exc).__name__, persist_exc,
+            )
 
     async def _handle_failure(self, row: CaptureRow, exc: Exception) -> None:
         """Record a failed row with backoff. Reads prior retry_count from row."""
@@ -149,11 +209,14 @@ class Worker:
             "capture %s failed (attempt %d): %s — next_attempt_at=%s",
             row.id, new_retry_count, exc, next_attempt_at,
         )
+        # str(exc) can be empty (bare TimeoutError) or huge (httpx errors
+        # embedding response bodies) — normalize both before persisting.
+        error = (str(exc) or type(exc).__name__)[:MAX_ERROR_CHARS]
         async with self._pool.acquire() as conn:
             repo = self._repo_factory(conn)
             await repo.mark_failed(
                 capture_id=row.id,
-                error=str(exc),
+                error=error,
                 retry_count=new_retry_count,
                 next_attempt_at=next_attempt_at,
             )

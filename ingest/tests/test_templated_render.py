@@ -76,7 +76,7 @@ async def test_render_returns_templated_output():
         body_md="## Steps\n1. Import useState\n2. Call inside the component",
     )
 
-    with patch("src.pipeline.templated_render.AsyncAnthropic") as Client, \
+    with patch("src.pipeline.templated_render.anthropic_client") as Client, \
          patch("src.pipeline.templated_render.settings") as settings_mock:
         settings_mock.anthropic_api_key = "sk-ant-test"
         settings_mock.summarizer_model = "claude-haiku-4-5"
@@ -97,7 +97,7 @@ async def test_render_uses_template_system_prompt():
     fake = MagicMock()
     fake.parsed_output = TemplatedOutput(title="X", lede=None, summary_md="- a", body_md="b")
 
-    with patch("src.pipeline.templated_render.AsyncAnthropic") as Client, \
+    with patch("src.pipeline.templated_render.anthropic_client") as Client, \
          patch("src.pipeline.templated_render.settings") as settings_mock:
         settings_mock.anthropic_api_key = "sk-ant-test"
         settings_mock.summarizer_model = "claude-haiku-4-5"
@@ -124,7 +124,7 @@ async def test_render_includes_description_in_user_message():
     fake = MagicMock()
     fake.parsed_output = TemplatedOutput(title="X", lede=None, summary_md="- a", body_md="b")
 
-    with patch("src.pipeline.templated_render.AsyncAnthropic") as Client, \
+    with patch("src.pipeline.templated_render.anthropic_client") as Client, \
          patch("src.pipeline.templated_render.settings") as settings_mock:
         settings_mock.anthropic_api_key = "sk-ant-test"
         settings_mock.summarizer_model = "claude-haiku-4-5"
@@ -154,7 +154,7 @@ async def test_render_includes_keyframes_in_user_message():
         {"timestamp_seconds": 154.0, "caption": "Network tab 200 OK", "blob_source_id": "blob2"},
     ]
 
-    with patch("src.pipeline.templated_render.AsyncAnthropic") as Client, \
+    with patch("src.pipeline.templated_render.anthropic_client") as Client, \
          patch("src.pipeline.templated_render.settings") as settings_mock:
         settings_mock.anthropic_api_key = "sk-ant-test"
         settings_mock.summarizer_model = "claude-haiku-4-5"
@@ -177,7 +177,7 @@ async def test_render_includes_video_summary_when_present():
     fake = MagicMock()
     fake.parsed_output = TemplatedOutput(title="X", lede=None, summary_md="- a", body_md="b")
 
-    with patch("src.pipeline.templated_render.AsyncAnthropic") as Client, \
+    with patch("src.pipeline.templated_render.anthropic_client") as Client, \
          patch("src.pipeline.templated_render.settings") as settings_mock:
         settings_mock.anthropic_api_key = "sk-ant-test"
         settings_mock.summarizer_model = "claude-haiku-4-5"
@@ -201,7 +201,7 @@ async def test_render_truncates_long_body():
     fake = MagicMock()
     fake.parsed_output = TemplatedOutput(title="X", lede=None, summary_md="- a", body_md="b")
 
-    with patch("src.pipeline.templated_render.AsyncAnthropic") as Client, \
+    with patch("src.pipeline.templated_render.anthropic_client") as Client, \
          patch("src.pipeline.templated_render.settings") as settings_mock:
         settings_mock.anthropic_api_key = "sk-ant-test"
         settings_mock.summarizer_model = "claude-haiku-4-5"
@@ -225,7 +225,7 @@ async def test_render_raises_when_parsed_output_is_none():
     fake = MagicMock()
     fake.parsed_output = None
 
-    with patch("src.pipeline.templated_render.AsyncAnthropic") as Client, \
+    with patch("src.pipeline.templated_render.anthropic_client") as Client, \
          patch("src.pipeline.templated_render.settings") as settings_mock:
         settings_mock.anthropic_api_key = "sk-ant-test"
         settings_mock.summarizer_model = "claude-haiku-4-5"
