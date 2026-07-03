@@ -193,6 +193,131 @@ async def test_cobalt_http_error_raises_runtime_error(monkeypatch):
         await cobalt_ext.extract("https://example.com/x", _platform())
 
 
+# ── Transcription cost guard (MAX_TRANSCRIPT_MIN + Whisper 25 MB cap) ──
+
+
+@pytest.mark.asyncio
+async def test_duration_over_cap_skips_download_and_whisper(monkeypatch):
+    """A 90-min captionless video must not download audio or call Whisper —
+    the doc gets a 'transcript skipped' note instead (same contract as the
+    legacy ytdlp extractor, which is where the guard used to live even
+    though no platform routes through it anymore)."""
+    from src.pipeline.extractors import cobalt_ext
+
+    tunnel_gets = {"count": 0}
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/" and request.method == "POST":
+            return httpx.Response(
+                200,
+                json={"status": "tunnel", "url": "http://cobalt:9000/tunnel/xyz", "filename": "a.mp3"},
+            )
+        if request.url.path.startswith("/tunnel/"):
+            tunnel_gets["count"] += 1
+            return httpx.Response(200, content=b"\x00" * 8192)
+        return httpx.Response(404)
+
+    monkeypatch.setattr(cobalt_ext, "_TEST_TRANSPORT", httpx.MockTransport(_handler), raising=False)
+
+    async def _metadata(url: str) -> dict:
+        return {"title": "Long Live", "channel": "Ch", "description": "d",
+                "duration": 90 * 60}
+    monkeypatch.setattr(cobalt_ext, "fetch_metadata", _metadata, raising=False)
+
+    whisper_spy = AsyncMock(return_value="should-not-appear")
+    monkeypatch.setattr(cobalt_ext, "_whisper_transcribe", whisper_spy)
+
+    result = await cobalt_ext.extract(
+        "https://www.instagram.com/reel/long/",
+        _platform(id_="instagram"),
+    )
+
+    whisper_spy.assert_not_awaited()
+    assert tunnel_gets["count"] == 0, "audio was downloaded despite the duration cap"
+    assert "transcript skipped" in result.body_md.lower()
+    assert result.extra["transcript_source"] == "skipped_too_long"
+    assert result.extra["transcript_unavailable"] is True
+    assert result.title == "Long Live"
+
+
+@pytest.mark.asyncio
+async def test_unknown_duration_oversize_audio_skips_whisper(monkeypatch):
+    """Metadata failed (duration unknown — common under bot-blocks) and the
+    audio stream blows past the Whisper upload cap: abort the download
+    mid-stream and finish the capture with a 'transcript skipped' note —
+    instead of letting OpenAI 413 the upload, which failed extraction
+    before the snapshot was saved and re-paid the full download on every
+    retry."""
+    from src.pipeline.extractors import cobalt_ext
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/" and request.method == "POST":
+            return httpx.Response(
+                200,
+                json={"status": "tunnel", "url": "http://cobalt:9000/tunnel/big", "filename": "a.mp3"},
+            )
+        if request.url.path.startswith("/tunnel/"):
+            return httpx.Response(200, content=b"\x00" * (16 * 1024))
+        return httpx.Response(404)
+
+    monkeypatch.setattr(cobalt_ext, "_TEST_TRANSPORT", httpx.MockTransport(_handler), raising=False)
+    # Shrink the cap so the 16 KB stub trips it without a 25 MB fixture.
+    monkeypatch.setattr(cobalt_ext, "_WHISPER_MAX_UPLOAD_BYTES", 8 * 1024)
+
+    async def _no_metadata(url: str) -> None:
+        return None
+    monkeypatch.setattr(cobalt_ext, "fetch_metadata", _no_metadata, raising=False)
+
+    whisper_spy = AsyncMock(return_value="should-not-appear")
+    monkeypatch.setattr(cobalt_ext, "_whisper_transcribe", whisper_spy)
+
+    result = await cobalt_ext.extract(
+        "https://www.instagram.com/reel/big/",
+        _platform(id_="instagram"),
+    )
+
+    whisper_spy.assert_not_awaited()
+    assert result.extra["extractor"] == "cobalt"  # NOT the YT fallback path
+    assert "transcript skipped" in result.body_md.lower()
+    assert result.extra["transcript_source"] == "skipped_too_long"
+    assert result.extra["transcript_unavailable"] is True
+
+
+@pytest.mark.asyncio
+async def test_duration_under_cap_still_transcribes(monkeypatch):
+    """Guard must not fire for a normal short video with known duration."""
+    from src.pipeline.extractors import cobalt_ext
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/" and request.method == "POST":
+            return httpx.Response(
+                200,
+                json={"status": "tunnel", "url": "http://cobalt:9000/tunnel/ok", "filename": "a.mp3"},
+            )
+        if request.url.path.startswith("/tunnel/"):
+            return httpx.Response(200, content=b"\x00" * 8192)
+        return httpx.Response(404)
+
+    monkeypatch.setattr(cobalt_ext, "_TEST_TRANSPORT", httpx.MockTransport(_handler), raising=False)
+
+    async def _metadata(url: str) -> dict:
+        return {"title": "Short Reel", "channel": "Ch", "duration": 45}
+    monkeypatch.setattr(cobalt_ext, "fetch_metadata", _metadata, raising=False)
+
+    monkeypatch.setattr(
+        cobalt_ext, "_whisper_transcribe", AsyncMock(return_value="short transcript"),
+    )
+
+    result = await cobalt_ext.extract(
+        "https://www.instagram.com/reel/short/",
+        _platform(id_="instagram"),
+    )
+
+    assert "short transcript" in result.body_md
+    assert result.extra["transcript_source"] == "whisper"
+    assert result.extra["transcript_unavailable"] is False
+
+
 # ── YouTube bot-block fallback ──────────────────────────────────────
 
 

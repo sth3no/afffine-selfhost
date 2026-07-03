@@ -41,7 +41,13 @@ priority, and (b) a recommended execution order.
 
 ## New findings
 
-### N1 — Whisper cost guard is not enforced on the cobalt path (P0)
+### N1 — Whisper cost guard is not enforced on the cobalt path (P0) — ✅ SHIPPED 2026-07-03
+
+> Implemented on this branch: duration gate from yt-dlp metadata before
+> the audio download, mid-stream abort at the 25 MB Whisper upload cap
+> (duration-unknown case), pre-upload size backstop in
+> `_whisper_transcribe`, `transcript_source: "skipped_too_long"` +
+> `transcript_unavailable: true` on skipped captures.
 
 `MAX_TRANSCRIPT_MIN` (default 30) is enforced only in the legacy `ytdlp`
 extractor (ytdlp_ext.py:79-81) — **which no platform in topics.yaml uses

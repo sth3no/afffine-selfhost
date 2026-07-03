@@ -31,7 +31,7 @@ from src.pipeline.extractors import register_extractor
 from src.pipeline.extractors._youtube_oembed import fetch_youtube_oembed
 from src.pipeline.extractors._youtube_transcript import fetch_youtube_transcript
 from src.pipeline.extractors._ytdlp_metadata import fetch_metadata
-from src.pipeline.extractors.ytdlp_ext import _whisper_transcribe
+from src.pipeline.extractors.ytdlp_ext import _WHISPER_MAX_UPLOAD_BYTES, _whisper_transcribe
 
 log = logging.getLogger(__name__)
 
@@ -59,6 +59,14 @@ _YOUTUBE_RECOVERABLE_FAILURE_FRAGMENTS = (
     "cobalt audio too small",
     "cobalt video too small",
 )
+
+
+class _AudioTooLargeError(Exception):
+    """Audio stream exceeded the Whisper upload cap mid-download.
+
+    Deliberately NOT a RuntimeError: extract() handles it as a cost-guard
+    skip (doc gets a "transcript skipped" note), and it must never be
+    swept into the YouTube-recoverable RuntimeError handling."""
 
 
 # Tests inject a MockTransport here. Production leaves it None so httpx
@@ -112,6 +120,7 @@ async def extract(
         # responses from `_download_audio` (cobalt's silent upstream
         # failure mode) get the same YT recovery treatment as the
         # explicit `error.api.youtube.login` block.
+        transcript_skipped = False
         try:
             if captions_transcript:
                 # Captions worked — skip the cobalt audio download AND the
@@ -125,16 +134,56 @@ async def extract(
                 log.info("transcript via youtube-transcript-api (captions, free)",
                          extra={"char_count": len(transcript)})
             else:
-                # No captions — fall back to cobalt audio + Whisper.
+                # No captions — fall back to cobalt audio + Whisper,
+                # subject to the transcription cost guard: skip Whisper
+                # when metadata says the video exceeds MAX_TRANSCRIPT_MIN,
+                # or when the audio stream blows past the Whisper API's
+                # 25 MB upload cap (the API rejects bigger files with a
+                # 413 anyway — and because that used to fail extraction
+                # BEFORE the snapshot was saved, every retry re-paid the
+                # full download for a guaranteed failure).
                 tunnel_url, metadata = await asyncio.gather(
                     _request_tunnel(url),
                     fetch_metadata(url),
                 )
-                audio_path = await _download_audio(tunnel_url, workdir)
-                transcript = await _whisper_transcribe(audio_path)
-                transcript_heading = "## Transcript (Whisper via cobalt)"
-                log.info("transcript via cobalt + Whisper (no captions available)",
-                         extra={"char_count": len(transcript)})
+                duration_sec = int((metadata or {}).get("duration") or 0)
+                cap_sec = settings.max_transcript_min * 60
+                if duration_sec > cap_sec:
+                    transcript = (
+                        f"_transcript skipped: duration {duration_sec}s exceeds "
+                        f"cap {cap_sec}s (MAX_TRANSCRIPT_MIN="
+                        f"{settings.max_transcript_min}) and no captions were "
+                        f"available._"
+                    )
+                    transcript_heading = "## Transcript"
+                    transcript_skipped = True
+                    log.info(
+                        "transcript skipped: duration over MAX_TRANSCRIPT_MIN cap",
+                        extra={"duration_sec": duration_sec, "cap_sec": cap_sec},
+                    )
+                else:
+                    # Duration under cap — or unknown (metadata is
+                    # best-effort and bot-blocks are common); the download
+                    # itself is bounded by the Whisper upload cap either way.
+                    try:
+                        audio_path = await _download_audio(
+                            tunnel_url, workdir,
+                            max_bytes=_WHISPER_MAX_UPLOAD_BYTES,
+                        )
+                    except _AudioTooLargeError as e:
+                        transcript = (
+                            "_transcript skipped: audio stream exceeded "
+                            "Whisper's 25 MB upload limit and no captions "
+                            "were available._"
+                        )
+                        transcript_heading = "## Transcript"
+                        transcript_skipped = True
+                        log.warning("transcript skipped: %s", e)
+                    else:
+                        transcript = await _whisper_transcribe(audio_path)
+                        transcript_heading = "## Transcript (Whisper via cobalt)"
+                        log.info("transcript via cobalt + Whisper (no captions available)",
+                                 extra={"char_count": len(transcript)})
         except RuntimeError as e:
             # YouTube has been escalating bot detection in 2026 — both
             # cobalt and yt-dlp need cookies to scrape video pages. Rather
@@ -160,7 +209,9 @@ async def extract(
         video_summary, keyframes = await _maybe_run_video_analysis(
             url=url,
             workdir=workdir,
-            transcript=transcript,
+            # A "transcript skipped" note is not a transcript — the vision
+            # prompt handles empty transcripts explicitly, so pass none.
+            transcript="" if transcript_skipped else transcript,
             mcp_client=mcp_client,
             capture_id=capture_id,
         )
@@ -202,8 +253,12 @@ async def extract(
                 "url": url,
                 "has_metadata": metadata is not None,
                 "description": description if description else None,
-                "transcript_source": "youtube_captions" if captions_transcript else "whisper",
-                "transcript_unavailable": False,  # both paths produced a transcript
+                "transcript_source": (
+                    "youtube_captions" if captions_transcript
+                    else "skipped_too_long" if transcript_skipped
+                    else "whisper"
+                ),
+                "transcript_unavailable": transcript_skipped,
                 # Phase 13 fields — None when video_analysis is disabled or fails.
                 "video_summary": video_summary,
                 "keyframes": [
@@ -478,7 +533,9 @@ async def _request_tunnel(url: str) -> str:
     raise RuntimeError(f"cobalt unexpected status: {status} body={body}")
 
 
-async def _download_audio(tunnel_url: str, workdir: Path) -> Path:
+async def _download_audio(
+    tunnel_url: str, workdir: Path, *, max_bytes: int | None = None,
+) -> Path:
     # Filename extension matters: OpenAI's Whisper multipart upload sniffs
     # the MIME from the filename. Keep it in sync with audioFormat above.
     out_path = workdir / "audio.mp3"
@@ -491,6 +548,15 @@ async def _download_audio(tunnel_url: str, workdir: Path) -> Path:
                 async for chunk in resp.aiter_bytes():
                     f.write(chunk)
                     byte_count += len(chunk)
+                    if max_bytes is not None and byte_count > max_bytes:
+                        # Abort mid-stream: past this size Whisper would
+                        # reject the upload anyway, so the rest of the
+                        # download is pure wasted bandwidth.
+                        raise _AudioTooLargeError(
+                            f"cobalt audio exceeded {max_bytes} bytes "
+                            f"mid-stream — aborting download (over the "
+                            f"Whisper upload cap)"
+                        )
 
     # Cobalt's tunnel can return HTTP 200 with an empty / HTML body when
     # the upstream YT fetch silently failed. Whisper then chokes with a

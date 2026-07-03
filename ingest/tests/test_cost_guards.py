@@ -66,6 +66,51 @@ async def test_ytdlp_extractor_honors_max_transcript_min():
 
 
 @pytest.mark.asyncio
+async def test_cobalt_extractor_honors_max_transcript_min():
+    """A 90-min captionless video on the cobalt path must NOT call Whisper.
+
+    The cobalt path is what youtube/instagram/tiktok/x actually route
+    through per topics.yaml — the cap can't live only in the legacy ytdlp
+    extractor."""
+    import httpx
+    from src.pipeline.extractors import cobalt_ext
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST":
+            return httpx.Response(
+                200,
+                json={"status": "tunnel", "url": "http://cobalt:9000/tunnel/x"},
+            )
+        return httpx.Response(200, content=b"\x00" * 8192)
+
+    plat = Platform(id="instagram", group="Socials", folder_name="Instagram",
+                    hosts=["instagram.com"], extractor="cobalt")
+
+    with patch.object(cobalt_ext, "_TEST_TRANSPORT", httpx.MockTransport(_handler)), \
+         patch.object(cobalt_ext, "fetch_metadata",
+                      AsyncMock(return_value={"title": "T", "duration": 90 * 60})), \
+         patch.object(cobalt_ext, "_whisper_transcribe", new_callable=AsyncMock) as whisper:
+        result = await cobalt_ext.extract("https://www.instagram.com/reel/x/", plat)
+
+    whisper.assert_not_called()
+    assert "transcript skipped" in result.body_md.lower()
+
+
+@pytest.mark.asyncio
+async def test_whisper_transcribe_refuses_oversize_upload(tmp_path, monkeypatch):
+    """_whisper_transcribe must refuse files over the API's 25 MB upload
+    cap with a descriptive error instead of letting OpenAI 413 it."""
+    from src.pipeline.extractors import ytdlp_ext
+
+    audio = tmp_path / "audio.mp3"
+    audio.write_bytes(b"\x00" * 128)
+    monkeypatch.setattr(ytdlp_ext, "_WHISPER_MAX_UPLOAD_BYTES", 64)
+
+    with pytest.raises(RuntimeError, match="upload limit"):
+        await ytdlp_ext._whisper_transcribe(audio)
+
+
+@pytest.mark.asyncio
 async def test_ytdlp_extractor_uses_caption_when_present_no_whisper():
     """Even for a short video, presence of caption skips Whisper (cost saver)."""
     from src.pipeline.extractors.ytdlp_ext import extract

@@ -190,9 +190,22 @@ async def _run_ytdlp_audio(url: str, workdir: Path) -> Path:
     return files[0]
 
 
+# OpenAI's audio endpoints reject uploads over 25 MB (HTTP 413). Checked
+# before uploading so the failure is descriptive and doesn't waste the
+# round-trip. Callers that can degrade gracefully (cobalt_ext) bound the
+# download itself with this same value.
+_WHISPER_MAX_UPLOAD_BYTES = 25 * 1024 * 1024
+
+
 async def _whisper_transcribe(audio_path: Path) -> str:
     """OpenAI Whisper API. Constructs the client lazily so missing keys
     surface only when transcription is actually attempted."""
+    size = audio_path.stat().st_size
+    if size > _WHISPER_MAX_UPLOAD_BYTES:
+        raise RuntimeError(
+            f"audio file is {size} bytes — over the Whisper API's "
+            f"{_WHISPER_MAX_UPLOAD_BYTES}-byte upload limit; refusing upload"
+        )
     if not settings.openai_api_key:
         raise RuntimeError("OPENAI_API_KEY not set; cannot transcribe")
     client = openai_client()
