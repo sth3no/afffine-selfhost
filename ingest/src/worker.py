@@ -146,8 +146,12 @@ class Worker:
                 # same connection context. Note: the claim UPDATE was its own
                 # transaction; the orchestrator's mark_* calls are separate
                 # transactions (one per step) for per-step idempotency.
+                # collect_usage installs the LLM usage collector every call
+                # site records into; the summary is persisted in the finally
+                # so failed/timed-out attempts still account their spend.
                 from src.logging_setup import set_capture_id
-                with set_capture_id(row.id):
+                from src.llm_usage import collect_usage
+                with set_capture_id(row.id), collect_usage() as usage:
                     try:
                         platform = self._platform_for(row)
                         async with self._pool.acquire() as conn:
@@ -171,6 +175,8 @@ class Worker:
                         )
                     except Exception as exc:
                         await self._handle_failure_safe(row, exc)
+                    finally:
+                        await self._persist_usage_safe(row, usage)
         finally:
             self._running_loops -= 1
 
@@ -182,6 +188,24 @@ class Worker:
             if row is not None:
                 return row
             return await repo.claim_due_failed()
+
+    async def _persist_usage_safe(self, row: CaptureRow, usage: Any) -> None:
+        """Persist the capture's aggregated LLM usage + emit one structured
+        log line. Best-effort: accounting must never kill the loop or mask
+        the capture's real outcome."""
+        try:
+            summary = usage.summary()
+            if summary is None:
+                return
+            log.info("capture llm usage", extra={"cost_breakdown": summary})
+            async with self._pool.acquire() as conn:
+                repo = self._repo_factory(conn)
+                await repo.save_cost_breakdown(capture_id=row.id, breakdown=summary)
+        except Exception as exc:  # noqa: BLE001
+            log.warning(
+                "could not persist usage for capture %s: %s: %s",
+                row.id, type(exc).__name__, exc,
+            )
 
     async def _handle_failure_safe(self, row: CaptureRow, exc: Exception) -> None:
         """_handle_failure, but a failure to persist the failure (DB down at

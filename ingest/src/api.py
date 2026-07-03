@@ -991,6 +991,15 @@ def _row_to_item(row: CaptureRow) -> CaptureItem:
 
 
 def _row_to_detail(row: CaptureRow) -> CaptureDetail:
+    # asyncpg's default JSONB codec is text-format (same reason
+    # save_extracted_snapshot dumps manually) — decode str payloads here.
+    cost_breakdown = row.cost_breakdown
+    if isinstance(cost_breakdown, str):
+        import json
+        try:
+            cost_breakdown = json.loads(cost_breakdown)
+        except ValueError:
+            cost_breakdown = None
     return CaptureDetail(
         capture_id=row.id,
         url=row.url,
@@ -1004,6 +1013,7 @@ def _row_to_detail(row: CaptureRow) -> CaptureDetail:
         error=row.error,
         retry_count=row.retry_count,
         classifier_reasoning=row.classifier_reasoning,
+        cost_breakdown=cost_breakdown,
     )
 
 

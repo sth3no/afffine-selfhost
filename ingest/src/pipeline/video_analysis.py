@@ -32,6 +32,7 @@ from pydantic import BaseModel, Field
 
 from src.config import settings
 from src.llm_clients import anthropic_client
+from src.llm_usage import record_anthropic_usage
 from src.pipeline.video_analysis_filters import filter_low_quality_frames
 
 log = logging.getLogger(__name__)
@@ -412,6 +413,7 @@ async def _vision_call(
         messages=[{"role": "user", "content": content}],
         output_format=_VisionAnalysis,
     )
+    record_anthropic_usage(response, kind="vision", model=settings.vision_model)
 
     if response.parsed_output is None:
         raise RuntimeError("vision call: parsed_output is None")

@@ -172,33 +172,33 @@ async def process_capture(
     keyframes = (extracted.extra or {}).get("keyframes") or []
     body_len = len(extracted.body_md or "")
     use_chunked = body_len > settings.chunked_render_threshold_chars
-    try:
-        if use_chunked:
-            log.info(
-                "transition",
-                extra={"step": "render_chunked", "body_chars": body_len},
-            )
-            rendered = await chunked_render(
-                template=template, extracted=extracted, keyframes=keyframes,
-            )
-        else:
-            rendered = await render_fn(
-                template=template, extracted=extracted, keyframes=keyframes,
-            )
-    except Exception as e:  # noqa: BLE001
-        log.warning("templated render failed: %s", e)
-        rendered = None
-
-    if rendered is not None:
-        new_title = (rendered.title or "").strip() or fallback_title(extracted, url=row.url)
-        await repo.save_template_run(
-            capture_id=row.id,
-            template_id=template.id,
-            prompt_used=template.system_prompt,
-            output_raw=rendered.body_md,
+    # Render failures PROPAGATE — the worker marks the row failed and the
+    # normal backoff retries it. Retries are cheap at this point: the
+    # extraction snapshot and classifier output are already persisted, so
+    # a retry re-pays only the render call(s). (The pre-July behavior —
+    # swallow the error, mark the capture done with a "Render failed"
+    # callout — hid the failure from every API consumer: nothing in
+    # /captures could distinguish degraded docs from healthy ones.)
+    if use_chunked:
+        log.info(
+            "transition",
+            extra={"step": "render_chunked", "body_chars": body_len},
+        )
+        rendered = await chunked_render(
+            template=template, extracted=extracted, keyframes=keyframes,
         )
     else:
-        new_title = fallback_title(extracted, url=row.url)
+        rendered = await render_fn(
+            template=template, extracted=extracted, keyframes=keyframes,
+        )
+
+    new_title = (rendered.title or "").strip() or fallback_title(extracted, url=row.url)
+    await repo.save_template_run(
+        capture_id=row.id,
+        template_id=template.id,
+        prompt_used=template.system_prompt,
+        output_raw=rendered.body_md,
+    )
 
     try:
         await filer._mcp.set_doc_title(row.doc_id, new_title)

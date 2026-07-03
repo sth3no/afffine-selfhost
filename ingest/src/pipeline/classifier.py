@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from src.config import Platform, settings
 from src.llm_clients import anthropic_client
+from src.llm_usage import record_anthropic_usage
 from src.pipeline.classification import ClassificationResult
 from src.pipeline.extracted import Extracted
 
@@ -130,6 +131,7 @@ async def classify(
         messages=[{"role": "user", "content": user_msg}],
         output_format=ClassificationResult,
     )
+    record_anthropic_usage(response, kind="classify", model=settings.classifier_model)
 
     if response.parsed_output is None:
         raise RuntimeError(

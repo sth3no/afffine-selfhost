@@ -80,7 +80,13 @@ Two failure shapes for a long captionless video:
   25 MB API cap before uploading (covers the metadata-failed case where
   duration is unknown).
 
-### N2 — Render failures are invisible (P1)
+### N2 — Render failures are invisible (P1) — ✅ SHIPPED 2026-07-03
+
+> Implemented on this branch (the recommended option): render exceptions
+> now propagate — the worker marks the row failed with normal backoff,
+> the retry reuses the persisted snapshot + classifier output (re-pays
+> only the render), and permanent failures surface in
+> `/captures?status=failed` with the real error.
 
 `process_capture` catches any render exception, sets `rendered = None`,
 appends a "Render failed — see server logs" callout, and **marks the
@@ -167,7 +173,16 @@ them for stub cleanup. Replace = delete all existing blocks, then append
 `build_doc_blocks` output. While there, add a per-capture in-process
 lock (or a status guard) so two concurrent rerenders don't interleave.
 
-### N6 — Cost accounting (P2, carried over — do it before more tuning)
+### N6 — Cost accounting (P2, carried over) — ✅ SHIPPED 2026-07-03
+
+> Implemented on this branch: `src/llm_usage.py` contextvar collector
+> installed by the worker per capture; all 8 billable call sites record
+> (classify / render / render_map / render_reduce / template_synth /
+> vision / embedding / whisper-bytes). Aggregated summary persisted to
+> `captures.cost_breakdown` (JSONB, migration 0007) on success AND
+> failure, emitted as one structured log line, and exposed in
+> `GET /captures/{id}`. Not covered: API-triggered `/rerender` runs
+> without a collector (records are silent no-ops there).
 
 Still nothing records spend. Every capture makes 2–19 LLM calls
 (classify + render or map-reduce + optional vision) plus Whisper minutes

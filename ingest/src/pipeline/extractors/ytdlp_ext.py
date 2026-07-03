@@ -214,6 +214,8 @@ async def _whisper_transcribe(audio_path: Path) -> str:
             model="whisper-1",
             file=f,
         )
+    from src.llm_usage import record_whisper_usage
+    record_whisper_usage(bytes_in=size)
     return (result.text or "").strip()
 
 

@@ -18,6 +18,7 @@ from pydantic import BaseModel, Field
 
 from src.config import settings
 from src.llm_clients import anthropic_client
+from src.llm_usage import record_anthropic_usage
 from src.pipeline.extracted import Extracted
 from src.pipeline.templates import ContentTemplate
 
@@ -128,6 +129,7 @@ async def render(
         messages=[{"role": "user", "content": user_msg}],
         output_format=TemplatedOutput,
     )
+    record_anthropic_usage(response, kind="render", model=settings.summarizer_model)
 
     if response.parsed_output is None:
         raise RuntimeError(

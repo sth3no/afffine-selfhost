@@ -398,27 +398,34 @@ async def test_orchestrator_renders_lede_as_callout_block(deps):
 
 
 @pytest.mark.asyncio
-async def test_orchestrator_renders_failure_callout_when_render_fails(deps):
-    """If render_fn raises, the doc body still has a clear failure indicator."""
+async def test_orchestrator_render_failure_propagates_for_retry(deps):
+    """A render failure must propagate so the worker marks the row failed
+    and the normal backoff retries it. Retries are cheap here — the
+    extraction snapshot and classifier output are persisted before the
+    render — and the failure becomes visible in /captures?status=failed.
+    (Previously the capture was marked done with a doc callout that no
+    API consumer could find.)"""
     plat = _platform()
     deps["filer"].move_to_topic_folder.return_value = "f-tech"
     deps["render_fn"].side_effect = RuntimeError("anthropic broke")
 
-    await process_capture(
-        _row(), platform=plat, topics=_topics(plat),
-        repo=deps["repo"], filer=deps["filer"],
-        extract_fn=deps["extract_fn"], classify_fn=deps["classify_fn"],
-        templates_repo=deps["templates_repo"], render_fn=deps["render_fn"],
-    )
+    with pytest.raises(RuntimeError, match="anthropic broke"):
+        await process_capture(
+            _row(), platform=plat, topics=_topics(plat),
+            repo=deps["repo"], filer=deps["filer"],
+            extract_fn=deps["extract_fn"], classify_fn=deps["classify_fn"],
+            templates_repo=deps["templates_repo"], render_fn=deps["render_fn"],
+        )
 
-    # Capture still completes (mark_done called) but with a clear callout.
-    deps["repo"].mark_done.assert_awaited_once()
-    blocks = deps["filer"]._mcp.append_blocks.await_args.args[1]
-    callout_indices = [i for i, b in enumerate(blocks) if b.get("type") == "callout"]
-    assert len(callout_indices) == 1
-    assert "render failed" in str(blocks[callout_indices[0]]["text"]).lower()
-    # save_template_run is NOT called when render failed.
+    # Not marked done; the worker's failure handling owns the row now.
+    deps["repo"].mark_done.assert_not_called()
     deps["repo"].save_template_run.assert_not_called()
+    # The retry replays these for free — both persisted before the render.
+    deps["repo"].save_extracted_snapshot.assert_awaited_once()
+    deps["repo"].mark_classifying.assert_awaited_once()
+    # The failed attempt must not touch the doc.
+    deps["filer"]._mcp.append_blocks.assert_not_called()
+    deps["filer"]._mcp.set_doc_title.assert_not_called()
 
 
 @pytest.mark.asyncio

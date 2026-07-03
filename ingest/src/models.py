@@ -128,6 +128,10 @@ class CaptureDetail(CaptureItem):
     error: str | None = None
     retry_count: int = 0
     classifier_reasoning: str | None = None
+    # Aggregated LLM/API usage for this capture (tokens per kind/model +
+    # totals — see llm_usage.py). None for captures processed before the
+    # accounting shipped, or when no billable call ran.
+    cost_breakdown: dict | None = None
 
 
 # ── Templates (Phase 14) ─────────────────────────────────────────────

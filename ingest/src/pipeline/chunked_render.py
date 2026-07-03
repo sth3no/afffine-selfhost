@@ -36,6 +36,7 @@ from pydantic import BaseModel, Field
 
 from src.config import settings
 from src.llm_clients import anthropic_client
+from src.llm_usage import record_anthropic_usage
 from src.pipeline.extracted import Extracted
 from src.pipeline.templates import ContentTemplate
 from src.pipeline.templated_render import TemplatedOutput
@@ -286,6 +287,7 @@ async def _summarize_chunk(
         messages=[{"role": "user", "content": user_msg}],
         output_format=ChunkSummary,
     )
+    record_anthropic_usage(response, kind="render_map", model=settings.summarizer_model)
     if response.parsed_output is None:
         raise RuntimeError(
             f"chunked_render: chunk {chunk_index} parsed_output is None"
@@ -401,6 +403,7 @@ async def _reduce_to_templated_output(
         messages=[{"role": "user", "content": user_msg}],
         output_format=TemplatedOutput,
     )
+    record_anthropic_usage(response, kind="render_reduce", model=settings.summarizer_model)
     if response.parsed_output is None:
         raise RuntimeError(
             "chunked_render: reduce parsed_output is None"

@@ -14,6 +14,7 @@ import numpy as np
 
 from src.config import settings
 from src.llm_clients import openai_client
+from src.llm_usage import record_openai_embedding_usage
 
 
 async def embed(text: str) -> list[float]:
@@ -25,6 +26,7 @@ async def embed(text: str) -> list[float]:
         model=settings.embedding_model,
         input=text,
     )
+    record_openai_embedding_usage(result, model=settings.embedding_model)
     return list(result.data[0].embedding)
 
 

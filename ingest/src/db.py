@@ -31,6 +31,7 @@ class CaptureRow:
     error: str | None = None
     completed_at: datetime | None = None
     next_attempt_at: datetime | None = None
+    cost_breakdown: Any | None = None
 
 
 _INSERT_SQL = """
@@ -46,7 +47,7 @@ _CAPTURE_COLS = (
     "platform, status, doc_id, web_url, topic_path, "
     "classifier_topic, classifier_conf, classifier_reasoning, "
     "retry_count, created_at, extracted_snapshot, "
-    "error, completed_at, next_attempt_at"
+    "error, completed_at, next_attempt_at, cost_breakdown"
 )
 
 _BASE_SELECT = f"""
@@ -223,6 +224,27 @@ class CaptureRepository:
             WHERE id = $1
             """,
             capture_id, json.dumps(snapshot),
+        )
+
+    async def save_cost_breakdown(
+        self,
+        *,
+        capture_id: str,
+        breakdown: dict,
+    ) -> None:
+        """Persist the capture's aggregated LLM/API usage (see llm_usage.py).
+
+        Written by the worker after every capture attempt — success or
+        failure — so spend is visible even for captures that never finish.
+        Same manual JSONB encoding as save_extracted_snapshot."""
+        import json
+        await self._conn.execute(
+            """
+            UPDATE captures
+            SET cost_breakdown = $2::jsonb, updated_at = NOW()
+            WHERE id = $1
+            """,
+            capture_id, json.dumps(breakdown),
         )
 
     async def mark_failed(

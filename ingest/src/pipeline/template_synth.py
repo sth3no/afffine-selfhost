@@ -15,6 +15,7 @@ from pydantic import BaseModel, Field, field_validator
 
 from src.config import settings
 from src.llm_clients import anthropic_client
+from src.llm_usage import record_anthropic_usage
 from src.pipeline.extracted import Extracted
 from src.pipeline.templates import ContentTemplate, TemplatesRepository
 
@@ -152,6 +153,7 @@ async def synthesize_template(
         messages=[{"role": "user", "content": user_msg}],
         output_format=SynthesizedTemplate,
     )
+    record_anthropic_usage(response, kind="template_synth", model=settings.vision_model)
 
     if response.parsed_output is None:
         raise RuntimeError(
