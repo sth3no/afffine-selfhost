@@ -103,7 +103,13 @@ alternative is keeping degraded-done but persisting the render error on
 the row (the `error` column exists on `done` rows too) — one line, but
 `status=failed` filtering won't find them.
 
-### N3 — Tests are green but nothing runs them, and 5 tests aren't hermetic (P1)
+### N3 — Tests are green but nothing runs them, and 5 tests aren't hermetic (P1) — ✅ SHIPPED 2026-07-03
+
+> Implemented on this branch: `tests/conftest.py` autouse fixture strips
+> proxy env vars (suite verified green both with and without them), and
+> `.github/workflows/ci.yml` runs ingest pytest + mcp-ext typecheck +
+> mcp-agent/browser-extension vitest — every job verified green locally
+> before the workflow was added.
 
 There is no CI (`.github/` doesn't exist). The suite is 433 tests in
 under 5 seconds — ideal CI material — and this repo's development model
@@ -124,7 +130,14 @@ production behavior is correct; the tests assume a clean env.
   and the browser extensions. All are fast; a single workflow file
   covers the whole repo.
 
-### N4 — Unpinned dependencies make every image rebuild a gamble (P1)
+### N4 — Unpinned dependencies make every image rebuild a gamble (P1) — ✅ SHIPPED 2026-07-03
+
+> Implemented on this branch: `ingest/constraints.txt` (suite-validated
+> pins, yt-dlp deliberately floating, refresh recipe in the header),
+> wired into the Dockerfile and CI. A fresh venv installed with the
+> constraints passes the full suite. Bonus catch: scenedetect 0.7 dropped
+> the `[opencv]` extra pyproject requests — under the pin, opencv-python
+> is a hard dependency of scenedetect, so `cv2` stays guaranteed.
 
 `pyproject.toml` uses only `>=` constraints and the Dockerfile does
 `pip install .` at build time — so every Portainer stack update resolves

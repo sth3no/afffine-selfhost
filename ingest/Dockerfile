@@ -29,9 +29,12 @@ RUN git clone --depth 1 --branch ${BGUTIL_VERSION} \
 
 WORKDIR /app
 
-# Install Python deps first for layer caching.
-COPY pyproject.toml ./
-RUN pip install --no-cache-dir .
+# Install Python deps first for layer caching. constraints.txt pins every
+# transitive version to a suite-validated set (except yt-dlp, which
+# deliberately floats — see the header in that file), so image rebuilds
+# are reproducible instead of resolving whatever upstream shipped today.
+COPY pyproject.toml constraints.txt ./
+RUN pip install --no-cache-dir -c constraints.txt .
 
 # Copy application code last.
 COPY topics.yaml ./

@@ -1,0 +1,79 @@
+# Repo-wide CI. Every job below was verified green locally before this
+# workflow was added — a red job means a real regression, not flaky infra.
+#
+# The ingest suite is hermetic (external boundaries are mocked; proxy env
+# vars are stripped by tests/conftest.py) and needs no services, ffmpeg,
+# or API keys. Integration tests are behind the `integration` marker and
+# skip themselves without INTEGRATION=1, so they never run here.
+
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  ingest:
+    name: ingest (pytest)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ingest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: ingest/constraints.txt
+      - run: pip install -c constraints.txt -e ".[dev]"
+      - run: python -m pytest tests/ -q
+
+  mcp-ext:
+    name: mcp-ext (typecheck)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: mcp-ext
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: mcp-ext/package-lock.json
+      - run: npm ci
+      - run: npm run typecheck
+
+  mcp-agent:
+    name: mcp-agent (vitest)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: mcp-agent
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: mcp-agent/package-lock.json
+      - run: npm ci
+      - run: npm test
+
+  browser-extension:
+    name: browser-extension (vitest)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: browser-extension
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: browser-extension/package-lock.json
+      - run: npm ci
+      - run: npm test
