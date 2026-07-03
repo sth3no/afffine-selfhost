@@ -336,6 +336,44 @@ async def build_doc_blocks(
     return blocks
 
 
+async def replace_doc_blocks(
+    *,
+    mcp: Any,
+    doc_id: str,
+    blocks: list[dict[str, Any]],
+) -> int:
+    """Full-replace a doc's body: delete every existing block, then append
+    `blocks`. Returns the number of blocks deleted.
+
+    Used by /captures/{id}/rerender so repeated rerenders converge on ONE
+    copy of the layout instead of accumulating duplicates. Per-block
+    deletion is tolerant — a block that vanished mid-way (nested child of
+    an already-deleted parent, concurrent edit) is logged and skipped. If
+    the append fails after deletion the doc is left empty; AFFiNE's
+    per-doc version history keeps the prior content recoverable.
+    """
+    deleted = 0
+    try:
+        listing = await mcp.list_doc_blocks(doc_id)
+    except Exception as e:  # noqa: BLE001 — degrade to append-only
+        log.warning("replace_doc_blocks: list_doc_blocks failed "
+                    "(appending without delete): %s", e)
+        listing = None
+    items = listing.get("blocks", []) if isinstance(listing, dict) else []
+    for block in items:
+        block_id = block.get("id")
+        if not block_id:
+            continue
+        try:
+            await mcp.delete_block(doc_id, block_id)
+            deleted += 1
+        except Exception as e:  # noqa: BLE001
+            log.warning("replace_doc_blocks: delete_block %s failed "
+                        "(continuing): %s", block_id, e)
+    await mcp.append_blocks(doc_id, blocks)
+    return deleted
+
+
 async def _replace_doc_body_templated(
     *,
     filer: Filer,

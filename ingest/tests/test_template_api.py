@@ -312,6 +312,62 @@ async def test_rerender_runs_current_template_against_snapshot(client, monkeypat
     fake_save_template_run.assert_awaited_once()
 
 
+@pytest.mark.asyncio
+async def test_rerender_replaces_existing_blocks(client, monkeypatch):
+    """Full-replace semantics: every existing doc block is deleted before
+    the fresh render is appended, so repeated rerenders converge on ONE
+    copy of the layout instead of accumulating duplicates."""
+    c, repo = client
+    repo.resolve = AsyncMock(return_value=_tmpl(id="t_current"))
+
+    from src.db import CaptureRow
+
+    snap = {
+        "title": "T", "body_md": "B", "author": None,
+        "media_kind": "video", "extra": {}, "published_at": None,
+    }
+    row = CaptureRow(
+        id="cap1", url="https://example.com", url_hash="h",
+        source_app=None, shared_title=None, shared_text=None,
+        platform="youtube", status="done", doc_id="doc1",
+        web_url=None, topic_path=None,
+        classifier_topic="Tutorials",
+        extracted_snapshot=snap,
+    )
+
+    monkeypatch.setattr("src.db.CaptureRepository.get_by_id",
+                        AsyncMock(return_value=row), raising=False)
+    monkeypatch.setattr("src.db.CaptureRepository.save_template_run",
+                        AsyncMock(), raising=False)
+
+    fake_pool, _ = _make_fake_pool(row)
+    monkeypatch.setattr(app_state, "pool", fake_pool, raising=False)
+
+    from src.pipeline.templated_render import TemplatedOutput
+    fake_render = AsyncMock(return_value=TemplatedOutput(
+        title="New Title", lede=None, summary_md="- a", body_md="fresh",
+    ))
+    monkeypatch.setattr("src.api.templated_render", fake_render, raising=False)
+
+    mcp = AsyncMock()
+    mcp.list_doc_blocks.return_value = {"blocks": [
+        {"id": "old-1", "flavour": "affine:paragraph", "text": "stale summary"},
+        {"id": "old-2", "flavour": "affine:paragraph", "text": "stale body"},
+    ]}
+    monkeypatch.setattr(app_state, "mcp", mcp, raising=False)
+
+    r = c.post("/captures/cap1/rerender", headers=HEADERS)
+
+    assert r.status_code == 200
+    assert mcp.delete_block.await_count == 2
+    mcp.delete_block.assert_any_await("doc1", "old-1")
+    mcp.delete_block.assert_any_await("doc1", "old-2")
+    mcp.append_blocks.assert_awaited_once()
+    # Deletes strictly precede the append.
+    op_names = [call[0] for call in mcp.mock_calls if call[0] in ("delete_block", "append_blocks")]
+    assert op_names == ["delete_block", "delete_block", "append_blocks"]
+
+
 def test_rerender_404_when_capture_missing(client, monkeypatch):
     c, repo = client
 

@@ -51,3 +51,53 @@ def test_url_embed_falls_back_to_bookmark_for_unknown_host():
         "https://example.com/some/article",
     ):
         assert url_embed_block(url) == {"type": "bookmark", "url": url}, url
+
+
+# ── replace_doc_blocks ───────────────────────────────────────────────
+
+
+import pytest
+from unittest.mock import AsyncMock
+
+from src.pipeline.orchestrator import replace_doc_blocks
+
+
+@pytest.mark.asyncio
+async def test_replace_doc_blocks_deletes_all_then_appends():
+    mcp = AsyncMock()
+    mcp.list_doc_blocks.return_value = {"blocks": [
+        {"id": "b1"}, {"id": "b2"}, {"flavour": "no-id-block"},
+    ]}
+    new_blocks = [{"type": "paragraph", "text": "fresh"}]
+
+    deleted = await replace_doc_blocks(mcp=mcp, doc_id="d", blocks=new_blocks)
+
+    assert deleted == 2  # the id-less entry is skipped, not fatal
+    mcp.append_blocks.assert_awaited_once_with("d", new_blocks)
+
+
+@pytest.mark.asyncio
+async def test_replace_doc_blocks_tolerates_partial_delete_failures():
+    """A block that vanished mid-replace (nested child of a deleted parent,
+    concurrent edit) is logged and skipped — the append still happens."""
+    mcp = AsyncMock()
+    mcp.list_doc_blocks.return_value = {"blocks": [{"id": "b1"}, {"id": "b2"}]}
+    mcp.delete_block.side_effect = [RuntimeError("already gone"), None]
+
+    deleted = await replace_doc_blocks(mcp=mcp, doc_id="d", blocks=[])
+
+    assert deleted == 1
+    mcp.append_blocks.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_replace_doc_blocks_appends_even_when_listing_fails():
+    """If the block listing itself fails, degrade to append-only rather
+    than failing the rerender outright."""
+    mcp = AsyncMock()
+    mcp.list_doc_blocks.side_effect = RuntimeError("mcp down")
+
+    deleted = await replace_doc_blocks(mcp=mcp, doc_id="d", blocks=[{"type": "paragraph", "text": "x"}])
+
+    assert deleted == 0
+    mcp.append_blocks.assert_awaited_once()

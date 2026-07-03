@@ -161,7 +161,14 @@ value is tracking the extractor arms race) — pin everything else.
 Refresh the lock intentionally, in its own commit, so a dep bump is
 bisectable from a code change.
 
-### N5 — Rerender is still append-only (P2, carried over)
+### N5 — Rerender is still append-only (P2, carried over) — ✅ SHIPPED 2026-07-03
+
+> Implemented on this branch (full-replace, per owner's choice): rerender
+> now deletes every existing block and appends the fresh render via the
+> shared `replace_doc_blocks` helper (tolerant of already-gone blocks;
+> degrades to append when listing fails). Manual doc edits are removed
+> from the live doc but recoverable via AFFiNE's per-doc history.
+> Concurrent rerenders of the same capture are serialized in-process.
 
 The last user-visible half of June #8. `POST /captures/{id}/rerender`
 appends a second copy of every section (api.py:735-833, documented v1
@@ -201,7 +208,14 @@ grep spend per platform/topic. It will also show whether the
 prompt (~350 tokens) is below Haiku's minimum cacheable prefix, so some
 of those markers are likely no-ops today.
 
-### N7 — Hygiene (P3, opportunistic)
+### N7 — Hygiene (P3, opportunistic) — partially shipped 2026-07-03
+
+> Shipped: cursor pagination on GET /captures (`cursor` param +
+> `next_cursor`), explicit timeout/max_retries on the shared LLM clients,
+> bearer-token auth on /health/deep + /diagnostic/logging (plain /health
+> stays open for the Docker healthcheck), and the retry-endpoint
+> `_row_to_response(row, None)` wart. Still open: topics.yaml hot-reload,
+> api.py router split, `filer._mcp` reach-ins, per-query pool acquisition.
 
 - **`GET /captures` pagination is stubbed** — `next_cursor` is always
   `null` (api.py:478) even though `list_captures` already supports

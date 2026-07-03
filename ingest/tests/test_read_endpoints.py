@@ -78,6 +78,54 @@ async def test_list_captures_clamps_limit_to_max():
 
 
 @pytest.mark.asyncio
+async def test_list_captures_full_page_returns_next_cursor():
+    """A full page means there may be older rows — next_cursor is the last
+    item's created_at, ready to pass back as ?cursor=."""
+    app, repo = _build_app()
+    repo.list_captures.return_value = [
+        _row(id="b", created_at=datetime(2026, 7, 2, tzinfo=timezone.utc)),
+        _row(id="a", created_at=datetime(2026, 7, 1, tzinfo=timezone.utc)),
+    ]
+    try:
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as c:
+            r = await c.get("/captures", params={"limit": 2},
+                            headers={"Authorization": f"Bearer {settings.ingest_api_token}"})
+        assert r.status_code == 200
+        assert r.json()["next_cursor"] == "2026-07-01T00:00:00+00:00"
+    finally:
+        app.dependency_overrides.clear()
+
+
+@pytest.mark.asyncio
+async def test_list_captures_cursor_forwards_before_to_repo():
+    app, repo = _build_app()
+    repo.list_captures.return_value = []
+    try:
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as c:
+            r = await c.get("/captures",
+                            params={"cursor": "2026-07-01T00:00:00+00:00"},
+                            headers={"Authorization": f"Bearer {settings.ingest_api_token}"})
+        assert r.status_code == 200
+        kwargs = repo.list_captures.call_args.kwargs
+        assert kwargs["before"] == datetime(2026, 7, 1, tzinfo=timezone.utc)
+    finally:
+        app.dependency_overrides.clear()
+
+
+@pytest.mark.asyncio
+async def test_list_captures_invalid_cursor_400():
+    app, repo = _build_app()
+    try:
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://t") as c:
+            r = await c.get("/captures", params={"cursor": "not-a-timestamp"},
+                            headers={"Authorization": f"Bearer {settings.ingest_api_token}"})
+        assert r.status_code == 400
+        repo.list_captures.assert_not_called()
+    finally:
+        app.dependency_overrides.clear()
+
+
+@pytest.mark.asyncio
 async def test_list_captures_unauth():
     app, _ = _build_app()
     try:

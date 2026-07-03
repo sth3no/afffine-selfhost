@@ -45,8 +45,13 @@ async def test_diagnostic_logging_endpoint_reports_topology():
     """Operators curl this when prod logs look mangled; payload tells
     them whether the issue is in the code (extra handlers) or in the
     display layer (Portainer rendering JSON differently)."""
+    from src.config import settings
+
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        response = await client.get("/diagnostic/logging")
+        response = await client.get(
+            "/diagnostic/logging",
+            headers={"Authorization": f"Bearer {settings.ingest_api_token}"},
+        )
 
     assert response.status_code == 200
     body = response.json()
@@ -57,3 +62,15 @@ async def test_diagnostic_logging_endpoint_reports_topology():
     assert "root_formatter" in body
     assert "extra_handler_loggers" in body
     assert isinstance(body["extra_handler_loggers"], list)
+
+
+@pytest.mark.asyncio
+async def test_diagnostic_endpoints_require_token():
+    """/health stays open (Docker healthcheck), but the deep probe and the
+    logging diagnostic report internal topology — token required."""
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        deep = await client.get("/health/deep")
+        diag = await client.get("/diagnostic/logging")
+
+    assert deep.status_code == 401
+    assert diag.status_code == 401

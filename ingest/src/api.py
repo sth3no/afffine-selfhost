@@ -260,7 +260,7 @@ async def health() -> JSONResponse:
 
 
 @app.get("/diagnostic/logging")
-async def diagnostic_logging() -> dict:
+async def diagnostic_logging(_: str = require_token) -> dict:
     """Snapshot of the logging-handler topology.
 
     Use this when production logs show the mangled `INFO INFO INFO ts=...`
@@ -277,8 +277,12 @@ async def diagnostic_logging() -> dict:
 
 
 @app.get("/health/deep")
-async def health_deep() -> JSONResponse:
+async def health_deep(_: str = require_token) -> JSONResponse:
     """Probe every dependency that synchronous /capture exercises.
+
+    Requires the bearer token (unlike shallow /health, which the Docker
+    healthcheck needs unauthenticated): the payload names internal hosts
+    and latencies, and the port defaults to 0.0.0.0.
 
     Shallow /health is fine for `docker healthcheck` — it stays green as long
     as the process is up and the DB pool is alive. /health/deep additionally
@@ -378,13 +382,13 @@ async def capture(
         hash_value = url_hash(body.url)
         existing = await repo.get_by_url_hash(hash_value)
         if existing is not None:
-            return _row_to_response(existing, router)
+            return _row_to_response(existing)
     else:
         # No URL — text-only capture; idempotency by hash of text.
         hash_value = url_hash(body.shared_text or "")  # not URL-shaped but the function still hashes
         existing = await repo.get_by_url_hash(hash_value)
         if existing is not None:
-            return _row_to_response(existing, router)
+            return _row_to_response(existing)
 
     # 2. Detect platform from URL (text-only capture defaults to article).
     platform = router.detect(body.url) if body.url else _article_platform(router)
@@ -446,13 +450,13 @@ async def capture(
                 await filer._mcp.delete_doc(doc_id)
             except Exception as e:  # noqa: BLE001
                 log.warning("orphan stub cleanup failed for doc %s: %s", doc_id, e)
-        return _row_to_response(existing, router)
+        return _row_to_response(existing)
 
     # Skip the worker's idle poll delay — pickup is immediate.
     if app_state.worker is not None:
         app_state.worker.wake()
 
-    return _row_to_response(row, router)
+    return _row_to_response(row)
 
 
 # ── Constants ─────────────────────────────────────────────────────────
@@ -469,13 +473,31 @@ async def list_captures(
     limit: int = DEFAULT_LIST_LIMIT,
     status: str | None = None,
     platform: str | None = None,
+    cursor: str | None = None,
     repo: CaptureRepository = Depends(get_capture_repo),
     _: str = require_token,
 ) -> CapturesPage:
+    """List captures newest-first. `cursor` is the `next_cursor` from the
+    previous page (an ISO-8601 created_at timestamp); rows strictly older
+    than it are returned. `next_cursor` is null on the last page."""
     limit = max(1, min(limit, MAX_LIST_LIMIT))
-    rows = await repo.list_captures(limit=limit, status=status, platform=platform)
+    before = None
+    if cursor:
+        try:
+            before = datetime.fromisoformat(cursor)
+        except ValueError:
+            # Literal 400: the `status` query param shadows fastapi.status here.
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid cursor — pass the next_cursor value from the previous page.",
+            )
+    rows = await repo.list_captures(
+        limit=limit, status=status, platform=platform, before=before,
+    )
     items = [_row_to_item(r) for r in rows]
-    return CapturesPage(items=items, next_cursor=None)
+    # A full page means there may be older rows; a short page is the end.
+    next_cursor = items[-1].created_at.isoformat() if len(items) == limit else None
+    return CapturesPage(items=items, next_cursor=next_cursor)
 
 
 @app.get("/captures/{capture_id}", response_model=CaptureDetail)
@@ -514,7 +536,7 @@ async def retry_capture(
     row = await repo.mark_for_retry(capture_id)
     if row is None:
         raise HTTPException(status_code=404, detail="Capture not found")
-    return _row_to_response(row, None)  # type: ignore[arg-type]  # router unused in helper
+    return _row_to_response(row)
 
 
 @app.delete("/captures/{capture_id}")
@@ -732,6 +754,12 @@ async def _load_sample_extracted(
     return from_snapshot(row["extracted_snapshot"])
 
 
+# Serializes rerenders per capture: two simultaneous rerenders of the same
+# doc would interleave delete/append block operations. Entries are tiny and
+# bounded by the number of distinct captures rerendered per process life.
+_rerender_locks: dict[str, asyncio.Lock] = {}
+
+
 @app.post("/captures/{capture_id}/rerender", response_model=CaptureDetail)
 async def rerender_capture(
     capture_id: str,
@@ -739,24 +767,24 @@ async def rerender_capture(
     _: str = require_token,
 ):
     """Re-run the currently-resolved template against the capture's stored
-    extracted_snapshot.
+    extracted_snapshot, and REPLACE the doc body with the fresh render
+    (delete all existing blocks, then append — repeated rerenders converge
+    on one copy instead of accumulating duplicates).
+
+    Manual edits made to the doc in AFFiNE are removed from the live doc by
+    the replace; AFFiNE's per-doc version history keeps them recoverable.
+
+    Concurrent rerenders of the same capture are serialized in-process.
 
     With ?reextract=true, fall back to re-fetching the URL if no snapshot
-    exists (older pre-template captures). Not yet implemented in v1.
-
-    v1 caveats:
-    - **Append-only.** Blocks are appended to the existing doc body — calling
-      this multiple times for the same capture will accumulate duplicate
-      Summary / body sections. Replace/diff semantics are planned for v2.
-    - **No concurrency lock.** Two simultaneous rerenders of the same capture
-      will both succeed; blocks will be duplicated in the AFFiNE doc. For
-      single-user self-hosted deployments this is acceptable.
+    exists (older pre-template captures). Not yet implemented.
     """
     repo_t = _require_templates_repo()
     if app_state.pool is None:
         raise HTTPException(status_code=503, detail="DB pool not initialized")
 
-    async with app_state.pool.acquire() as conn:
+    lock = _rerender_locks.setdefault(capture_id, asyncio.Lock())
+    async with lock, app_state.pool.acquire() as conn:
         captures_repo = CaptureRepository(conn)
         row = await captures_repo.get_by_id(capture_id)
         if row is None:
@@ -809,13 +837,15 @@ async def rerender_capture(
         )
 
         # Replace blocks in the AFFiNE doc. Layout assembly is shared with
-        # the orchestrator (build_doc_blocks) so the two can't drift apart.
+        # the orchestrator (build_doc_blocks) so the two can't drift apart;
+        # replace_doc_blocks deletes the existing body first so rerenders
+        # don't accumulate duplicate sections.
         if app_state.mcp is None or row.doc_id is None:
             log.warning(
                 "rerender: MCP unavailable or doc_id missing; skipped block update"
             )
         else:
-            from src.pipeline.orchestrator import build_doc_blocks
+            from src.pipeline.orchestrator import build_doc_blocks, replace_doc_blocks
             blocks = await build_doc_blocks(
                 mcp=app_state.mcp,
                 rendered=rendered,
@@ -823,8 +853,13 @@ async def rerender_capture(
                 url=row.url,
                 extracted=extracted,
             )
-            # Naive: append blocks after existing ones (v2 will diff/replace).
-            await app_state.mcp.append_blocks(row.doc_id, blocks)
+            deleted = await replace_doc_blocks(
+                mcp=app_state.mcp, doc_id=row.doc_id, blocks=blocks,
+            )
+            log.info(
+                "rerender: replaced doc body",
+                extra={"deleted_blocks": deleted, "appended_blocks": len(blocks)},
+            )
 
         # Refetch + return CaptureDetail.
         refreshed = await captures_repo.get_by_id(capture_id)
@@ -954,7 +989,7 @@ async def get_youtube_cookies_diagnostic(_: str = require_token):
 # ── Helpers ───────────────────────────────────────────────────────────
 
 
-def _row_to_response(row: CaptureRow, router: PlatformRouter) -> CaptureResponse:
+def _row_to_response(row: CaptureRow) -> CaptureResponse:
     return CaptureResponse(
         capture_id=row.id,
         doc_id=row.doc_id or "",
