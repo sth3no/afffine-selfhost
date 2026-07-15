@@ -1,4 +1,4 @@
-FROM python:3.12-slim
+FROM python:3.13-slim
 
 # System deps: ffmpeg (yt-dlp merge step + Phase 13 frame extract), Node 20
 # for the bgutil-ytdlp-pot-provider script-mode token generator, git for
