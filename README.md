@@ -12,7 +12,7 @@ portainer-stack/
 ├── .dockerignore
 ├── prepare.sh          # Stages ../affine-mcp-agent sources into ./mcp-agent
 └── mcp-agent/
-    ├── Dockerfile      # Runs the scheduler under node:22-alpine + tsx
+    ├── Dockerfile      # Runs the scheduler under node:24-alpine + tsx
     ├── package.json    # (staged by prepare.sh)
     ├── package-lock.json
     ├── tsconfig.json

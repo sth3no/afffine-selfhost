@@ -78,7 +78,7 @@ services:
       - affine_net
 
   redis:
-    image: redis:7-alpine
+    image: redis:8-alpine
     container_name: affine_redis
     healthcheck:
       test: ['CMD', 'redis-cli', '--raw', 'incr', 'ping']
@@ -118,7 +118,7 @@ services:
   # and is what AFFiNE's own dev compose uses. AFFiNE auto-indexes existing
   # workspaces in the background (batchSize=10 per tick) once enabled.
   manticoresearch:
-    image: manticoresearch/manticore:${MANTICORE_VERSION:-10.1.0}
+    image: manticoresearch/manticore:${MANTICORE_VERSION:-27.1.5}
     container_name: affine_manticore
     ulimits:
       nproc: 65535
@@ -356,7 +356,7 @@ services:
   # Both images are maintained by imputnet but the wire format drifted.
   # This 15-line adapter translates POST /get_pot → GET /token.
   yt_session_adapter:
-    image: python:3.13-alpine
+    image: python:3.14-alpine
     container_name: affine_yt_session_adapter
     command:
       - python
