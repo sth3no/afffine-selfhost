@@ -237,6 +237,43 @@ services:
       - affine_net
       - shared_net  # reachable from n8n / laptop MCP clients
 
+  # OPTIONAL TLS terminator for mcp_server. Hosted MCP clients (claude.ai
+  # connectors, ChatGPT, n8n Cloud) only accept https:// URLs with a valid
+  # public certificate — the plain-HTTP host port above is not enough.
+  #
+  # Gated behind a compose profile so it never starts by accident: enable it
+  # by setting COMPOSE_PROFILES=mcp-proxy in the stack env. Leave it disabled
+  # if this host already runs Traefik / nginx / NPM on 80+443 — those would
+  # collide; add a proxy host there instead (see README).
+  #
+  # Requirements before enabling:
+  #   1. MCP_PUBLIC_DOMAIN (e.g. mcp.example.com) has an A record → this host.
+  #   2. Ports 80 and 443 are open from the internet (80 is needed for the
+  #      Let's Encrypt HTTP-01 challenge, not just for redirects).
+  mcp_proxy:
+    image: caddy:2-alpine
+    container_name: affine_mcp_proxy
+    profiles: ["mcp-proxy"]
+    depends_on:
+      mcp_server:
+        condition: service_healthy
+    ports:
+      - '${MCP_PROXY_HTTP_PORT:-80}:80'
+      - '${MCP_PROXY_HTTPS_PORT:-443}:443'
+    environment:
+      - MCP_PUBLIC_DOMAIN=${MCP_PUBLIC_DOMAIN:-}
+      - ACME_EMAIL=${ACME_EMAIL:-}
+      - TZ=${TZ:-UTC}
+    volumes:
+      - ./mcp-proxy/Caddyfile:/etc/caddy/Caddyfile:ro
+      # Issued certificates — persist these or Let's Encrypt rate limits
+      # will bite after a few redeploys.
+      - caddy_data:/data
+      - caddy_config:/config
+    restart: unless-stopped
+    networks:
+      - affine_net
+
   mcp_agent:
     build:
       context: ./mcp-agent
@@ -549,6 +586,10 @@ volumes:
   affine_storage:
   affine_config:
   manticore_data:
+  # Let's Encrypt account + issued certs for the optional mcp_proxy service.
+  # Unused (and never created) unless the mcp-proxy profile is enabled.
+  caddy_data:
+  caddy_config:
   # Phase 12: tmpfs-backed shared volume holding the Netscape cookies.txt
   # uploaded by the browser extension. ingest writes (rw), cobalt reads (ro).
   # tmpfs because cookies are short-lived and we don't want them on disk;

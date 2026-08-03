@@ -1,0 +1,46 @@
+# TLS terminator for the MCP endpoint.
+#
+# Exists because claude.ai (and every other hosted MCP client) requires a
+# publicly reachable HTTPS URL with a valid certificate. compose.yaml
+# publishes mcp_server on a plain-HTTP host port (3300), which such clients
+# refuse to talk to. Caddy fronts it and gets a Let's Encrypt cert
+# automatically for MCP_PUBLIC_DOMAIN.
+#
+# Only starts under the `mcp-proxy` compose profile — if you already run
+# Traefik / nginx / Nginx Proxy Manager on this host, do NOT enable it
+# (ports 80/443 would collide). Add a proxy host in your existing tool
+# instead; see the README section "Exposing MCP over HTTPS".
+
+{
+	email {$ACME_EMAIL}
+}
+
+{$MCP_PUBLIC_DOMAIN} {
+	# No `encode` here on purpose: compression sits between the SSE frames
+	# and the wire, and the payloads are small JSON-RPC messages anyway.
+
+	# MCP transports:
+	#   /mcp       — Streamable HTTP (2025-03-26), the one modern clients use
+	#   /sse       — legacy SSE stream (2024-11-05)
+	#   /messages  — legacy SSE request channel
+	# flush_interval -1 disables response buffering; without it SSE frames sit
+	# in Caddy's buffer and the client hangs on initialize.
+	@mcp path /mcp /mcp/* /sse /sse/* /messages /messages/*
+	handle @mcp {
+		reverse_proxy mcp_server:3000 {
+			flush_interval -1
+		}
+	}
+
+	# Unauthenticated liveness probe — useful for verifying the whole chain
+	# (DNS → TLS → Caddy → container) before touching the connector UI.
+	handle /healthz {
+		reverse_proxy mcp_server:3000
+	}
+
+	# Everything else stays closed. The workspace itself is not published
+	# through this vhost.
+	handle {
+		respond "Not found" 404
+	}
+}

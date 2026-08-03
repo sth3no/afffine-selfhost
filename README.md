@@ -278,6 +278,93 @@ For `create_doc`, a fresh `Y.Doc` (`page` → `surface` + `note`) is
 constructed and the new doc id is also registered in the workspace root
 doc's `meta.pages` array.
 
+## Exposing MCP over HTTPS (claude.ai connectors)
+
+Hosted MCP clients — claude.ai custom connectors, ChatGPT, n8n Cloud —
+only accept a **public `https://` URL with a valid certificate**. Neither
+`mcp_ext` (3100) nor `mcp_server` (3300) terminates TLS, so their host
+ports cannot be used as a connector URL directly.
+
+Which endpoint to point at:
+
+| | `mcp_server` | `mcp_ext` |
+|---|---|---|
+| Path | `/mcp` | `/` |
+| Container | `mcp_server:3000` | `mcp_ext:3100` |
+| Auth | `AFFINE_MCP_HTTP_TOKEN`, header **or** `?token=` | `AFFINE_ACCESS_TOKEN`, header only |
+| Tools | 85 | 11 |
+
+Use `mcp_server`. Its bearer guard also accepts the token as a query
+parameter (`mcp-server/src/httpAuth.ts`), which matters because the
+claude.ai connector dialog has no field for a request header — it offers
+OAuth only. `mcp_ext` has no such fallback: it falls back to the
+`AFFINE_ACCESS_TOKEN` env var instead (`mcp-ext/src/server.ts`), so
+publishing it means **anyone who reaches the port is authenticated**. Keep
+`MCP_EXT_BIND=127.0.0.1` unless you specifically need it on the LAN.
+
+### If this host already runs a reverse proxy
+
+Add one proxy host — `mcp.example.com` → `mcp_server:3000` (join the proxy
+to `affine_net`, or target `127.0.0.1:3300`). Two settings are not optional:
+
+- **Disable response buffering.** The Streamable HTTP transport streams
+  `text/event-stream`; buffered, the client hangs on `initialize`.
+  nginx: `proxy_buffering off;` · Caddy: `flush_interval -1`.
+- **Pass `mcp-session-id` through** in both directions. The transport keys
+  its session off that header.
+
+### If it does not
+
+`compose.yaml` ships an optional Caddy terminator that handles both, plus
+Let's Encrypt issuance and renewal. It stays dormant until you opt in:
+
+1. Point an A record for `MCP_PUBLIC_DOMAIN` at this host.
+2. Open ports 80 and 443 (80 is required for the HTTP-01 challenge).
+3. In the stack env set `COMPOSE_PROFILES=mcp-proxy`, `MCP_PUBLIC_DOMAIN`,
+   and `ACME_EMAIL`.
+4. Redeploy, then check issuance: `docker logs affine_mcp_proxy`.
+
+### Adding the connector
+
+URL — the token is `AFFINE_MCP_HTTP_TOKEN`:
+
+```
+https://mcp.example.com/mcp?token=<AFFINE_MCP_HTTP_TOKEN>
+```
+
+Leave the OAuth fields in the dialog empty; this server is in bearer mode,
+and a client ID there would only make the connector attempt a flow it
+cannot complete. If a connector already exists with a wrong URL, delete and
+re-add it — "Reconnect" re-runs the OAuth handshake and will not change a
+stored URL.
+
+### Verifying before you touch the UI
+
+From the Docker host:
+
+```bash
+curl -s http://localhost:3300/healthz
+
+curl -s -X POST "http://localhost:3300/mcp?token=$AFFINE_MCP_HTTP_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"curl","version":"1"}}}'
+```
+
+`initialize` must return `serverInfo`. Then repeat the same two calls
+against `https://mcp.example.com/…` from a machine outside your network —
+that is what proves DNS, TLS, and the proxy hop, which is where this
+usually fails rather than in the MCP layer itself.
+
+Failure modes worth knowing:
+
+| Symptom | Cause |
+|---|---|
+| `Unauthorized: Invalid or missing token` | Token mismatch, or `?token=` was dropped by the proxy. |
+| 404 on `/mcp` | Hit `mcp_ext` (its endpoint is `/`) or AFFiNE itself (3010) by mistake. |
+| Connects, then hangs | Response buffering in the proxy — see above. |
+| `Forbidden: Origin not allowed` | Browser-side origin check. Set `AFFINE_MCP_HTTP_ALLOWED_ORIGINS=https://claude.ai`. |
+
 ## Ingest Service
 
 Python/FastAPI sidecar that captures URLs from the iOS share extension
