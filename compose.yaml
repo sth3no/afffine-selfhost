@@ -206,11 +206,15 @@ services:
   # mcp_agent and ingest still talk to mcp_ext. Point each client at
   # whichever endpoint it needs.
   #
-  # HTTP bearer mode: clients hit http://<host>:${MCP_SERVER_PORT}/mcp with
-  #   Authorization: Bearer <AFFINE_MCP_HTTP_TOKEN>
+  # OAuth mode (public endpoint, e.g. claude.ai / ChatGPT connectors, Claude
+  # Code, Codex): callers bring a JWT access token from AFFINE_OAUTH_ISSUER_URL
+  # whose `aud` is ${AFFINE_MCP_PUBLIC_BASE_URL}/mcp and whose scope includes
+  # `mcp`. The server publishes /.well-known/oauth-protected-resource so
+  # clients discover the issuer on their own. Internal services use
+  # mcp_internal (bearer) below instead.
   # Towards AFFiNE it signs in with AFFINE_MCP_EMAIL / AFFINE_MCP_PASSWORD
   # (upstream's recommended auth for self-hosted 0.27+; the session is
-  # renewed automatically).
+  # renewed automatically). Every OAuth caller acts as that one account.
   mcp_server:
     image: ghcr.io/dawncr0w/affine-mcp-server:3.10.1
     container_name: affine_mcp_server
@@ -236,15 +240,21 @@ services:
       # Email/password sign-in (same dedicated account as mcp_ext).
       - AFFINE_EMAIL=${AFFINE_MCP_EMAIL:-}
       - AFFINE_PASSWORD=${AFFINE_MCP_PASSWORD:-}
-      # Bearer auth — clients must send this shared secret on every request.
-      # REQUIRED: set AFFINE_MCP_HTTP_TOKEN in the stack env to a strong
-      # random string. The server refuses to start on 0.0.0.0 without it.
-      - AFFINE_MCP_AUTH_MODE=bearer
-      - AFFINE_MCP_HTTP_TOKEN=${AFFINE_MCP_HTTP_TOKEN:-}
+      # OAuth — REQUIRED: AFFINE_MCP_PUBLIC_BASE_URL (https URL this server is
+      # reached at, without /mcp) and AFFINE_OAUTH_ISSUER_URL (https issuer with
+      # discovery + JWKS). No shared token: upstream refuses one in OAuth mode.
+      - AFFINE_MCP_AUTH_MODE=oauth
+      - AFFINE_MCP_PUBLIC_BASE_URL=${AFFINE_MCP_PUBLIC_BASE_URL:-}
+      - AFFINE_OAUTH_ISSUER_URL=${AFFINE_OAUTH_ISSUER_URL:-}
+      - AFFINE_OAUTH_SCOPES=${AFFINE_OAUTH_SCOPES:-mcp}
       # Tool surface — `full` exposes ALL tools, including destructive
       # (delete_*) and admin operations. Narrow it per deployment via
       # AFFINE_MCP_TOOL_PROFILE (authoring / core / read_only) if desired.
+      # In OAuth mode any write-capable profile also needs
+      # AFFINE_OAUTH_ALLOW_SERVICE_WRITES=true, otherwise the server refuses
+      # to start (every OAuth caller writes as the shared service account).
       - AFFINE_TOOL_PROFILE=${AFFINE_MCP_TOOL_PROFILE:-full}
+      - AFFINE_OAUTH_ALLOW_SERVICE_WRITES=${AFFINE_OAUTH_ALLOW_SERVICE_WRITES:-false}
       - TZ=${TZ:-UTC}
     restart: unless-stopped
     # Probe IPv4 loopback explicitly: the server binds 0.0.0.0 only, so a
@@ -258,6 +268,43 @@ services:
     networks:
       - affine_net
       - shared_net  # reachable from n8n / laptop MCP clients
+
+  # Same upstream server in bearer mode, for internal services and scripts
+  # (ingest, admin automation over an SSH tunnel). Never published beyond
+  # the host's loopback: clients send Authorization: Bearer <AFFINE_MCP_HTTP_TOKEN>
+  # to http://mcp_internal:3000/mcp (docker network) or
+  # http://127.0.0.1:${MCP_INTERNAL_PORT}/mcp (on the host).
+  mcp_internal:
+    image: ghcr.io/dawncr0w/affine-mcp-server:3.10.1
+    container_name: affine_mcp_internal
+    depends_on:
+      affine:
+        condition: service_healthy
+    ports:
+      - '127.0.0.1:${MCP_INTERNAL_PORT:-3301}:3000'
+    environment:
+      - MCP_TRANSPORT=http
+      - AFFINE_MCP_HTTP_HOST=0.0.0.0
+      - PORT=3000
+      - AFFINE_BASE_URL=http://affine:3010
+      - AFFINE_ALLOW_INSECURE_HTTP=true
+      - AFFINE_WORKSPACE_ID=${AFFINE_WORKSPACE_ID:-}
+      - AFFINE_EMAIL=${AFFINE_MCP_EMAIL:-}
+      - AFFINE_PASSWORD=${AFFINE_MCP_PASSWORD:-}
+      # REQUIRED: a strong random string (openssl rand -hex 32).
+      - AFFINE_MCP_AUTH_MODE=bearer
+      - AFFINE_MCP_HTTP_TOKEN=${AFFINE_MCP_HTTP_TOKEN:-}
+      - AFFINE_TOOL_PROFILE=full
+      - TZ=${TZ:-UTC}
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://127.0.0.1:3000/healthz', r => process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    networks:
+      - affine_net
 
   mcp_agent:
     build:
