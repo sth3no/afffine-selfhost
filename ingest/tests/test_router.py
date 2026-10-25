@@ -81,6 +81,22 @@ def test_router_initial_path_helper():
     assert router.initial_path(plat) == ["Sources", "Socials", "Instagram"]
 
 
+@pytest.mark.parametrize(
+    ("root", "expected"),
+    [
+        ("Agenti/Sources", ["Agenti", "Sources", "Socials", "Instagram"]),
+        (" Agenti / Sources/ ", ["Agenti", "Sources", "Socials", "Instagram"]),
+        ("", ["Sources", "Socials", "Instagram"]),
+    ],
+)
+def test_initial_path_uses_configured_root(monkeypatch, root, expected):
+    from src.config import settings
+
+    monkeypatch.setattr(settings, "ingest_sources_root", root)
+    plat = PlatformRouter(_config()).detect("https://www.instagram.com/p/Cxyz/")
+    assert PlatformRouter.initial_path(plat) == expected
+
+
 def test_router_no_catch_all_raises():
     """A config without the wildcard entry is a misconfiguration —
     surface it loudly rather than silently dropping URLs."""

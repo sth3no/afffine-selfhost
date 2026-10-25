@@ -10,13 +10,14 @@ Public API:
     router = PlatformRouter(config)
     plat = router.detect("https://www.instagram.com/p/abc")
     path = router.initial_path(plat)   # → ["Sources", "Socials", "Instagram"]
+                                       #   (root from INGEST_SOURCES_ROOT)
 """
 
 from __future__ import annotations
 
 from urllib.parse import urlparse
 
-from src.config import Platform, TopicsConfig
+from src.config import Platform, TopicsConfig, settings
 
 
 class PlatformRouter:
@@ -50,7 +51,7 @@ class PlatformRouter:
 
     @staticmethod
     def initial_path(platform: Platform) -> list[str]:
-        return ["Sources", platform.group, platform.folder_name]
+        return [*settings.sources_root_path(), platform.group, platform.folder_name]
 
     @staticmethod
     def _extract_host(url: str) -> str:

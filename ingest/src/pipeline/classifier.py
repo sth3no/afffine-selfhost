@@ -17,6 +17,7 @@ from src.config import Platform, settings
 from src.llm_clients import anthropic_client
 from src.pipeline.classification import ClassificationResult
 from src.pipeline.extracted import Extracted
+from src.pipeline.router import PlatformRouter
 
 
 SYSTEM_PROMPT = """You are a content classifier for a personal knowledge base.
@@ -83,7 +84,7 @@ def build_user_message(
     return (
         f"Platform: {platform.id} ({platform.group}/{platform.folder_name})\n"
         f"\n"
-        f"Existing topic folders under Sources/{platform.group}/{platform.folder_name}/:\n"
+        f"Existing topic folders under {'/'.join(PlatformRouter.initial_path(platform))}/:\n"
         f"{siblings_block}\n"
         f"\n"
         f"Suggested topics for this platform (you may propose others):\n"
