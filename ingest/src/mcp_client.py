@@ -19,6 +19,7 @@ specs from `markdown_render`) and translate it to DAWNCR0W's tools.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 from itertools import count
@@ -51,7 +52,12 @@ class MCPToolError(Exception):
 
 
 class _SessionExpired(Exception):
-    """The server no longer knows our mcp-session-id (idle timeout, restart)."""
+    """The server no longer knows the mcp-session-id the request carried
+    (idle timeout, restart)."""
+
+    def __init__(self, session_id: str) -> None:
+        super().__init__(session_id)
+        self.session_id = session_id
 
 
 class MCPClient:
@@ -85,6 +91,10 @@ class MCPClient:
         self._client: httpx.AsyncClient | None = None
         self._initialized = False
         self._session_id: str | None = None
+        # Serializes (re)initialization: worker loops and /capture share one
+        # client, and must not each start a session or send a request while
+        # the session id is being replaced.
+        self._init_lock = asyncio.Lock()
         self._counter = count(1)
 
     async def __aenter__(self) -> "MCPClient":
@@ -107,21 +117,25 @@ class MCPClient:
             self._client = None
 
     async def initialize(self) -> dict:
-        """Perform the MCP initialize handshake. Idempotent."""
+        """Perform the MCP initialize handshake. Idempotent and safe to call
+        concurrently: only one handshake runs, the others wait for it."""
         if self._initialized:
             return {}
-        self._session_id = None
-        result = await self._rpc(
-            "initialize",
-            {
-                "protocolVersion": PROTOCOL_VERSION,
-                "capabilities": {"tools": {}},
-                "clientInfo": {"name": "affine-ingest", "version": "0.2.0"},
-            },
-        )
-        await self._notify("notifications/initialized")
-        self._initialized = True
-        return result
+        async with self._init_lock:
+            if self._initialized:
+                return {}
+            result = await self._rpc(
+                "initialize",
+                {
+                    "protocolVersion": PROTOCOL_VERSION,
+                    "capabilities": {"tools": {}},
+                    "clientInfo": {"name": "affine-ingest", "version": "0.2.0"},
+                },
+                session=None,
+            )
+            await self._post({"jsonrpc": "2.0", "method": "notifications/initialized"}, self._session_id)
+            self._initialized = True
+            return result
 
     async def call_tool(self, name: str, arguments: dict[str, Any]) -> Any:
         """Call an MCP tool. Returns the parsed JSON payload, or the raw text
@@ -129,11 +143,14 @@ class MCPClient:
         await self.initialize()
         params = {"name": name, "arguments": arguments}
         try:
-            result = await self._rpc("tools/call", params)
-        except _SessionExpired:
-            self._initialized = False
+            result = await self._rpc("tools/call", params, session=self._session_id)
+        except _SessionExpired as expired:
+            # Only the first caller that sees this session die resets it;
+            # the others find a newer session already in place.
+            if self._session_id == expired.session_id:
+                self._initialized = False
             await self.initialize()
-            result = await self._rpc("tools/call", params)
+            result = await self._rpc("tools/call", params, session=self._session_id)
 
         content = result.get("content", [])
         is_error = bool(result.get("isError"))
@@ -151,23 +168,21 @@ class MCPClient:
         except (json.JSONDecodeError, ValueError):
             return text
 
-    async def _post(self, payload: dict[str, Any]) -> httpx.Response:
+    async def _post(self, payload: dict[str, Any], session: str | None) -> httpx.Response:
         if self._client is None:
             raise RuntimeError("MCPClient must be used inside `async with`")
-        headers = {"mcp-session-id": self._session_id} if self._session_id else {}
+        headers = {"mcp-session-id": session} if session else {}
         response = await self._client.post(self._url, json=payload, headers=headers)
-        if response.status_code == 404 and self._session_id:
-            raise _SessionExpired()
+        if response.status_code == 404 and session:
+            raise _SessionExpired(session)
         response.raise_for_status()
         return response
 
-    async def _notify(self, method: str) -> None:
-        await self._post({"jsonrpc": "2.0", "method": method})
-
-    async def _rpc(self, method: str, params: dict[str, Any]) -> Any:
+    async def _rpc(self, method: str, params: dict[str, Any], *, session: str | None) -> Any:
         req_id = next(self._counter)
-        response = await self._post({"jsonrpc": "2.0", "id": req_id, "method": method, "params": params})
-        self._session_id = response.headers.get("mcp-session-id") or self._session_id
+        response = await self._post({"jsonrpc": "2.0", "id": req_id, "method": method, "params": params}, session)
+        if method == "initialize":
+            self._session_id = response.headers.get("mcp-session-id")
         body = _parse_body(response, req_id)
         if "error" in body:
             err = body["error"]
@@ -232,19 +247,33 @@ class MCPClient:
     ) -> dict:
         """Append block specs in order, one `append_block` call each. With an
         anchor (a block id, or the text of a heading), the blocks go right
-        after it, chained so they keep their order."""
+        after it, chained so they keep their order.
+
+        All-or-nothing as far as the server lets us: every spec is converted
+        before the first write, and when a write fails midway the blocks this
+        call already added are deleted again before the error propagates — so
+        a retried capture does not end up with a half or doubled body."""
+        converted = [to_append_block_args(spec) for spec in blocks]
         anchor = after_block_id
         if after_heading is not None:
             anchor = await self._find_heading(doc_id, after_heading)
         block_ids: list[str] = []
-        for spec in blocks:
-            args = {"docId": doc_id, **to_append_block_args(spec)}
-            if anchor:
-                args["placement"] = {"afterBlockId": anchor}
-            result = await self.call_tool("append_block", args)
-            block_ids.append(result.get("blockId"))
-            if anchor:
-                anchor = result.get("blockId") or anchor
+        try:
+            for block_args in converted:
+                args = {"docId": doc_id, **block_args}
+                if anchor:
+                    args["placement"] = {"afterBlockId": anchor}
+                result = await self.call_tool("append_block", args)
+                block_ids.append(result.get("blockId"))
+                if anchor:
+                    anchor = result.get("blockId") or anchor
+        except Exception:
+            for block_id in reversed([b for b in block_ids if b]):
+                try:
+                    await self.call_tool("delete_block", {"docId": doc_id, "blockId": block_id, "deleteChildren": True})
+                except Exception:  # noqa: BLE001 — best effort; the original error matters
+                    pass
+            raise
         return {"appended": len(block_ids), "blockIds": block_ids}
 
     async def _find_heading(self, doc_id: str, heading: str) -> str:
@@ -262,7 +291,11 @@ class MCPClient:
         """File the doc into exactly one folder (or none when folder_id is
         None): link it to the target, then drop its other sidebar links."""
         data = await self.call_tool("list_organize_nodes", {})
-        links = [n for n in data.get("nodes", []) if n.get("type") == "doc" and n.get("data") == doc_id]
+        nodes = data.get("nodes", [])
+        if folder_id is not None and not any(n.get("type") == "folder" and n.get("id") == folder_id for n in nodes):
+            # A stale id (folder deleted by hand) must not unfile the doc.
+            raise LookupError(f"folder {folder_id} does not exist")
+        links = [n for n in nodes if n.get("type") == "doc" and n.get("data") == doc_id]
         if folder_id is not None and not any(n.get("parentId") == folder_id for n in links):
             await self.call_tool("add_organize_link", {"folderId": folder_id, "type": "doc", "targetId": doc_id})
         for link in links:
@@ -271,7 +304,8 @@ class MCPClient:
         return {"docId": doc_id, "folderId": folder_id, "ok": True}
 
     async def delete_doc(self, doc_id: str) -> dict:
-        return await self.call_tool("delete_doc", {"docId": doc_id, "confirmDocId": doc_id})
+        """Move the doc to AFFiNE's trash (recoverable), never a hard delete."""
+        return await self.call_tool("trash_doc", {"docId": doc_id})
 
     async def set_doc_title(self, doc_id: str, title: str) -> dict:
         return await self.call_tool("update_doc_title", {"docId": doc_id, "title": title})

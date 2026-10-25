@@ -188,3 +188,24 @@ async def test_move_to_topic_acquires_repos_from_pool():
     assert folder_id == "f-new"
     fake_pool.acquire.assert_called_once()  # exactly one acquire per call
     mcp.create_folder.assert_awaited_once_with("Music", parent_folder_id="f-ig")
+
+
+@pytest.mark.asyncio
+async def test_move_to_topic_reuses_same_name_folder_without_embedding_row():
+    """A topic folder that exists in the sidebar but has no stored embedding
+    (e.g. after the sources root moved) is reused, not duplicated, and its
+    embedding gets recorded under the current parent path."""
+    filer, mcp, embeddings_repo, aliases_repo, embed_fn = _make_filer()
+    aliases_repo.lookup.return_value = None
+    embeddings_repo.list_for_parent.return_value = []
+
+    result = ClassificationResult(topic="Recipes", confidence=0.9, reasoning="x")
+    folder_id = await filer.move_to_topic_folder(
+        platform_path=["Sources", "Socials", "Instagram"],
+        result=result,
+    )
+
+    assert folder_id == "f-recipes"
+    mcp.create_folder.assert_not_called()
+    row = embeddings_repo.upsert.call_args.args[0]
+    assert (row.folder_id, row.folder_name, row.parent_path) == ("f-recipes", "Recipes", "Sources/Socials/Instagram")

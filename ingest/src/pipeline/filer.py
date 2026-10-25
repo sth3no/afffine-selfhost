@@ -224,20 +224,28 @@ class Filer:
             )
             return best_match[0]
 
-        # 4. Create new folder under platform + persist embedding.
+        # 4. Reuse a same-name folder already in the sidebar (no embedding row
+        #    for it, e.g. after the sources root moved), else create one —
+        #    either way persist its embedding.
         from src.db import FolderEmbeddingRow
 
-        created = await self._mcp.create_folder(result.topic, parent_folder_id=platform_folder_id)
-        new_folder_id = str(created["folderId"])
+        try:
+            folder_id = await self._resolve_existing_topic_folder(platform_folder_id, result.topic)
+            created_now = False
+        except LookupError:
+            created = await self._mcp.create_folder(result.topic, parent_folder_id=platform_folder_id)
+            folder_id = str(created["folderId"])
+            created_now = True
         await embeddings_repo.upsert(FolderEmbeddingRow(
-            folder_id=new_folder_id,
+            folder_id=folder_id,
             folder_name=result.topic,
             parent_path=parent_path,
             embedding=list(proposed_vec),
         ))
-        # Patch in-memory tree so subsequent resolves find the new folder.
-        self._patch_tree(platform_path, result.topic, new_folder_id)
-        return new_folder_id
+        if created_now:
+            # Patch in-memory tree so subsequent resolves find the new folder.
+            self._patch_tree(platform_path, result.topic, folder_id)
+        return folder_id
 
     async def _resolve_existing_topic_folder(self, platform_folder_id: str, name: str) -> str:
         """Find a child folder by name under platform_folder_id; raise if missing.

@@ -152,11 +152,17 @@ folders, journals) and sign in to AFFiNE as the dedicated service account
 - ideally allow **dynamic client registration** (RFC 7591), so connectors register themselves.
   The claude.ai callback is `https://claude.ai/api/mcp/auth_callback`; CLI clients use `http://localhost:<port>/…`.
 
-Keycloak works well: a client scope `mcp` set as realm default with an
-*Audience* mapper (`included.custom.audience = https://mcp.example.com/mcp`),
-and the anonymous client-registration policy *Trusted Hosts* limited to the
-redirect hosts above (without requiring the sender to match, since connectors
-register from their own servers). Serve discovery also at the RFC 8414
+Keycloak works well — but **gate the audience by a role**, never hand it to
+every token: with anonymous dynamic registration anyone can register a
+`client_credentials` client, and a hardcoded *Audience* mapper would give its
+service account full MCP access without any user login. Instead:
+
+- create a bearer-only client named after the resource (`https://mcp.example.com/mcp`) with a client role `access`, and grant that role only to the users who may use MCP;
+- make a client scope `mcp` a realm default and give it a *scope mapping* to that role — the built-in *audience resolve* mapper (scope `roles`) then adds the client to `aud` only for tokens that carry the role;
+- limit the anonymous client-registration policy *Trusted Hosts* to the redirect hosts above (without requiring the sender to match, since connectors register from their own servers) and lower *Max Clients*.
+
+Check it: an anonymously registered `client_credentials` client must get a
+token without the MCP audience, and `mcp_server` must answer it with `401`. Serve discovery also at the RFC 8414
 path-insert URL (`/.well-known/oauth-authorization-server/realms/<realm>`) on
 the issuer host — some clients try it first.
 

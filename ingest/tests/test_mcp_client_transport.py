@@ -235,3 +235,40 @@ async def test_string_text_passes_through_when_not_json():
 
     # Non-JSON text returned as-is in a string.
     assert result == "ok"
+
+
+@pytest.mark.asyncio
+async def test_concurrent_calls_share_one_reinitialize_after_expiry():
+    """Two worker loops hitting an expired session at once must start ONE new
+    session, and neither may send a request without a session id."""
+    import asyncio
+
+    state = {"session": "old", "inits": 0}
+    sessionless_calls: list[dict] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content.decode())
+        sid = request.headers.get("mcp-session-id")
+        if body.get("method") == "initialize":
+            state["inits"] += 1
+            await asyncio.sleep(0.01)
+            state["session"] = f"s{state['inits']}"
+            return _sse_response(body["id"], {}, session=state["session"])
+        if "id" not in body:
+            await asyncio.sleep(0.01)
+            return httpx.Response(202)
+        if sid is None:
+            sessionless_calls.append(body)
+            return httpx.Response(400, json={"error": "No valid session ID provided"})
+        if sid != state["session"]:
+            return httpx.Response(404, json={"jsonrpc": "2.0", "error": {"code": -32001, "message": "Session not found"}, "id": None})
+        return _sse_response(body["id"], {"content": [{"type": "text", "text": "\"ok\""}]})
+
+    async with MCPClient("http://mcp_internal:3000/mcp", "t", _transport=httpx.MockTransport(handler)) as client:
+        await client.initialize()
+        state["session"] = "server-restarted"  # every known session is now invalid
+        results = await asyncio.gather(*(client.call_tool("current_user", {}) for _ in range(3)))
+
+    assert results == ["ok", "ok", "ok"]
+    assert sessionless_calls == []
+    assert state["inits"] == 2
