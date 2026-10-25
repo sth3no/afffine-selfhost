@@ -1,15 +1,17 @@
 /**
  * Forwarder to AFFiNE's built-in MCP endpoint.
  *
- * For tools that AFFiNE already provides natively (doc-read,
- * doc-keyword-search, doc-semantic-search), we don't reimplement them —
- * we proxy the tools/call JSON-RPC straight through and pass the response
- * back to the client unchanged.
+ * For tools that AFFiNE already provides natively (read_document,
+ * doc_search), we don't reimplement them — we proxy the tools/call
+ * JSON-RPC straight through and pass the response back to the client.
  *
- * This keeps behaviour identical for those tools even as AFFiNE evolves.
+ * Auth: AFFiNE 0.27 only accepts MCP credentials here
+ * (`Authorization: Bearer aff_mcp_v1.…`). The credential comes from
+ * {@link McpCredentialManager}; on HTTP 401 it is re-created and the
+ * request retried once.
  */
 
-import { nativeMcpUrl } from './config.js';
+import type { FetchLike } from './affine-auth.js';
 
 interface JsonRpcResponse {
   jsonrpc: '2.0';
@@ -18,20 +20,10 @@ interface JsonRpcResponse {
   error?: { code: number; message: string };
 }
 
-/** Per-token state so we only handshake with AFFiNE once per client. */
-interface NativeSession {
-  initialized: boolean;
-  sessionId: string | null;
-}
-const sessions = new Map<string, NativeSession>();
-
-function session(token: string): NativeSession {
-  let s = sessions.get(token);
-  if (!s) {
-    s = { initialized: false, sessionId: null };
-    sessions.set(token, s);
-  }
-  return s;
+/** What the forwarder needs from the credential manager. */
+export interface NativeCredentialSource {
+  token(): Promise<string>;
+  rejected(rejectedToken: string): Promise<string>;
 }
 
 async function parseSse(res: Response): Promise<JsonRpcResponse> {
@@ -46,113 +38,107 @@ async function parseSse(res: Response): Promise<JsonRpcResponse> {
   return JSON.parse(dataLines.join('\n')) as JsonRpcResponse;
 }
 
-async function postToNative(
-  token: string,
-  body: Record<string, unknown>
-): Promise<Response> {
-  const s = session(token);
-  const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
-    Accept: 'application/json, text/event-stream',
-    Authorization: `Bearer ${token}`,
-  };
-  if (s.sessionId) headers['Mcp-Session-Id'] = s.sessionId;
+export class NativeMcpClient {
+  /** Token the initialize handshake was done with (redo it after a change). */
+  private initializedWith: string | null = null;
+  private sessionId: string | null = null;
+  private readonly fetchImpl: FetchLike;
 
-  const res = await fetch(nativeMcpUrl(), {
-    method: 'POST',
-    headers,
-    body: JSON.stringify(body),
-  });
-
-  if (!res.ok) {
-    const text = await res.text().catch(() => '');
-    throw new Error(`Native MCP HTTP ${res.status} ${res.statusText}: ${text.slice(0, 200)}`);
+  constructor(
+    private readonly url: string,
+    private readonly credentials: NativeCredentialSource,
+    fetchImpl?: FetchLike,
+  ) {
+    this.fetchImpl = fetchImpl ?? ((input, init) => fetch(input, init));
   }
 
-  const newSession = res.headers.get('mcp-session-id');
-  if (newSession) s.sessionId = newSession;
+  private send(token: string, body: Record<string, unknown>): Promise<Response> {
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+      Accept: 'application/json, text/event-stream',
+      Authorization: `Bearer ${token}`,
+    };
+    if (this.sessionId) headers['Mcp-Session-Id'] = this.sessionId;
+    return this.fetchImpl(this.url, { method: 'POST', headers, body: JSON.stringify(body) });
+  }
 
-  return res;
-}
+  /** POST one JSON-RPC message; on 401 re-create the credential and retry once. */
+  private async post(body: Record<string, unknown>): Promise<Response> {
+    let token = await this.credentials.token();
+    let res = await this.send(token, body);
+    if (res.status === 401) {
+      await res.text().catch(() => undefined);
+      token = await this.credentials.rejected(token);
+      this.sessionId = null;
+      res = await this.send(token, body);
+    }
 
-/** Send a request (expects a response body) and parse JSON-RPC reply. */
-async function rpcToNative(
-  token: string,
-  body: Record<string, unknown>
-): Promise<JsonRpcResponse> {
-  const res = await postToNative(token, body);
-  const ct = res.headers.get('content-type') ?? '';
-  if (ct.includes('text/event-stream')) return parseSse(res);
-  return (await res.json()) as JsonRpcResponse;
-}
+    if (!res.ok) {
+      const text = await res.text().catch(() => '');
+      throw new Error(`Native MCP HTTP ${res.status} ${res.statusText}: ${text.slice(0, 200)}`);
+    }
 
-/** Send a JSON-RPC notification (server returns 202 with no body). */
-async function notifyNative(token: string, body: Record<string, unknown>): Promise<void> {
-  const res = await postToNative(token, body);
-  // Drain the (likely empty) body to free the socket. Don't parse —
-  // notifications return 202 Accepted without a JSON body, and calling
-  // res.json() on an empty string throws "Unexpected end of JSON input".
-  await res.text().catch(() => undefined);
-}
+    const newSession = res.headers.get('mcp-session-id');
+    if (newSession) this.sessionId = newSession;
+    return res;
+  }
 
-/** Ensure native MCP session is initialized before forwarding tool calls. */
-async function ensureInitialized(token: string): Promise<void> {
-  const s = session(token);
-  if (s.initialized) return;
+  /** Send a request (expects a response body) and parse JSON-RPC reply. */
+  private async rpc(body: Record<string, unknown>): Promise<JsonRpcResponse> {
+    const res = await this.post(body);
+    const ct = res.headers.get('content-type') ?? '';
+    if (ct.includes('text/event-stream')) return parseSse(res);
+    return (await res.json()) as JsonRpcResponse;
+  }
 
-  await rpcToNative(token, {
-    jsonrpc: '2.0',
-    id: 'init',
-    method: 'initialize',
-    params: {
-      protocolVersion: '2025-03-26',
-      capabilities: {},
-      clientInfo: { name: 'affine-mcp-ext', version: '1.0.0' },
-    },
-  });
-  await notifyNative(token, {
-    jsonrpc: '2.0',
-    method: 'notifications/initialized',
-  });
+  /** Send a JSON-RPC notification (server returns 202 with no body). */
+  private async notify(body: Record<string, unknown>): Promise<void> {
+    const res = await this.post(body);
+    // Drain the (likely empty) body to free the socket. Don't parse —
+    // notifications return 202 Accepted without a JSON body.
+    await res.text().catch(() => undefined);
+  }
 
-  s.initialized = true;
-}
+  /** Ensure the MCP handshake was done with the current credential. */
+  private async ensureInitialized(): Promise<void> {
+    const token = await this.credentials.token();
+    if (this.initializedWith === token) return;
 
-/** List native AFFiNE tools so we can merge them into our tools/list response. */
-export async function listNativeTools(token: string): Promise<
-  Array<{ name: string; description: string; inputSchema: unknown }>
-> {
-  await ensureInitialized(token);
-  const response = await rpcToNative(token, {
-    jsonrpc: '2.0',
-    id: 'list',
-    method: 'tools/list',
-  });
-  if (response.error) throw new Error(response.error.message);
-  const r = response.result as {
-    tools: Array<{ name: string; description: string; inputSchema: unknown }>;
-  };
-  return r.tools ?? [];
-}
+    await this.rpc({
+      jsonrpc: '2.0',
+      id: 'init',
+      method: 'initialize',
+      params: {
+        protocolVersion: '2025-03-26',
+        capabilities: {},
+        clientInfo: { name: 'affine-mcp-ext', version: '1.4.0' },
+      },
+    });
+    await this.notify({ jsonrpc: '2.0', method: 'notifications/initialized' });
+    this.initializedWith = await this.credentials.token();
+  }
 
-/** Forward a tools/call to AFFiNE native MCP and return its result. */
-export async function callNativeTool(
-  token: string,
-  name: string,
-  args: Record<string, unknown>
-): Promise<unknown> {
-  await ensureInitialized(token);
-  const response = await rpcToNative(token, {
-    jsonrpc: '2.0',
-    id: Date.now(),
-    method: 'tools/call',
-    params: { name, arguments: args },
-  });
-  if (response.error) throw new Error(response.error.message);
-  return response.result;
-}
+  /** List native AFFiNE tools. */
+  async listTools(): Promise<Array<{ name: string; description: string; inputSchema: unknown }>> {
+    await this.ensureInitialized();
+    const response = await this.rpc({ jsonrpc: '2.0', id: 'list', method: 'tools/list' });
+    if (response.error) throw new Error(response.error.message);
+    const r = response.result as {
+      tools: Array<{ name: string; description: string; inputSchema: unknown }>;
+    };
+    return r.tools ?? [];
+  }
 
-/** Invalidate cached session for a token (e.g. on error). */
-export function forgetSession(token: string): void {
-  sessions.delete(token);
+  /** Forward a tools/call to AFFiNE native MCP and return its result. */
+  async callTool(name: string, args: Record<string, unknown>): Promise<unknown> {
+    await this.ensureInitialized();
+    const response = await this.rpc({
+      jsonrpc: '2.0',
+      id: Date.now(),
+      method: 'tools/call',
+      params: { name, arguments: args },
+    });
+    if (response.error) throw new Error(response.error.message);
+    return response.result;
+  }
 }

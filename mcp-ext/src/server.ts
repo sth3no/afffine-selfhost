@@ -17,14 +17,45 @@
  *
  * We deliberately don't use @modelcontextprotocol/sdk — the spec is small
  * and we already understand it from writing the agent's client.
+ *
+ * Auth (AFFiNE 0.27+):
+ *   - Clients must send `Authorization: Bearer <MCP_EXT_HTTP_TOKEN>` on every
+ *     MCP request (POST /, GET / SSE, POST /messages). That token is only
+ *     checked here and is never forwarded.
+ *   - Towards AFFiNE the proxy uses its own server-side identity: an
+ *     email/password cookie session for GraphQL/blob/Socket.IO and an MCP
+ *     credential for the native MCP endpoint (affine-auth.ts).
  */
 
 import http, { type IncomingMessage, type ServerResponse } from 'node:http';
 import { randomUUID } from 'node:crypto';
-import { config } from './config.js';
+import { config, nativeMcpUrl } from './config.js';
 import { tools, toolByName } from './tools.js';
+import { AffineSession, McpCredentialManager } from './affine-auth.js';
+import { createClientGate } from './client-auth.js';
+import { NativeMcpClient } from './forward.js';
+import type { AffineContext } from './tools-shared.js';
 
-const SERVER_INFO = { name: 'affine-mcp-ext', version: '1.3.0' };
+const SERVER_INFO = { name: 'affine-mcp-ext', version: '1.4.0' };
+
+// ── AFFiNE identity (shared by all clients) ─────────────────────────
+
+const session = new AffineSession({
+  baseUrl: config.affineBaseUrl,
+  email: config.affineEmail,
+  password: config.affinePassword,
+  clientVersion: config.affineClientVersion,
+});
+const credentials = new McpCredentialManager(session, {
+  workspaceId: config.workspaceId,
+  name: config.mcpCredentialName,
+});
+const ctx: AffineContext = {
+  session,
+  native: new NativeMcpClient(nativeMcpUrl(), credentials),
+};
+
+const isAuthorizedClient = createClientGate(config.httpToken);
 const PROTOCOL_VERSION = '2025-03-26';
 
 interface JsonRpcRequest {
@@ -50,11 +81,17 @@ function readBody(req: IncomingMessage): Promise<string> {
   });
 }
 
-function extractToken(req: IncomingMessage): string | null {
-  const auth = req.headers['authorization'];
-  if (!auth) return null;
-  const m = /^Bearer\s+(.+)$/i.exec(Array.isArray(auth) ? auth[0] : auth);
-  return m ? m[1].trim() : null;
+function sendUnauthorized(res: ServerResponse) {
+  send(
+    res,
+    401,
+    {
+      jsonrpc: '2.0',
+      id: null,
+      error: { code: -32001, message: 'Unauthorized: send Authorization: Bearer <MCP_EXT_HTTP_TOKEN>.' },
+    },
+    { 'WWW-Authenticate': 'Bearer realm="affine-mcp-ext"' },
+  );
 }
 
 function send(res: ServerResponse, status: number, body: unknown, extraHeaders: Record<string, string> = {}) {
@@ -98,7 +135,6 @@ function wantsInlineSseResponse(req: IncomingMessage): boolean {
 
 interface SseSession {
   res: ServerResponse;
-  token: string;
   heartbeat: NodeJS.Timeout;
 }
 const sseSessions = new Map<string, SseSession>();
@@ -108,7 +144,7 @@ const sseSessions = new Map<string, SseSession>();
  * per-session POST URL, then keeps the connection alive with periodic
  * heartbeats until the client disconnects.
  */
-function openSseSession(req: IncomingMessage, res: ServerResponse, token: string): void {
+function openSseSession(req: IncomingMessage, res: ServerResponse): void {
   const sessionId = randomUUID();
 
   res.writeHead(200, {
@@ -132,7 +168,7 @@ function openSseSession(req: IncomingMessage, res: ServerResponse, token: string
   }, 15000);
   heartbeat.unref?.();
 
-  sseSessions.set(sessionId, { res, token, heartbeat });
+  sseSessions.set(sessionId, { res, heartbeat });
 
   const cleanup = () => {
     clearInterval(heartbeat);
@@ -183,7 +219,7 @@ async function handleSseMessage(
   res.writeHead(202);
   res.end();
 
-  const response = await dispatch(parsed, session.token);
+  const response = await dispatch(parsed);
   if (response === null) return; // notification
 
   try {
@@ -197,7 +233,7 @@ async function handleSseMessage(
 
 // ── Dispatcher ─────────────────────────────────────────────────────
 
-async function dispatch(req: JsonRpcRequest, token: string): Promise<JsonRpcResult | null> {
+async function dispatch(req: JsonRpcRequest): Promise<JsonRpcResult | null> {
   const id = req.id ?? null;
 
   // Notifications have no id and expect no response
@@ -262,7 +298,7 @@ async function dispatch(req: JsonRpcRequest, token: string): Promise<JsonRpcResu
         }
 
         try {
-          const text = await tool.handler(token, args ?? {});
+          const text = await tool.handler(ctx, args ?? {});
           return {
             jsonrpc: '2.0',
             id,
@@ -315,22 +351,23 @@ const server = http.createServer(async (req, res) => {
     return send(res, 200, { status: 'ok', server: SERVER_INFO });
   }
 
-  const token = extractToken(req) || config.fallbackToken;
+  const isSseOpen =
+    method === 'GET' && /text\/event-stream/i.test(accept) && (url === '/' || url.startsWith('/sse'));
+  const isSseMessage = method === 'POST' && url.startsWith('/messages');
+  const isStreamableHttp = method === 'POST' && url === '/';
+
+  // Every MCP entry point requires the client token (health stays open).
+  if ((isSseOpen || isSseMessage || isStreamableHttp) && !isAuthorizedClient(req.headers['authorization'])) {
+    return sendUnauthorized(res);
+  }
 
   // Legacy SSE transport — open persistent stream on GET (or GET /sse)
-  if (method === 'GET' && /text\/event-stream/i.test(accept) && (url === '/' || url.startsWith('/sse'))) {
-    if (!token) {
-      return send(res, 401, {
-        jsonrpc: '2.0',
-        id: null,
-        error: { code: -32000, message: 'Missing Bearer token. Send Authorization: Bearer <ut_...> header or set AFFINE_ACCESS_TOKEN env.' },
-      });
-    }
-    return openSseSession(req, res, token);
+  if (isSseOpen) {
+    return openSseSession(req, res);
   }
 
   // Legacy SSE transport — per-session POST for JSON-RPC requests
-  if (method === 'POST' && url.startsWith('/messages')) {
+  if (isSseMessage) {
     const u = new URL(url, 'http://localhost');
     const sessionId = u.searchParams.get('sessionId') ?? '';
     return handleSseMessage(req, res, sessionId);
@@ -342,16 +379,8 @@ const server = http.createServer(async (req, res) => {
   }
 
   // Streamable HTTP transport — POST / with JSON-RPC body
-  if (method !== 'POST' || url !== '/') {
+  if (!isStreamableHttp) {
     return send(res, 405, { error: `Method Not Allowed: ${method} ${url}. Expected POST / (Streamable HTTP), GET / (legacy SSE), or POST /messages?sessionId=... (legacy SSE request).` });
-  }
-
-  if (!token) {
-    return send(res, 401, {
-      jsonrpc: '2.0',
-      id: null,
-      error: { code: -32000, message: 'Missing Bearer token. Send Authorization: Bearer <ut_...> header.' },
-    });
   }
 
   let body: string;
@@ -372,7 +401,7 @@ const server = http.createServer(async (req, res) => {
     });
   }
 
-  const response = await dispatch(parsed, token);
+  const response = await dispatch(parsed);
 
   if (response === null) {
     // Notification — acknowledge with 202 No Content
@@ -392,9 +421,15 @@ server.listen(config.port, () => {
   console.log(`[mcp-ext] Listening on :${config.port}`);
   console.log(`[mcp-ext] Proxying AFFiNE at ${config.affineBaseUrl}`);
   console.log(`[mcp-ext] Workspace: ${config.workspaceId}`);
+  console.log(`[mcp-ext] Client auth: Bearer MCP_EXT_HTTP_TOKEN; AFFiNE auth: own session (AFFINE_MCP_EMAIL) + managed MCP credential "${credentials.name}"`);
   console.log(`[mcp-ext] Transports: Streamable HTTP (POST /), legacy SSE (GET /, POST /messages?sessionId=...)`);
   console.log(`[mcp-ext] Exposing ${tools.length} tools:`);
   for (const t of tools) console.log(`  - ${t.name}`);
+  // Warm up the AFFiNE session so a wrong password / missing account shows
+  // up in the logs at boot instead of on the first tool call.
+  session.signIn().catch(err => {
+    console.error(`[mcp-ext] AFFiNE sign-in failed at startup (will retry on demand): ${(err as Error).message}`);
+  });
 });
 
 // Graceful shutdown

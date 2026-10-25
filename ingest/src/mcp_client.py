@@ -61,7 +61,7 @@ class MCPClient:
         if not token:
             raise ValueError(
                 "MCPClient requires a non-empty bearer token "
-                "(check AFFINE_ACCESS_TOKEN env var)."
+                "(check MCP_EXT_HTTP_TOKEN env var)."
             )
         self._base_url = base_url.rstrip("/")
         self._token = token

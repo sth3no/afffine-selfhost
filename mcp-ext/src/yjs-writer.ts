@@ -7,7 +7,7 @@
  *   packages/backend/server/src/core/sync/gateway.ts
  *
  * Protocol (spec v0.26+):
- *   1. Connect Socket.IO to the AFFiNE server with Bearer auth.
+ *   1. Connect Socket.IO to the AFFiNE server with the session cookie.
  *   2. emit('space:join', { spaceType, spaceId, clientVersion })   → ack
  *   3. emit('space:load-doc', { ..., docId, stateVector? })        → { state, missing, timestamp }
  *      Throws `DocNotFound` on server if doc is new — we treat that as
@@ -16,11 +16,13 @@
  *      against pre-state vector, base64 the diff.
  *   5. emit('space:push-doc-update', { ..., docId, update })       → ack
  *
- * Auth:
- *   - `attachPresenceUserId` in gateway.ts reads `request.token?.user.id`
- *     which is set by AFFiNE's auth middleware when a Bearer token is on
- *     the socket's handshake. Socket.IO passes headers via `extraHeaders`
- *     during the initial HTTP upgrade.
+ * Auth (AFFiNE 0.27+):
+ *   - The gateway's connection middleware (AuthWebsocketOptionsProvider in
+ *     core/auth/guard.ts) parses cookies from the WebSocket upgrade request
+ *     and runs the normal cookie-session sign-in. We send mcp-ext's own
+ *     session cookie via `extraHeaders` during the upgrade. A rejected
+ *     session surfaces as `connect_error` "You must sign in first…", which
+ *     AffineSession.withSession turns into one re-login + one retry.
  *
  * Shape of the returned DocHandle is unchanged from the earlier GraphQL
  * implementation so write-tools.ts doesn't need to know the transport.
@@ -29,6 +31,8 @@
 import * as Y from 'yjs';
 import { io, type Socket } from 'socket.io-client';
 import { config } from './config.js';
+import { AffineAuthError, isAuthRequiredMessage, type AffineSession } from './affine-auth.js';
+import type { AffineContext } from './tools-shared.js';
 
 const SPACE_TYPE_WORKSPACE = 'workspace';
 // AFFiNE accepts any client reporting >= 0.25.0. 0.26.0 enables the newer
@@ -70,21 +74,24 @@ export interface DocSession {
   close(): void;
 }
 
-async function connect(token: string): Promise<Socket> {
+function connectOnce(headers: Record<string, string>): Promise<Socket> {
   const socket = io(config.affineBaseUrl, {
     transports: ['websocket'],
     path: '/socket.io/',
-    extraHeaders: { Authorization: `Bearer ${token}` },
-    // Bearer cookies: socket.io-client also forwards `auth` during the
-    // initial upgrade handshake — some AFFiNE builds accept it there too.
-    auth: { token: `Bearer ${token}` },
+    // Cookie + x-affine-version on the HTTP upgrade request.
+    extraHeaders: headers,
     reconnection: false,
     timeout: 10000,
   });
 
-  await new Promise<void>((resolve, reject) => {
-    const onConnect = () => { cleanup(); resolve(); };
-    const onError = (err: Error) => { cleanup(); reject(new Error(`Socket connect failed: ${err.message}`)); };
+  return new Promise<Socket>((resolve, reject) => {
+    const onConnect = () => { cleanup(); resolve(socket); };
+    const onError = (err: Error) => {
+      cleanup();
+      socket.disconnect();
+      const message = `Socket connect failed: ${err.message}`;
+      reject(isAuthRequiredMessage(err.message) ? new AffineAuthError(message) : new Error(message));
+    };
     const cleanup = () => {
       socket.off('connect', onConnect);
       socket.off('connect_error', onError);
@@ -92,8 +99,11 @@ async function connect(token: string): Promise<Socket> {
     socket.on('connect', onConnect);
     socket.on('connect_error', onError);
   });
+}
 
-  return socket;
+/** Connect with the shared session; re-login + retry once if AFFiNE rejects it. */
+function connect(session: AffineSession): Promise<Socket> {
+  return session.withSession(headers => connectOnce(headers));
 }
 
 async function join(socket: Socket, spaceId: string): Promise<void> {
@@ -111,8 +121,8 @@ async function join(socket: Socket, spaceId: string): Promise<void> {
   }
 }
 
-export async function openSession(token: string): Promise<DocSession> {
-  const socket = await connect(token);
+export async function openSession(ctx: AffineContext): Promise<DocSession> {
+  const socket = await connect(ctx.session);
   await join(socket, config.workspaceId);
 
   return {
@@ -195,8 +205,8 @@ export interface DocHandle {
  * loads the current state, returns a handle. `commit()` diffs against the
  * loaded state vector and pushes, then closes the socket.
  */
-export async function openDoc(token: string, guid: string): Promise<DocHandle> {
-  const session = await openSession(token);
+export async function openDoc(ctx: AffineContext, guid: string): Promise<DocHandle> {
+  const session = await openSession(ctx);
   let loaded: Y.Doc | null;
   try {
     loaded = await session.load(guid);
@@ -226,8 +236,8 @@ export async function openDoc(token: string, guid: string): Promise<DocHandle> {
 }
 
 /** Read a doc without intending to write. Loads and closes the socket. */
-export async function readDoc(token: string, guid: string): Promise<{ doc: Y.Doc; existed: boolean }> {
-  const session = await openSession(token);
+export async function readDoc(ctx: AffineContext, guid: string): Promise<{ doc: Y.Doc; existed: boolean }> {
+  const session = await openSession(ctx);
   try {
     const loaded = await session.load(guid);
     if (loaded) return { doc: loaded, existed: true };

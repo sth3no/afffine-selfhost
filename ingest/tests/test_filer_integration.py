@@ -3,7 +3,7 @@
 Skipped unless INTEGRATION=1 in the environment. Required env vars when running:
     INTEGRATION=1
     MCP_EXT_URL=http://localhost:3100   # or http://mcp_ext:3100 inside the docker network
-    AFFINE_ACCESS_TOKEN=ut_...
+    MCP_EXT_HTTP_TOKEN=<the stack's MCP_EXT_HTTP_TOKEN>
 
 Acceptance: creates a doc under Sources/Test/Phase2 with a unique title,
 re-running creates a second doc but reuses the folders. The test cleans up
@@ -37,9 +37,9 @@ def mcp_url() -> str:
 
 @pytest.fixture
 def access_token() -> str:
-    token = os.environ.get("AFFINE_ACCESS_TOKEN")
+    token = os.environ.get("MCP_EXT_HTTP_TOKEN")
     if not token:
-        pytest.skip("AFFINE_ACCESS_TOKEN not set")
+        pytest.skip("MCP_EXT_HTTP_TOKEN not set")
     return token
 
 

@@ -12,7 +12,7 @@ def test_mcp_client_rejects_empty_token(bad_token: str):
     """Empty / whitespace-only tokens must fail at construction.
 
     Regression: production sent `Authorization: Bearer ` (trailing space,
-    no credential) when AFFINE_ACCESS_TOKEN was unset, which httpx then
+    no credential) when the token env var was unset, which httpx then
     rejected with an opaque `LocalProtocolError: Illegal header value
     b'Bearer '` on every outbound /capture call.
     """
