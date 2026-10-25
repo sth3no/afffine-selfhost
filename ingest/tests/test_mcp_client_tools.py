@@ -145,6 +145,7 @@ async def test_move_document_links_target_then_removes_old_links():
         "list_organize_nodes": [_nodes(
             {"id": "l1", "parentId": "f1", "type": "doc", "data": "d1", "index": "a0"},
             {"id": "l9", "parentId": "f1", "type": "doc", "data": "d9", "index": "a1"},
+            {"id": "f3", "parentId": None, "type": "folder", "data": "Target", "index": "a2"},
         )],
         "add_organize_link": [{"id": "l2"}],
         "delete_organize_link": [{"success": True}],
@@ -160,6 +161,7 @@ async def test_move_document_links_target_then_removes_old_links():
 async def test_move_document_already_in_target_is_a_no_op():
     transport, calls = _make_transport({"list_organize_nodes": [_nodes(
         {"id": "l1", "parentId": "f3", "type": "doc", "data": "d1", "index": "a0"},
+        {"id": "f3", "parentId": None, "type": "folder", "data": "Target", "index": "a1"},
     )]})
     async with MCPClient(URL, "t", _transport=transport) as c:
         await c.move_document("d1", folder_id="f3")
@@ -180,7 +182,7 @@ async def test_move_document_without_folder_unfiles():
 @pytest.mark.asyncio
 async def test_simple_doc_tools_map_names_and_arguments():
     transport, calls = _make_transport({
-        "delete_doc": [{"ok": True}],
+        "trash_doc": [{"ok": True}],
         "update_doc_title": [{"ok": True}],
         "read_doc": [{"blocks": [{"id": "b1"}]}],
         "delete_block": [{"deleted": True}],
@@ -191,7 +193,7 @@ async def test_simple_doc_tools_map_names_and_arguments():
         listing = await c.list_doc_blocks("d1")
         await c.delete_block("d1", "b1")
     assert calls == [
-        {"name": "delete_doc", "arguments": {"docId": "d1", "confirmDocId": "d1"}},
+        {"name": "trash_doc", "arguments": {"docId": "d1"}},
         {"name": "update_doc_title", "arguments": {"docId": "d1", "title": "New"}},
         {"name": "read_doc", "arguments": {"docId": "d1"}},
         {"name": "delete_block", "arguments": {"docId": "d1", "blockId": "b1"}},
@@ -220,3 +222,65 @@ async def test_upload_blob_without_workspace_raises():
     async with MCPClient(URL, "t", _transport=transport) as c:
         with pytest.raises(ValueError, match="workspace"):
             await c.upload_blob(filename="x.jpg", content_type="image/jpeg", data=b"x")
+
+
+@pytest.mark.asyncio
+async def test_delete_doc_moves_to_trash_not_permanent():
+    transport, calls = _make_transport({"trash_doc": [{"ok": True}]})
+    async with MCPClient(URL, "t", _transport=transport) as c:
+        await c.delete_doc("d1")
+    assert calls == [{"name": "trash_doc", "arguments": {"docId": "d1"}}]
+
+
+@pytest.mark.asyncio
+async def test_append_blocks_validates_every_spec_before_writing():
+    transport, calls = _make_transport({"append_block": [{"blockId": "b1"}]})
+    async with MCPClient(URL, "t", _transport=transport) as c:
+        with pytest.raises(ValueError, match="unsupported block type"):
+            await c.append_blocks("d1", [{"type": "divider"}, {"type": "mystery"}])
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_append_blocks_rolls_back_partial_body_on_failure():
+    """A failure mid-body removes the blocks this call already wrote, so a
+    retry does not leave a half-written or duplicated body behind."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content.decode())
+        if body["method"] == "initialize":
+            return httpx.Response(200, json={"jsonrpc": "2.0", "id": body["id"], "result": {}})
+        if "id" not in body:
+            return httpx.Response(202)
+        name = body["params"]["name"]
+        seen.append(name)
+        if name == "append_block" and seen.count("append_block") == 3:
+            return httpx.Response(503)
+        text = json.dumps({"blockId": f"b{seen.count('append_block')}", "deleted": True})
+        return httpx.Response(200, json={"jsonrpc": "2.0", "id": body["id"], "result": {"content": [{"type": "text", "text": text}]}})
+
+    seen: list[str] = []
+    deleted: list[str] = []
+    async with MCPClient(URL, "t", _transport=httpx.MockTransport(handler)) as c:
+        original = c.call_tool
+
+        async def spy(name, arguments):
+            if name == "delete_block":
+                deleted.append(arguments["blockId"])
+            return await original(name, arguments)
+
+        c.call_tool = spy  # type: ignore[method-assign]
+        with pytest.raises(httpx.HTTPStatusError):
+            await c.append_blocks("d1", [{"type": "divider"}] * 3)
+    assert deleted == ["b2", "b1"]
+
+
+@pytest.mark.asyncio
+async def test_move_document_to_missing_folder_raises_without_touching_links():
+    transport, calls = _make_transport({"list_organize_nodes": [_nodes(
+        {"id": "l1", "parentId": "f1", "type": "doc", "data": "d1", "index": "a0"},
+        {"id": "f1", "parentId": None, "type": "folder", "data": "Sources", "index": "a0"},
+    )]})
+    async with MCPClient(URL, "t", _transport=transport) as c:
+        with pytest.raises(LookupError, match="folder"):
+            await c.move_document("d1", folder_id="gone")
+    assert [x["name"] for x in calls] == ["list_organize_nodes"]
