@@ -12,18 +12,17 @@
  *     data as JSON. These implement the read-only operations that
  *     affine-mcp-agent expects (list_documents, get_workspace_info, ...).
  *
- *  2. Native forwards — for doc-read / doc-keyword-search /
- *     doc-semantic-search we pass the call through to AFFiNE's built-in
- *     MCP server untouched. We register underscore-named aliases too
- *     (read_document, keyword_search, semantic_search) for compatibility
- *     with the agent's naming convention.
+ *  2. Native forwards — read_document, keyword_search and semantic_search
+ *     pass the call through to AFFiNE's built-in MCP server (authenticated
+ *     with an MCP credential, see affine-auth.ts). AFFiNE 0.27 replaced its
+ *     separate keyword/semantic tools with one `doc_search`; both of our
+ *     search names forward there so the proxy's tool surface is unchanged.
  */
 
 import { gql } from './graphql.js';
 import { config } from './config.js';
-import { callNativeTool } from './forward.js';
 import { listPages } from './doc-store.js';
-import type { ToolDefinition } from './tools-shared.js';
+import type { AffineContext, ToolDefinition } from './tools-shared.js';
 import { writeTools } from './write-tools.js';
 import { folderTools } from './folder-tools.js';
 import { blobTools } from './blob-tools.js';
@@ -34,6 +33,68 @@ export type { ToolDefinition } from './tools-shared.js';
 const wsId = () => config.workspaceId;
 
 // ── GraphQL-backed tools ──────────────────────────────────────────
+
+interface DocInfoNode {
+  id: string;
+  title: string | null;
+  createdAt: string;
+  updatedAt: string;
+  createdBy: { name: string; avatarUrl: string | null } | null;
+}
+
+interface DocInfoPage {
+  totalCount: number;
+  pageInfo: { hasNextPage: boolean };
+  edges: Array<{ node: DocInfoNode }>;
+}
+
+// AFFiNE 0.27 restricts `workspace.docs` to workspace admins/owners
+// (Workspace.Users.Manage). For a member/editor service account fall back
+// to `recentlyUpdatedDocs`, which returns the same doc info filtered by
+// per-doc read permission (ordered by last update instead of creation).
+// Remembered for the process lifetime so we don't pay a failing call each time.
+let docsListingForbidden = false;
+
+function isSpaceAccessDenied(err: unknown): boolean {
+  return /do not have permission to access Space|SPACE_ACCESS_DENIED/i.test((err as Error)?.message ?? '');
+}
+
+async function queryDocInfos(ctx: AffineContext, first: number, offset: number): Promise<DocInfoPage> {
+  const query = (field: 'docs' | 'recentlyUpdatedDocs') => `query ($id: String!, $first: Int!, $offset: Int!) {
+        workspace(id: $id) {
+          ${field}(pagination: { first: $first, offset: $offset }) {
+            totalCount
+            pageInfo { hasNextPage }
+            edges { node {
+              id
+              title
+              createdAt
+              updatedAt
+              createdBy { name avatarUrl }
+            } }
+          }
+        }
+      }`;
+  const variables = { id: wsId(), first, offset };
+  if (!docsListingForbidden) {
+    try {
+      const data = await gql<{ workspace: { docs: DocInfoPage } }>(ctx, query('docs'), variables);
+      return data.workspace.docs;
+    } catch (err) {
+      if (!isSpaceAccessDenied(err)) throw err;
+      docsListingForbidden = true;
+      console.warn(
+        '[mcp-ext] AFFINE_MCP_EMAIL account is not a workspace admin — listing docs via recentlyUpdatedDocs instead of docs',
+      );
+    }
+  }
+  const data = await gql<{ workspace: { recentlyUpdatedDocs: DocInfoPage } }>(
+    ctx,
+    query('recentlyUpdatedDocs'),
+    variables,
+  );
+  return data.workspace.recentlyUpdatedDocs;
+}
 
 const listDocuments: ToolDefinition = {
   name: 'list_documents',
@@ -46,50 +107,16 @@ const listDocuments: ToolDefinition = {
       offset: { type: 'number', description: 'Pagination offset, default 0' },
     },
   },
-  async handler(token, args) {
+  async handler(ctx, args) {
     const limit = Number(args.limit ?? 20);
     const offset = Number(args.offset ?? 0);
-    const data = await gql<{
-      workspace: {
-        docs: {
-          totalCount: number;
-          pageInfo: { hasNextPage: boolean };
-          edges: Array<{
-            node: {
-              id: string;
-              title: string | null;
-              createdAt: string;
-              updatedAt: string;
-              createdBy: { name: string; avatarUrl: string | null } | null;
-            };
-          }>;
-        };
-      };
-    }>(
-      token,
-      `query ($id: String!, $first: Int!, $offset: Int!) {
-        workspace(id: $id) {
-          docs(pagination: { first: $first, offset: $offset }) {
-            totalCount
-            pageInfo { hasNextPage }
-            edges { node {
-              id
-              title
-              createdAt
-              updatedAt
-              createdBy { name avatarUrl }
-            } }
-          }
-        }
-      }`,
-      { id: wsId(), first: limit, offset }
-    );
+    const docs = await queryDocInfos(ctx, limit, offset);
     // GraphQL's docs.edges.node.title is always null for self-hosted AFFiNE —
     // titles live inside the workspace root Y.Doc's meta.pages, not in
     // Postgres. Pull them from there so callers don't have to issue N reads.
     let titleByDocId = new Map<string, string>();
     try {
-      const root = await readDoc(token, wsId());
+      const root = await readDoc(ctx, wsId());
       for (const p of listPages(root.doc)) {
         if (p.title) titleByDocId.set(p.id, p.title);
       }
@@ -99,7 +126,7 @@ const listDocuments: ToolDefinition = {
       titleByDocId = new Map();
     }
 
-    const documents = data.workspace.docs.edges.map(e => ({
+    const documents = docs.edges.map(e => ({
       docId: e.node.id,
       title: e.node.title ?? titleByDocId.get(e.node.id) ?? null,
       createdAt: e.node.createdAt,
@@ -108,8 +135,8 @@ const listDocuments: ToolDefinition = {
     }));
     return JSON.stringify(
       {
-        total: data.workspace.docs.totalCount,
-        hasMore: data.workspace.docs.pageInfo.hasNextPage,
+        total: docs.totalCount,
+        hasMore: docs.pageInfo.hasNextPage,
         documents,
       },
       null,
@@ -122,7 +149,7 @@ const getWorkspaceInfo: ToolDefinition = {
   name: 'get_workspace_info',
   description: 'Get metadata about the AFFiNE workspace (name, owner, team status, member count).',
   inputSchema: { type: 'object', properties: {} },
-  async handler(token) {
+  async handler(ctx) {
     const data = await gql<{
       workspace: {
         id: string;
@@ -131,7 +158,7 @@ const getWorkspaceInfo: ToolDefinition = {
         owner: { id: string; name: string; email: string } | null;
       };
     }>(
-      token,
+      ctx,
       `query ($id: String!) {
         workspace(id: $id) {
           id
@@ -168,14 +195,14 @@ const listMembers: ToolDefinition = {
       limit: { type: 'number', description: 'Max results, default 20' },
     },
   },
-  async handler(token, args) {
+  async handler(ctx, args) {
     const take = Number(args.limit ?? 20);
     const data = await gql<{
       workspace: {
         members: Array<{ id: string; name: string; email: string; permission: string }>;
       };
     }>(
-      token,
+      ctx,
       `query ($id: String!, $take: Int!) {
         workspace(id: $id) {
           members(skip: 0, take: $take) {
@@ -211,7 +238,7 @@ const listComments: ToolDefinition = {
     },
     required: ['docId'],
   },
-  async handler(token, args) {
+  async handler(ctx, args) {
     const docId = String(args.docId);
     const limit = Number(args.limit ?? 20);
     const data = await gql<{
@@ -230,7 +257,7 @@ const listComments: ToolDefinition = {
         };
       };
     }>(
-      token,
+      ctx,
       `query ($id: String!, $docId: String!, $first: Int!) {
         workspace(id: $id) {
           comments(docId: $docId, pagination: { first: $first }) {
@@ -274,7 +301,7 @@ const listDocumentHistory: ToolDefinition = {
     },
     required: ['docId'],
   },
-  async handler(token, args) {
+  async handler(ctx, args) {
     const docId = String(args.docId);
     const take = Number(args.limit ?? 20);
     const data = await gql<{
@@ -286,7 +313,7 @@ const listDocumentHistory: ToolDefinition = {
         }>;
       };
     }>(
-      token,
+      ctx,
       `query ($id: String!, $guid: String!, $take: Int!) {
         workspace(id: $id) {
           histories(guid: $guid, take: $take) {
@@ -310,41 +337,14 @@ const getDocumentInfo: ToolDefinition = {
     },
     required: ['docId'],
   },
-  async handler(token, args) {
+  async handler(ctx, args) {
     const docId = String(args.docId);
     // AFFiNE's workspace.docs doesn't filter by id directly; easiest portable
     // approach is to look it up in the paginated list. For workspaces with
     // many docs this is suboptimal — swap to a direct lookup if a dedicated
     // resolver (workspace.doc(id:)) is added upstream later.
-    const data = await gql<{
-      workspace: {
-        docs: {
-          edges: Array<{
-            node: {
-              id: string;
-              title: string | null;
-              createdAt: string;
-              updatedAt: string;
-              createdBy: { name: string } | null;
-            };
-          }>;
-        };
-      };
-    }>(
-      token,
-      `query ($id: String!) {
-        workspace(id: $id) {
-          docs(pagination: { first: 1000, offset: 0 }) {
-            edges { node {
-              id title createdAt updatedAt
-              createdBy { name }
-            } }
-          }
-        }
-      }`,
-      { id: wsId() }
-    );
-    const hit = data.workspace.docs.edges.find(e => e.node.id === docId);
+    const docs = await queryDocInfos(ctx, 1000, 0);
+    const hit = docs.edges.find(e => e.node.id === docId);
     if (!hit) {
       throw new Error(`Document ${docId} not found in workspace ${wsId()}`);
     }
@@ -353,7 +353,7 @@ const getDocumentInfo: ToolDefinition = {
     let title: string | null = hit.node.title;
     if (!title) {
       try {
-        const root = await readDoc(token, wsId());
+        const root = await readDoc(ctx, wsId());
         title = listPages(root.doc).find(p => p.id === docId)?.title ?? null;
       } catch {
         title = null;
@@ -418,8 +418,8 @@ function forwardAlias(
     name: alias,
     description,
     inputSchema,
-    async handler(token, args) {
-      const result = (await callNativeTool(token, nativeName, args)) as {
+    async handler(ctx, args) {
+      const result = (await ctx.native.callTool(nativeName, args)) as {
         content: Array<{ type: string; text: string }>;
         isError?: boolean;
       };
@@ -434,9 +434,9 @@ function forwardAlias(
   };
 }
 
-// AFFiNE exposes these natively under the same underscore names we use
-// here. The proxy forwards the tools/call through unchanged so we benefit
-// automatically when AFFiNE improves doc reading / search behaviour.
+// AFFiNE exposes read_document natively under the same name. The proxy
+// forwards the tools/call through unchanged so we benefit automatically
+// when AFFiNE improves doc reading / search behaviour.
 const readDocument = forwardAlias(
   'read_document',
   'read_document',
@@ -448,10 +448,15 @@ const readDocument = forwardAlias(
   }
 );
 
+// AFFiNE 0.27 dropped the native keyword_search / semantic_search tools in
+// favour of a single `doc_search` (the server picks keyword, semantic or
+// hybrid retrieval). Both legacy names forward there with the same input.
+const NATIVE_DOC_SEARCH = 'doc_search';
+
 const keywordSearch = forwardAlias(
   'keyword_search',
-  'keyword_search',
-  'Fuzzy keyword search across workspace documents (forwarded to AFFiNE native MCP). Requires AFFINE_INDEXER_ENABLED=true on the AFFiNE server.',
+  NATIVE_DOC_SEARCH,
+  'Keyword search across workspace documents (forwarded to AFFiNE native MCP `doc_search`, which selects the retrieval strategy server-side). Returns JSON { retrieval_mode, degraded_reason, hits: [{ doc_id, title, excerpt, ... }] }. Requires AFFINE_INDEXER_ENABLED=true on the AFFiNE server.',
   {
     type: 'object',
     properties: { query: { type: 'string', description: 'Search query' } },
@@ -461,8 +466,8 @@ const keywordSearch = forwardAlias(
 
 const semanticSearch = forwardAlias(
   'semantic_search',
-  'semantic_search',
-  'Vector semantic similarity search across documents (forwarded to AFFiNE native MCP). Requires AFFINE_INDEXER_ENABLED=true.',
+  NATIVE_DOC_SEARCH,
+  'Semantic search across workspace documents (forwarded to AFFiNE native MCP `doc_search`, which selects the retrieval strategy server-side). Returns JSON { retrieval_mode, degraded_reason, hits: [...] }. Requires AFFINE_INDEXER_ENABLED=true.',
   {
     type: 'object',
     properties: { query: { type: 'string', description: 'Search query' } },

@@ -268,7 +268,7 @@ const createDoc: ToolDefinition = {
     },
     required: ['title'],
   },
-  async handler(token, args) {
+  async handler(ctx, args) {
     const title = String(args.title ?? '').trim();
     if (!title) throw new Error('"title" is required');
     const initialBlocks = args.initialBlocks ? parseBlocks(args.initialBlocks) : [];
@@ -276,7 +276,7 @@ const createDoc: ToolDefinition = {
     const docId = newDocGuid();
 
     // 1. Create the new doc's Yjs content
-    const newDoc = await openDoc(token, docId);
+    const newDoc = await openDoc(ctx, docId);
     const { noteId } = initializeEmptyDoc(newDoc.doc, title);
 
     if (initialBlocks.length > 0) {
@@ -287,7 +287,7 @@ const createDoc: ToolDefinition = {
     await newDoc.commit();
 
     // 2. Register the doc in the workspace root doc's meta.pages
-    const root = await openDoc(token, wsId());
+    const root = await openDoc(ctx, wsId());
     addPage(root.doc, docId, title);
     await root.commit();
 
@@ -318,13 +318,13 @@ const appendBlocks: ToolDefinition = {
     },
     required: ['docId', 'blocks'],
   },
-  async handler(token, args) {
+  async handler(ctx, args) {
     const docId = String(args.docId ?? '');
     if (!docId) throw new Error('"docId" is required');
     const blocks = parseBlocks(args.blocks);
     if (blocks.length === 0) return JSON.stringify({ docId, blocksAdded: 0 }, null, 2);
 
-    const { doc, commit } = await openDoc(token, docId);
+    const { doc, commit } = await openDoc(ctx, docId);
     if (getBlocksMap(doc).size === 0) {
       throw new Error(`Document ${docId} not found or empty on server`);
     }
@@ -383,12 +383,12 @@ const updateBlockText: ToolDefinition = {
     },
     required: ['docId', 'blockId', 'text'],
   },
-  async handler(token, args) {
+  async handler(ctx, args) {
     const docId = String(args.docId ?? '');
     const blockId = String(args.blockId ?? '');
     if (!docId || !blockId) throw new Error('"docId" and "blockId" are required');
 
-    const { doc, commit } = await openDoc(token, docId);
+    const { doc, commit } = await openDoc(ctx, docId);
     const block = getBlocksMap(doc).get(blockId);
     if (!block) throw new Error(`Block ${blockId} not found in doc ${docId}`);
     const flavour = String(block.get(SYS_FLAVOUR) ?? '');
@@ -456,12 +456,12 @@ const deleteBlock: ToolDefinition = {
     },
     required: ['docId', 'blockId'],
   },
-  async handler(token, args) {
+  async handler(ctx, args) {
     const docId = String(args.docId ?? '');
     const blockId = String(args.blockId ?? '');
     if (!docId || !blockId) throw new Error('"docId" and "blockId" are required');
 
-    const { doc, commit } = await openDoc(token, docId);
+    const { doc, commit } = await openDoc(ctx, docId);
     const blocks = getBlocksMap(doc);
     const block = blocks.get(blockId);
     if (!block) throw new Error(`Block ${blockId} not found`);
@@ -508,12 +508,12 @@ const setDocTitle: ToolDefinition = {
     },
     required: ['docId', 'title'],
   },
-  async handler(token, args) {
+  async handler(ctx, args) {
     const docId = String(args.docId ?? '');
     const title = String(args.title ?? '').trim();
     if (!docId || !title) throw new Error('"docId" and non-empty "title" are required');
 
-    const { doc, commit } = await openDoc(token, docId);
+    const { doc, commit } = await openDoc(ctx, docId);
     const pageId = findPageBlockId(doc);
     if (!pageId) throw new Error(`Doc ${docId} has no page block`);
     const page = getBlocksMap(doc).get(pageId)!;
@@ -528,7 +528,7 @@ const setDocTitle: ToolDefinition = {
     }
     await commit();
 
-    const root = await openDoc(token, wsId());
+    const root = await openDoc(ctx, wsId());
     setPageTitle(root.doc, docId, title);
     await root.commit();
 
@@ -546,10 +546,10 @@ const trashDoc: ToolDefinition = {
     properties: { docId: { type: 'string' } },
     required: ['docId'],
   },
-  async handler(token, args) {
+  async handler(ctx, args) {
     const docId = String(args.docId ?? '');
     if (!docId) throw new Error('"docId" is required');
-    const root = await openDoc(token, wsId());
+    const root = await openDoc(ctx, wsId());
     const ok = trashPage(root.doc, docId);
     if (!ok) throw new Error(`Doc ${docId} not found in workspace meta.pages`);
     await root.commit();
@@ -569,10 +569,10 @@ const listDocBlocks: ToolDefinition = {
     properties: { docId: { type: 'string' } },
     required: ['docId'],
   },
-  async handler(token, args) {
+  async handler(ctx, args) {
     const docId = String(args.docId ?? '');
     if (!docId) throw new Error('"docId" is required');
-    const { doc, existed } = await readDoc(token, docId);
+    const { doc, existed } = await readDoc(ctx, docId);
     if (!existed) throw new Error(`Doc ${docId} not found`);
     return JSON.stringify(
       { docId, title: readDocTitle(doc), blocks: listBlocks(doc) },
@@ -596,13 +596,13 @@ const findDocByTitle: ToolDefinition = {
     },
     required: ['title'],
   },
-  async handler(token, args) {
+  async handler(ctx, args) {
     const q = String(args.title ?? '').trim().toLowerCase();
     if (!q) throw new Error('"title" is required');
     const fuzzy = args.fuzzy === true;
     const includeTrash = args.includeTrash === true;
 
-    const root = await readDoc(token, wsId());
+    const root = await readDoc(ctx, wsId());
     const all = listPages(root.doc).filter(p => includeTrash || !p.trash);
 
     const exact = all.filter(p => p.title.toLowerCase() === q);
@@ -629,7 +629,7 @@ const createComment: ToolDefinition = {
     },
     required: ['docId', 'content'],
   },
-  async handler(token, args) {
+  async handler(ctx, args) {
     const docId = String(args.docId ?? '');
     const content = String(args.content ?? '').trim();
     if (!docId || !content) throw new Error('"docId" and non-empty "content" required');
@@ -640,7 +640,7 @@ const createComment: ToolDefinition = {
       content: [{ type: 'paragraph', content: [{ type: 'text', text: content }] }],
     });
     const data = await gql<{ createComment: { id: string; createdAt: string } }>(
-      token,
+      ctx,
       `mutation ($input: CommentCreateInput!) {
         createComment(input: $input) { id createdAt }
       }`,
@@ -661,12 +661,12 @@ const resolveComment: ToolDefinition = {
     },
     required: ['commentId'],
   },
-  async handler(token, args) {
+  async handler(ctx, args) {
     const commentId = String(args.commentId ?? '');
     if (!commentId) throw new Error('"commentId" required');
     const resolved = args.resolved === undefined ? true : Boolean(args.resolved);
     await gql<{ resolveComment: boolean }>(
-      token,
+      ctx,
       `mutation ($input: CommentResolveInput!) { resolveComment(input: $input) }`,
       { input: { id: commentId, resolved } }
     );
@@ -682,11 +682,11 @@ const deleteComment: ToolDefinition = {
     properties: { commentId: { type: 'string' } },
     required: ['commentId'],
   },
-  async handler(token, args) {
+  async handler(ctx, args) {
     const commentId = String(args.commentId ?? '');
     if (!commentId) throw new Error('"commentId" required');
     await gql<{ deleteComment: boolean }>(
-      token,
+      ctx,
       `mutation ($id: String!) { deleteComment(id: $id) }`,
       { id: commentId }
     );
@@ -705,7 +705,7 @@ const createReply: ToolDefinition = {
     },
     required: ['commentId', 'content'],
   },
-  async handler(token, args) {
+  async handler(ctx, args) {
     const commentId = String(args.commentId ?? '');
     const content = String(args.content ?? '').trim();
     if (!commentId || !content) throw new Error('"commentId" and non-empty "content" required');
@@ -714,7 +714,7 @@ const createReply: ToolDefinition = {
       content: [{ type: 'paragraph', content: [{ type: 'text', text: content }] }],
     });
     const data = await gql<{ createReply: { id: string } }>(
-      token,
+      ctx,
       `mutation ($input: ReplyCreateInput!) { createReply(input: $input) { id } }`,
       { input: { commentId, content: tiptap } }
     );
@@ -730,11 +730,11 @@ const deleteReply: ToolDefinition = {
     properties: { replyId: { type: 'string' } },
     required: ['replyId'],
   },
-  async handler(token, args) {
+  async handler(ctx, args) {
     const replyId = String(args.replyId ?? '');
     if (!replyId) throw new Error('"replyId" required');
     await gql<{ deleteReply: boolean }>(
-      token,
+      ctx,
       `mutation ($id: String!) { deleteReply(id: $id) }`,
       { id: replyId }
     );

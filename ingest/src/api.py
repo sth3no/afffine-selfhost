@@ -80,18 +80,19 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
 
     # MCP client to mcp_ext (lazy connect — no network call here).
     mcp_url = os.environ.get("MCP_EXT_URL", "http://mcp_ext:3100")
-    affine_token = os.environ.get("AFFINE_ACCESS_TOKEN", "").strip()
+    # mcp_ext's shared client secret (it authenticates to AFFiNE itself —
+    # AFFiNE 0.27 removed the `ut_…` access tokens this used to forward).
+    mcp_token = os.environ.get("MCP_EXT_HTTP_TOKEN", "").strip()
     # Fail loudly when the token is missing rather than booting and 5xx-ing
     # on every /capture. Symptom seen in prod: `httpx.LocalProtocolError:
     # Illegal header value b'Bearer '` on each outbound MCP call.
-    if not affine_token:
+    if not mcp_token:
         raise RuntimeError(
-            "AFFINE_ACCESS_TOKEN is empty. Set it in the stack env "
-            "(AFFiNE → Workspace Settings → Integration → MCP Server → "
-            "Generate Token) and redeploy. Without it, every /capture "
-            "fails on the synchronous mcp_ext call."
+            "MCP_EXT_HTTP_TOKEN is empty. Set it in the stack env (the same "
+            "value mcp_ext is started with) and redeploy. Without it, every "
+            "/capture fails on the synchronous mcp_ext call."
         )
-    app_state.mcp = await MCPClient(mcp_url, affine_token).__aenter__()
+    app_state.mcp = await MCPClient(mcp_url, mcp_token).__aenter__()
 
     # asyncpg pool (skipped when DATABASE_URL points at the placeholder used
     # by `pip install` smoke tests on developer machines).
@@ -330,7 +331,8 @@ async def health_deep() -> JSONResponse:
         checks["mcp_ext"] = {"ok": False, "error": f"{type(e).__name__}: {e}"}
         overall_ok = False
 
-    # 3. AFFiNE-via-mcp_ext — exercises AFFINE_ACCESS_TOKEN + workspace.
+    # 3. AFFiNE-via-mcp_ext — exercises MCP_EXT_HTTP_TOKEN + mcp_ext's
+    #    AFFiNE session + workspace.
     #    Skipped automatically when mcp_ext probe is already red.
     if checks.get("mcp_ext", {}).get("ok") and app_state.mcp is not None:
         t0 = time.monotonic()

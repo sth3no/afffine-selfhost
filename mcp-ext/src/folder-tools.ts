@@ -114,12 +114,12 @@ const listFolderTree: ToolDefinition = {
     'Doc-link names are resolved to current doc titles. Use this BEFORE any structural change so ' +
     'the agent can reason about the existing layout.',
   inputSchema: { type: 'object', properties: {} },
-  async handler(token) {
-    const { doc } = await readDoc(token, FOLDERS_GUID);
+  async handler(ctx) {
+    const { doc } = await readDoc(ctx, FOLDERS_GUID);
     const rows = listAllRows(doc);
 
     // Resolve doc-link titles from the workspace root doc's page registry.
-    const root = await readDoc(token, wsId());
+    const root = await readDoc(ctx, wsId());
     const titleByDocId = new Map<string, string>();
     for (const p of listPages(root.doc)) {
       if (!p.trash) titleByDocId.set(p.id, p.title);
@@ -146,12 +146,12 @@ const createFolder: ToolDefinition = {
     },
     required: ['name'],
   },
-  async handler(token, args) {
+  async handler(ctx, args) {
     const name = String(args.name ?? '').trim();
     if (!name) throw new Error('"name" is required');
     const parentFolderId = args.parentFolderId ? String(args.parentFolderId) : null;
 
-    const { doc, commit } = await openDoc(token, FOLDERS_GUID);
+    const { doc, commit } = await openDoc(ctx, FOLDERS_GUID);
     if (parentFolderId) {
       const parent = getRow(doc, parentFolderId);
       if (!parent) throw new Error(`Parent folder "${parentFolderId}" not found`);
@@ -190,13 +190,13 @@ const renameFolder: ToolDefinition = {
     },
     required: ['folderId', 'newName'],
   },
-  async handler(token, args) {
+  async handler(ctx, args) {
     const folderId = String(args.folderId ?? '');
     const newName = String(args.newName ?? '').trim();
     if (!folderId || !newName) {
       throw new Error('"folderId" and non-empty "newName" are required');
     }
-    const { doc, commit } = await openDoc(token, FOLDERS_GUID);
+    const { doc, commit } = await openDoc(ctx, FOLDERS_GUID);
     const row = getRow(doc, folderId);
     if (!row) throw new Error(`Folder "${folderId}" not found`);
     if (row.type !== 'folder') {
@@ -226,12 +226,12 @@ const deleteFolder: ToolDefinition = {
     },
     required: ['folderId'],
   },
-  async handler(token, args) {
+  async handler(ctx, args) {
     const folderId = String(args.folderId ?? '');
     if (!folderId) throw new Error('"folderId" is required');
     const cascade = args.cascade === true;
 
-    const { doc, commit } = await openDoc(token, FOLDERS_GUID);
+    const { doc, commit } = await openDoc(ctx, FOLDERS_GUID);
     const row = getRow(doc, folderId);
     if (!row) throw new Error(`Folder "${folderId}" not found`);
     if (row.type !== 'folder') {
@@ -294,12 +294,12 @@ const moveFolder: ToolDefinition = {
     },
     required: ['folderId'],
   },
-  async handler(token, args) {
+  async handler(ctx, args) {
     const folderId = String(args.folderId ?? '');
     if (!folderId) throw new Error('"folderId" is required');
     const parentFolderId = args.parentFolderId ? String(args.parentFolderId) : null;
 
-    const { doc, commit } = await openDoc(token, FOLDERS_GUID);
+    const { doc, commit } = await openDoc(ctx, FOLDERS_GUID);
     const row = getRow(doc, folderId);
     if (!row) throw new Error(`Folder "${folderId}" not found`);
     if (row.type !== 'folder') {
@@ -351,12 +351,12 @@ const moveDocument: ToolDefinition = {
     },
     required: ['docId'],
   },
-  async handler(token, args) {
+  async handler(ctx, args) {
     const docId = String(args.docId ?? '');
     if (!docId) throw new Error('"docId" is required');
     const folderId = args.folderId ? String(args.folderId) : null;
 
-    const { doc, commit } = await openDoc(token, FOLDERS_GUID);
+    const { doc, commit } = await openDoc(ctx, FOLDERS_GUID);
     if (folderId) {
       const folder = getRow(doc, folderId);
       if (!folder) throw new Error(`Folder "${folderId}" not found`);
@@ -437,9 +437,9 @@ const debugFoldersDoc: ToolDefinition = {
       },
     },
   },
-  async handler(token, args) {
+  async handler(ctx, args) {
     const guid = args.docGuid ? String(args.docGuid) : FOLDERS_GUID;
-    const { doc, existed } = await readDoc(token, guid);
+    const { doc, existed } = await readDoc(ctx, guid);
 
     const stateUpdate = Y.encodeStateAsUpdate(doc);
     const stateVector = Y.encodeStateVector(doc);

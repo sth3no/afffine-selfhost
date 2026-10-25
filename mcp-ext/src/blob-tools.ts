@@ -15,8 +15,8 @@
  * up as MCP tool errors with the original GraphQL message.
  */
 
-import { config, graphqlUrl } from './config.js';
-import type { ToolDefinition } from './tools-shared.js';
+import { config } from './config.js';
+import type { AffineContext, ToolDefinition } from './tools-shared.js';
 
 const SET_BLOB_MUTATION = `
   mutation SetBlob($workspaceId: String!, $blob: Upload!) {
@@ -49,7 +49,7 @@ const uploadBlob: ToolDefinition = {
     },
     required: ['filename', 'contentType', 'base64'],
   },
-  async handler(token, args) {
+  async handler(ctx, args) {
     const filename = String(args.filename ?? '').trim();
     const contentType = String(args.contentType ?? '').trim();
     const b64 = String(args.base64 ?? '');
@@ -67,13 +67,13 @@ const uploadBlob: ToolDefinition = {
       throw new Error('decoded blob is 0 bytes');
     }
 
-    const sourceId = await postSetBlob(token, filename, contentType, bytes);
+    const sourceId = await postSetBlob(ctx, filename, contentType, bytes);
     return JSON.stringify({ sourceId, byteCount: bytes.length, ok: true }, null, 2);
   },
 };
 
 async function postSetBlob(
-  token: string,
+  ctx: AffineContext,
   filename: string,
   contentType: string,
   bytes: Buffer,
@@ -88,49 +88,39 @@ async function postSetBlob(
   });
   const map = JSON.stringify({ '0': ['variables.blob'] });
 
-  const formData = new FormData();
-  formData.append('operations', operations);
-  formData.append('map', map);
-  // Buffer → Uint8Array for the Blob constructor — TypeScript's strict
-  // ArrayBuffer typing rejects Node's Buffer<ArrayBufferLike> here.
-  formData.append(
-    '0',
-    new Blob([new Uint8Array(bytes)], { type: contentType }),
-    filename,
-  );
-
-  const res = await fetch(graphqlUrl(), {
-    method: 'POST',
-    headers: {
-      // Don't set Content-Type — fetch+FormData picks the right boundary.
-      Authorization: `Bearer ${token}`,
-      // graphql-multipart-request-spec recommends this header to opt out of
-      // potential CSRF protections on POST.
-      'apollo-require-preflight': 'true',
-    },
-    body: formData,
-  });
-
-  if (!res.ok) {
-    const text = await res.text().catch(() => '');
-    throw new Error(
-      `setBlob HTTP ${res.status} ${res.statusText}${text ? ` — ${text.slice(0, 400)}` : ''}`,
+  // Built per attempt: the session re-signs-in and retries once on 401.
+  const makeForm = () => {
+    const formData = new FormData();
+    formData.append('operations', operations);
+    formData.append('map', map);
+    // Buffer → Uint8Array for the Blob constructor — TypeScript's strict
+    // ArrayBuffer typing rejects Node's Buffer<ArrayBufferLike> here.
+    formData.append(
+      '0',
+      new Blob([new Uint8Array(bytes)], { type: contentType }),
+      filename,
     );
-  }
-
-  const body = (await res.json()) as {
-    data?: { setBlob?: string };
-    errors?: Array<{ message: string }>;
+    return formData;
   };
-  if (body.errors && body.errors.length > 0) {
-    throw new Error(
-      `setBlob GraphQL error: ${body.errors.map(e => e.message).join('; ')}`,
-    );
+
+  let data: { setBlob?: string };
+  try {
+    data = await ctx.session.graphqlRequest<{ setBlob?: string }>(() => ({
+      headers: {
+        // Don't set Content-Type — fetch+FormData picks the right boundary.
+        // graphql-multipart-request-spec recommends this header to opt out of
+        // potential CSRF protections on POST.
+        'apollo-require-preflight': 'true',
+      },
+      body: makeForm(),
+    }));
+  } catch (err) {
+    throw new Error(`setBlob ${(err as Error).message}`);
   }
-  if (!body.data?.setBlob) {
+  if (!data.setBlob) {
     throw new Error('setBlob returned no sourceId');
   }
-  return body.data.setBlob;
+  return data.setBlob;
 }
 
 export const blobTools: ToolDefinition[] = [uploadBlob];

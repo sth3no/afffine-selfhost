@@ -36,7 +36,10 @@ function requireEnv(name: string): string {
 export const config = {
   baseUrl: requireEnv('AFFINE_BASE_URL'),
   workspaceId: requireEnv('AFFINE_WORKSPACE_ID'),
-  accessToken: requireEnv('AFFINE_ACCESS_TOKEN'),
+  // Bearer token for the MCP endpoint. In the stack the agent talks to the
+  // mcp_ext proxy, which requires its shared secret MCP_EXT_HTTP_TOKEN
+  // (AFFiNE 0.27 removed the `ut_…` personal access tokens this used to be).
+  accessToken: requireEnv('MCP_EXT_HTTP_TOKEN'),
   // Optional override for the MCP endpoint URL. If set, the client will POST
   // directly to this URL instead of computing `${baseUrl}/api/workspaces/
   // ${workspaceId}/mcp`. Used when talking to the mcp_ext proxy container,

@@ -60,18 +60,25 @@ pull from (or include it in the tarball you upload).
 
 ## First-run workflow
 
-The MCP agent needs an AFFiNE workspace ID and access token, which can only
-be generated **after** AFFiNE is running.
+The MCP services need an AFFiNE workspace ID and a service account, which can
+only be set up **after** AFFiNE is running.
 
-1. Deploy the stack with `AFFINE_WORKSPACE_ID` and `AFFINE_ACCESS_TOKEN` left
-   blank. The `mcp_agent` container will start but log that it's unconfigured.
+1. Deploy the stack with `AFFINE_WORKSPACE_ID`, `AFFINE_MCP_EMAIL` and
+   `AFFINE_MCP_PASSWORD` left blank. `mcp_ext` / `mcp_server` will log that
+   they are unconfigured until step 6.
 2. Open `http://<your-host>:3010`, create the admin account, create or open a
    workspace.
-3. Go to **Workspace Settings → Integration → MCP Server → Generate Token**
-   and copy the `ut_…` token (shown once).
-4. Copy the workspace ID from the URL: `/workspace/<THIS-ID>/...`.
-5. In Portainer, edit the stack, fill in both values, **Update the stack**.
-   Portainer will recreate the `mcp_agent` container with the new env.
+3. Create a **dedicated account for the MCP services** (e.g. `mcp-bot@…`,
+   Admin panel → Accounts) with a strong password and invite it to the
+   workspace (member/editor is enough — see
+   [AFFiNE 0.27 authentication](#affine-027-authentication)).
+4. Enable AI in **Admin panel → Settings → AI** (`copilot.enabled`) — the
+   native workspace MCP endpoint only exists while it is on.
+5. Copy the workspace ID from the URL: `/workspace/<THIS-ID>/...`.
+6. In Portainer, edit the stack, fill in `AFFINE_WORKSPACE_ID`,
+   `AFFINE_MCP_EMAIL`, `AFFINE_MCP_PASSWORD`, `MCP_EXT_HTTP_TOKEN` and
+   `AFFINE_MCP_HTTP_TOKEN` (`openssl rand -hex 32` for the two tokens),
+   then **Update the stack**.
 
 ## Environment variables
 
@@ -82,8 +89,10 @@ be generated **after** AFFiNE is running.
 | `AFFINE_SERVER_EXTERNAL_URL` | yes in prod | Public URL behind your reverse proxy. |
 | `DB_USERNAME` / `DB_PASSWORD` / `DB_DATABASE` | yes | Postgres credentials. **Set a real password.** |
 | `MAILER_*` | no | SMTP config for invites/password reset. Leave blank to skip. |
-| `AFFINE_WORKSPACE_ID` | after first login | Target workspace for the MCP agent. |
-| `AFFINE_ACCESS_TOKEN` | after first login | `ut_…` token generated in Workspace Settings. |
+| `AFFINE_WORKSPACE_ID` | after first login | Target workspace for the MCP services. |
+| `AFFINE_MCP_EMAIL` / `AFFINE_MCP_PASSWORD` | after first login | Dedicated AFFiNE account `mcp_ext` and `mcp_server` sign in as. |
+| `MCP_EXT_HTTP_TOKEN` | yes | Shared secret clients send to `mcp_ext` (`Authorization: Bearer …`). Used by `mcp_agent`, `ingest`, n8n, Claude Code. |
+| `AFFINE_MCP_HTTP_TOKEN` | yes | Shared secret clients send to `mcp_server` (`/mcp`). |
 | `TZ` | no (default `UTC`) | Timezone for cron schedules inside the agent container. |
 
 ## What runs inside `mcp_agent`
@@ -151,9 +160,10 @@ Redeploy the n8n stack. From any n8n workflow, AFFiNE is now reachable at:
 http://affine:3010
 ```
 
-Use that as the base URL in the HTTP Request node. Auth is the same `ut_…`
-token the MCP agent uses — generate it in AFFiNE's Workspace Settings →
-Integration → MCP Server and pass it as a bearer header.
+Use that as the base URL in the HTTP Request node. AFFiNE 0.27 no longer
+issues `ut_…` personal access tokens: for MCP from n8n, call `mcp_ext` at
+`http://mcp_ext:3100/` with `Authorization: Bearer <MCP_EXT_HTTP_TOKEN>` (or
+`mcp_server` at `http://mcp_server:3000/mcp` with `AFFINE_MCP_HTTP_TOKEN`).
 
 ### Quick sanity check
 
@@ -179,7 +189,9 @@ connect here, not to AFFiNE's native MCP directly.
 `list_documents`, `get_workspace_info`, `list_workspace_members`,
 `list_comments`, `list_document_history`, `get_document_info`,
 `list_notifications`, `list_blobs` · **Native forwards:** `read_document`,
-`keyword_search`, `semantic_search`.
+`keyword_search`, `semantic_search` (AFFiNE 0.27 merged its keyword and
+semantic tools into one native `doc_search`; both names forward there and
+need the indexer).
 
 **Writes** (Yjs CRDT + GraphQL):
 
@@ -259,8 +271,10 @@ The following are intentionally **not** exposed — AI clients cannot:
 - permanently delete docs or blobs (only soft-trash)
 - publish private docs to the web
 
-Rotate `AFFINE_ACCESS_TOKEN` in AFFiNE → Settings → Integration → MCP Server
-whenever you suspect leakage — tokens carry the creating user's full scope.
+Rotate `MCP_EXT_HTTP_TOKEN` (stack env) whenever you suspect leakage — it
+grants everything the `AFFINE_MCP_EMAIL` account can do in the workspace.
+That is also why the service account should be a dedicated, least-privileged
+member rather than your own admin account.
 
 ### How writes work
 
@@ -277,6 +291,58 @@ coupled to a particular AFFiNE image version):
 For `create_doc`, a fresh `Y.Doc` (`page` → `surface` + `note`) is
 constructed and the new doc id is also registered in the workspace root
 doc's `meta.pages` array.
+
+## AFFiNE 0.27 authentication
+
+AFFiNE 0.27 removed legacy personal access tokens (`ut_…`, the
+`generateUserAccessToken` mutation and the `access_tokens` table). GraphQL now
+only accepts a cookie session (email/password sign-in) or a JWT session, and
+the native workspace MCP endpoint `/api/workspaces/<id>/mcp` only accepts
+workspace-scoped, expiring **MCP credentials** (`aff_mcp_v1.…`). The MCP
+services therefore no longer forward a client-supplied AFFiNE token:
+
+| Hop | Credential |
+|---|---|
+| client → `mcp_ext` | `Authorization: Bearer <MCP_EXT_HTTP_TOKEN>` — checked in constant time, never forwarded |
+| `mcp_ext` → AFFiNE GraphQL / blob upload / Socket.IO sync | its own cookie session from `POST /api/auth/sign-in` with `AFFINE_MCP_EMAIL` / `AFFINE_MCP_PASSWORD` (kept in memory, re-login + one retry on 401/expiry) |
+| `mcp_ext` → native MCP (`read_document`, search) | an MCP credential it creates with `createMcpCredential` (READ_ONLY, 30 days); re-created 3 days before `expiresAt` and on 401 (one retry); the replaced credential and leftovers named `affine-mcp-ext` from earlier container runs are revoked |
+| client → `mcp_server` | `Authorization: Bearer <AFFINE_MCP_HTTP_TOKEN>` |
+| `mcp_server` → AFFiNE | upstream email/password sign-in (`AFFINE_EMAIL`/`AFFINE_PASSWORD` ← `AFFINE_MCP_EMAIL`/`AFFINE_MCP_PASSWORD`), renewed before cookie expiry |
+
+Notes:
+
+- **Service account.** Use a dedicated account that is a member (editor) of
+  the workspace. Every `mcp_ext` tool works with that role; AFFiNE 0.27 only
+  lets workspace admins use the `docs` listing, so for members
+  `list_documents` / `get_document_info` transparently use
+  `recentlyUpdatedDocs` (same fields, ordered by last update instead of
+  creation). Make the account a workspace Admin if you need the old order.
+- **AI must be enabled** (Admin panel → Settings → AI, `copilot.enabled`):
+  AFFiNE serves the native MCP endpoint and `createMcpCredential` only while
+  copilot is on. Without it the three native-forward tools fail with a clear
+  message; everything else keeps working.
+- **Stable AFFiNE issues READ_ONLY MCP credentials only** — fine, the
+  forwarded native tools are read-only; writes go through Yjs.
+- Revoked credentials stay visible (status `REVOKED`) in the account's MCP
+  credential list; each `mcp_ext` restart creates one new credential and
+  revokes the previous one. `MCP_EXT_CREDENTIAL_NAME` (optional) changes the
+  managed name — give each `mcp_ext` instance sharing one account its own.
+- **Password change / "sign out everywhere"** on the service account:
+  `mcp_ext` signs in again by itself; `mcp_server` 3.10.1 does not recover
+  from a server-side session revocation — restart `affine_mcp_server`.
+- `mcp_server` is the upstream image `ghcr.io/dawncr0w/affine-mcp-server`
+  ([DAWNCR0W/affine-mcp-server](https://github.com/DAWNCR0W/affine-mcp-server)),
+  pinned in `compose.yaml`; nothing is vendored in this repo any more. It
+  talks plain HTTP to `http://affine:3010` inside the Docker network, hence
+  `AFFINE_ALLOW_INSECURE_HTTP=true`.
+
+Claude Code (or any other client) talking to `mcp_ext` over Tailscale needs
+its header updated to the new secret, e.g. in `.mcp.json`:
+
+```json
+{ "type": "http", "url": "http://<tailscale-host>:3100/",
+  "headers": { "Authorization": "Bearer <MCP_EXT_HTTP_TOKEN>" } }
+```
 
 ## Ingest Service
 
@@ -578,6 +644,9 @@ deployments, put it behind Caddy/Traefik/nginx, terminate TLS there, and set
 ## Updating
 
 1. `git pull` the stack repo (or re-upload).
-2. Re-run `./prepare.sh` if `affine-mcp-agent` changed.
+2. Re-run `./prepare.sh` if `affine-mcp-agent` changed. Note that
+   `mcp-agent/src/config.ts` in this repo reads `MCP_EXT_HTTP_TOKEN` (AFFiNE
+   0.27 auth); port that change to `../affine-mcp-agent` first, or
+   `prepare.sh` will copy the old `AFFINE_ACCESS_TOKEN` variant back in.
 3. In Portainer, **Pull and redeploy** (enable "Re-pull image" for the AFFiNE
    image; enable "Re-build" to pick up agent code changes).
