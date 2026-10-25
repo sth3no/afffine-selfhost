@@ -1,11 +1,11 @@
 FROM python:3.12-slim
 
-# System deps: ffmpeg (yt-dlp merge step + Phase 13 frame extract), Node 20
+# System deps: ffmpeg (yt-dlp merge step + Phase 13 frame extract), Node 22
 # for the bgutil-ytdlp-pot-provider script-mode token generator, git for
 # cloning that provider's repo. asyncpg ships wheels so no compilers needed.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ffmpeg curl ca-certificates git gnupg \
-    && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+    && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
     && rm -rf /var/lib/apt/lists/*
 

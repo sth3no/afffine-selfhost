@@ -8,15 +8,25 @@ WORKDIR /app
 # System deps for tsx / native modules (kept minimal)
 RUN apk add --no-cache tini
 
-# Install dependencies first for better layer caching
-COPY package.json package-lock.json* ./
-RUN npm ci --omit=optional || npm install
+# Install production dependencies only, straight from the lockfile. tsx is a
+# runtime dependency (the agent runs TypeScript directly), so it stays; the
+# test/type tooling (vitest, typescript, @types/*) is not shipped. `npm ci`
+# fails loudly on a stale lockfile instead of silently re-resolving. The
+# `test -x` guard fails the build (instead of crash-looping at runtime) if a
+# package.json without tsx in `dependencies` is ever staged in again, e.g.
+# by prepare.sh copying an older upstream copy.
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev \
+    && test -x node_modules/.bin/tsx \
+    && npm cache clean --force
 
 # Copy sources
 COPY tsconfig.json ./
 COPY src ./src
 
 ENV NODE_ENV=production
+# Drop root — the agent only reads its sources and makes outbound HTTP calls.
+USER node
 # Run under tini so node-cron / signals behave correctly in Docker
 ENTRYPOINT ["/sbin/tini", "--"]
 CMD ["npx", "tsx", "src/scheduler.ts"]
