@@ -1,62 +1,28 @@
-# AFFiNE + MCP Agent — Portainer Stack
+# AFFiNE + MCP + Ingest — Portainer Stack
 
-Self-hosts the full AFFiNE workspace plus the `affine-mcp-agent` scheduler
-(daily digest, stale-doc detection, comment summaries) as one Portainer stack.
+Self-hosts the full AFFiNE workspace, the AFFiNE MCP server
+([DAWNCR0W/affine-mcp-server](https://github.com/DAWNCR0W/affine-mcp-server),
+official image) and the `ingest` capture service as one Portainer stack.
 
 ## Contents
 
 ```
 portainer-stack/
-├── compose.yaml        # Full stack (affine, postgres, redis, migration, mcp_agent)
+├── compose.yaml        # affine, postgres, redis, manticore, mcp_server, mcp_internal, ingest, cobalt, ...
 ├── .env.example        # Environment template
-├── .dockerignore
-├── prepare.sh          # Stages ../affine-mcp-agent sources into ./mcp-agent
-└── mcp-agent/
-    ├── Dockerfile      # Runs the scheduler under node:22-alpine + tsx
-    ├── package.json    # (staged by prepare.sh)
-    ├── package-lock.json
-    ├── tsconfig.json
-    └── src/            # (staged by prepare.sh)
+├── ingest/             # Python capture service (built by the stack)
+├── browser-extension/  # Capture extension (Chrome) + browser-extension-firefox/
+└── docs/
 ```
-
-## One-time preparation
-
-The `mcp-agent/` build context needs the agent sources alongside the Dockerfile
-so Portainer can build it. Run from this folder on any machine with bash:
-
-```bash
-cd portainer-stack
-./prepare.sh
-```
-
-That copies `src/`, `package.json`, `package-lock.json`, and `tsconfig.json`
-out of `../affine-mcp-agent/`. Commit the result to the repo Portainer will
-pull from (or include it in the tarball you upload).
 
 ## Deploying in Portainer
 
-### Option A — Git repository (recommended)
-
-1. Push this `portainer-stack/` folder to a git repo (after running
-   `prepare.sh` so `mcp-agent/src/` is committed).
-2. Portainer → **Stacks → Add stack → Repository**.
-3. Repository URL + reference + compose path (`portainer-stack/compose.yaml`).
-4. Under **Environment variables**, paste the contents of `.env.example` and
+1. Portainer → **Stacks → Add stack → Repository**.
+2. Repository URL + reference + compose path (`compose.yaml`).
+3. Under **Environment variables**, paste the contents of `.env.example` and
    fill in real values (see below).
-5. Deploy.
-
-### Option B — Web editor upload
-
-1. Run `./prepare.sh` locally.
-2. Portainer → **Stacks → Add stack → Web editor**.
-3. Paste `compose.yaml`.
-4. Fill in environment variables from `.env.example`.
-5. Deploy.
-
-   Note: the Web editor cannot build local contexts. For Option B either
-   pre-build the `affine-mcp-agent:local` image on the Docker host
-   (`docker build -t affine-mcp-agent:local ./mcp-agent`) before deploying,
-   or use Option A.
+4. Deploy. `ingest` is built from `./ingest`, so use the Repository method
+   (the Web editor cannot build local contexts).
 
 ## First-run workflow
 
@@ -64,49 +30,37 @@ The MCP services need an AFFiNE workspace ID and a service account, which can
 only be set up **after** AFFiNE is running.
 
 1. Deploy the stack with `AFFINE_WORKSPACE_ID`, `AFFINE_MCP_EMAIL` and
-   `AFFINE_MCP_PASSWORD` left blank. `mcp_ext` / `mcp_server` will log that
-   they are unconfigured until step 6.
+   `AFFINE_MCP_PASSWORD` left blank. The MCP servers log that they are
+   unconfigured until step 5.
 2. Open `http://<your-host>:3010`, create the admin account, create or open a
    workspace.
 3. Create a **dedicated account for the MCP services** (e.g. `mcp-bot@…`,
    Admin panel → Accounts) with a strong password and invite it to the
-   workspace (member/editor is enough — see
-   [AFFiNE 0.27 authentication](#affine-027-authentication)).
-4. Enable AI in **Admin panel → Settings → AI** (`copilot.enabled`) — the
-   native workspace MCP endpoint only exists while it is on.
-5. Copy the workspace ID from the URL: `/workspace/<THIS-ID>/...`.
-6. In Portainer, edit the stack, fill in `AFFINE_WORKSPACE_ID`,
-   `AFFINE_MCP_EMAIL`, `AFFINE_MCP_PASSWORD`, `MCP_EXT_HTTP_TOKEN` and
-   `AFFINE_MCP_HTTP_TOKEN` (`openssl rand -hex 32` for the two tokens),
+   workspace (member/editor is enough).
+4. Copy the workspace ID from the URL: `/workspace/<THIS-ID>/...`.
+5. Set up an OAuth issuer for the public MCP endpoint (see
+   [MCP servers](#mcp-servers)), then fill in `AFFINE_WORKSPACE_ID`,
+   `AFFINE_MCP_EMAIL`, `AFFINE_MCP_PASSWORD`, `AFFINE_MCP_HTTP_TOKEN`
+   (`openssl rand -hex 32`), `AFFINE_MCP_PUBLIC_BASE_URL`,
+   `AFFINE_OAUTH_ISSUER_URL` and `AFFINE_OAUTH_ALLOW_SERVICE_WRITES=true`,
    then **Update the stack**.
 
 ## Environment variables
 
 | Variable | Required | Description |
 |---|---|---|
-| `AFFINE_REVISION` | no (default `stable`) | AFFiNE image tag. Use `canary` if you need MCP write operations. |
+| `AFFINE_REVISION` | no (default `stable`) | AFFiNE image tag. |
 | `PORT` | no (default `3010`) | Host port for AFFiNE. |
 | `AFFINE_SERVER_EXTERNAL_URL` | yes in prod | Public URL behind your reverse proxy. |
 | `DB_USERNAME` / `DB_PASSWORD` / `DB_DATABASE` | yes | Postgres credentials. **Set a real password.** |
 | `MAILER_*` | no | SMTP config for invites/password reset. Leave blank to skip. |
 | `AFFINE_WORKSPACE_ID` | after first login | Target workspace for the MCP services. |
-| `AFFINE_MCP_EMAIL` / `AFFINE_MCP_PASSWORD` | after first login | Dedicated AFFiNE account `mcp_ext` and `mcp_server` sign in as. |
-| `MCP_EXT_HTTP_TOKEN` | yes | Shared secret clients send to `mcp_ext` (`Authorization: Bearer …`). Used by `mcp_agent`, `ingest`, n8n, Claude Code. |
-| `AFFINE_MCP_HTTP_TOKEN` | yes | Shared secret clients send to `mcp_server` (`/mcp`). |
-| `TZ` | no (default `UTC`) | Timezone for cron schedules inside the agent container. |
-
-## What runs inside `mcp_agent`
-
-`npx tsx src/scheduler.ts` — the node-cron scheduler in
-`affine-mcp-agent/src/scheduler.ts`. It talks to AFFiNE over the internal
-Docker network at `http://affine:3010` (no host port needed). To run a
-single automation manually from the host:
-
-```bash
-docker exec -it affine_mcp_agent npx tsx src/automations/daily-digest.ts
-docker exec -it affine_mcp_agent npx tsx src/automations/stale-docs.ts
-docker exec -it affine_mcp_agent npx tsx src/automations/comment-summary.ts
-```
+| `AFFINE_MCP_EMAIL` / `AFFINE_MCP_PASSWORD` | after first login | Dedicated AFFiNE account both MCP servers sign in as. |
+| `AFFINE_MCP_PUBLIC_BASE_URL` / `AFFINE_OAUTH_ISSUER_URL` | yes | Public HTTPS URL of `mcp_server` (without `/mcp`) and its OAuth issuer. |
+| `AFFINE_OAUTH_ALLOW_SERVICE_WRITES` | for writes | `true` lets OAuth callers use write tools (as the service account). |
+| `AFFINE_MCP_HTTP_TOKEN` | yes | Bearer secret of `mcp_internal` (used by `ingest` and scripts). |
+| `INGEST_SOURCES_ROOT` | no (default `Sources`) | Sidebar path the ingest platform folders live under, e.g. `Agenti/Sources`. |
+| `TZ` | no (default `UTC`) | Timezone of the containers. |
 
 ## Persistence
 
@@ -123,7 +77,7 @@ Back these up before upgrading `AFFINE_REVISION`.
 
 AFFiNE joins two Docker networks:
 
-- `affine_net` — private, internal to this stack (postgres, redis, mcp_agent).
+- `affine_net` — private, internal to this stack (postgres, redis, MCP servers, ingest).
 - `shared_net` — **external**, for reaching AFFiNE from other Portainer stacks.
 
 ### One-time setup on the Docker host
@@ -161,9 +115,9 @@ http://affine:3010
 ```
 
 Use that as the base URL in the HTTP Request node. AFFiNE 0.27 no longer
-issues `ut_…` personal access tokens: for MCP from n8n, call `mcp_ext` at
-`http://mcp_ext:3100/` with `Authorization: Bearer <MCP_EXT_HTTP_TOKEN>` (or
-`mcp_server` at `http://mcp_server:3000/mcp` with `AFFINE_MCP_HTTP_TOKEN`).
+issues `ut_…` personal access tokens: for MCP from n8n, connect to the public
+`mcp_server` endpoint over OAuth, or attach n8n to `affine_net` and call
+`http://mcp_internal:3000/mcp` with `Authorization: Bearer <AFFINE_MCP_HTTP_TOKEN>`.
 
 ### Quick sanity check
 
@@ -175,180 +129,51 @@ docker network inspect shared_net --format '{{range .Containers}}{{.Name}} {{end
 
 You should see both `affine_server` and your n8n container listed.
 
-## MCP Extension Proxy (`mcp-ext`)
+## MCP servers
 
-The stack ships with a second MCP server at port `3100` — `affine-mcp-ext` —
-that both **fills gaps in AFFiNE's built-in MCP** (listing docs, comments,
-members, history) and provides **write tools** for creating and editing
-content. All clients (the scheduler, n8n, Claude Desktop, Cursor) should
-connect here, not to AFFiNE's native MCP directly.
+Both run the official `ghcr.io/dawncr0w/affine-mcp-server` image (~107 tools:
+docs, edgeless canvas, databases, templates, tags, collections, organize
+folders, journals) and sign in to AFFiNE as the dedicated service account
+(`AFFINE_MCP_EMAIL` / `AFFINE_MCP_PASSWORD`, sessions renewed automatically).
 
-### Tools
+| Service | Auth | Reachable at | For |
+|---|---|---|---|
+| `mcp_server` | OAuth (`AFFINE_MCP_AUTH_MODE=oauth`) | `${MCP_SERVER_PORT:-3300}` on the host, behind your HTTPS proxy | claude.ai / ChatGPT connectors, Claude Code, Codex, any OAuth MCP client |
+| `mcp_internal` | Bearer `AFFINE_MCP_HTTP_TOKEN` | `http://mcp_internal:3000/mcp` (stack network), `127.0.0.1:${MCP_INTERNAL_PORT:-3301}` | `ingest`, admin scripts over an SSH tunnel |
 
-**Reads** (GraphQL-backed):
-`list_documents`, `get_workspace_info`, `list_workspace_members`,
-`list_comments`, `list_document_history`, `get_document_info`,
-`list_notifications`, `list_blobs` · **Native forwards:** `read_document`,
-`keyword_search`, `semantic_search` (AFFiNE 0.27 merged its keyword and
-semantic tools into one native `doc_search`; both names forward there and
-need the indexer).
+### OAuth issuer requirements
 
-**Writes** (Yjs CRDT + GraphQL):
+`mcp_server` publishes `/.well-known/oauth-protected-resource` (pointing at
+`AFFINE_OAUTH_ISSUER_URL`) and answers unauthenticated requests with `401` +
+`WWW-Authenticate`, so clients discover everything themselves. The issuer must:
 
-| Tool | Purpose |
-|---|---|
-| `create_doc` | Create a new document, optionally with initial blocks. |
-| `append_blocks` | Append blocks to a doc. Supports `afterHeading:"AI summary"` to anchor under a template section. |
-| `update_block_text` | Replace the text/style of an existing block. |
-| `delete_block` | Remove a block (and descendants) from a doc. |
-| `set_doc_title` | Rename a doc. |
-| `delete_doc` | Soft-delete (trash) a doc. Recoverable from UI. |
-| `list_doc_blocks` | Inspect a doc's block tree (ids, flavours, text previews). |
-| `find_doc_by_title` | Resolve a title to a docId. |
-| `create_comment` / `resolve_comment` / `delete_comment` | Comment CRUD. |
-| `create_reply` / `delete_reply` | Reply CRUD. |
+- publish OAuth/OIDC discovery with a `jwks_uri` and sign **JWT** access tokens (RS/ES/PS algorithms);
+- put `<AFFINE_MCP_PUBLIC_BASE_URL>/mcp` (or the base URL) into `aud` and `mcp` into `scope`;
+- ideally allow **dynamic client registration** (RFC 7591), so connectors register themselves.
+  The claude.ai callback is `https://claude.ai/api/mcp/auth_callback`; CLI clients use `http://localhost:<port>/…`.
 
-**Organize sidebar — folder tree** (Yjs CRDT, table `db$folders`):
+Keycloak works well: a client scope `mcp` set as realm default with an
+*Audience* mapper (`included.custom.audience = https://mcp.example.com/mcp`),
+and the anonymous client-registration policy *Trusted Hosts* limited to the
+redirect hosts above (without requiring the sender to match, since connectors
+register from their own servers). Serve discovery also at the RFC 8414
+path-insert URL (`/.well-known/oauth-authorization-server/realms/<realm>`) on
+the issuer host — some clients try it first.
 
-| Tool | Purpose |
-|---|---|
-| `list_folder_tree` | Read the entire Organize sidebar as nested JSON. Doc-link names are resolved to current doc titles. Use this BEFORE any structural change. |
-| `create_folder` | Create a new folder (top-level or nested under `parentFolderId`). Returns the new `folderId`. |
-| `rename_folder` | Rename an existing folder. Doc/tag/collection links can't be renamed (they inherit from the target). |
-| `delete_folder` | Soft-delete a folder. Refuses if non-empty unless `cascade:true`. **Never deletes the underlying docs** — they remain in the workspace, just unfiled. |
-| `move_folder` | Move a folder + entire subtree under a different parent. Refuses cycles. |
-| `move_document` | File a doc into a folder. Consolidates duplicate links if the doc was previously linked elsewhere. Pass empty `folderId` to unfile. |
+Every OAuth caller acts as the same service account. Write tools need
+`AFFINE_OAUTH_ALLOW_SERVICE_WRITES=true` (with the default `full` profile the
+server refuses to start without it).
 
-These mutate the `db$folders` Yjs sub-doc that backs AFFiNE's "Organize" sidebar. Same Socket.IO transport as the doc tools — see [folder-store.ts](mcp-ext/src/folder-store.ts) for the row schema.
+### Recovery
 
-### Writing rich content
-
-Block `text` can be a plain string or an array of inline ops with formatting
-and inline doc references (the `@DocName` pill):
-
-```json
-{
-  "type": "paragraph",
-  "text": [
-    { "text": "Today I finished " },
-    { "text": " ", "refDocId": "3fa85f64-5717-4562-b3fc-2c963f66afa6" },
-    { "text": " and linked it to " },
-    { "text": "planning", "bold": true }
-  ]
-}
-```
-
-### Example: AI daily summary
-
-```jsonc
-// 1. Find the target journal doc
-find_doc_by_title({ "title": "Journal 2026-04-21" })
-// → { matches: [{ id: "<docId>", title: "Journal 2026-04-21" }] }
-
-// 2. Append the generated summary under the static heading
-append_blocks({
-  "docId": "<docId>",
-  "afterHeading": "AI summary",
-  "blocks": [
-    { "type": "paragraph", "text": "Dneska hlavně..." },
-    { "type": "list", "style": "bulleted", "text": [
-        { "text": "Dodělal jsem write tools v " },
-        { "text": " ", "refDocId": "<mcp-ext-docId>" }
-    ]}
-  ]
-})
-```
-
-### Safety boundary
-
-Write tools are scoped strictly to **content inside** the workspace.
-The following are intentionally **not** exposed — AI clients cannot:
-
-- modify workspace settings (`updateWorkspace`, `deleteWorkspace`)
-- invite, remove, or change permissions of members
-- manage invite links
-- change per-doc roles or sharing
-- permanently delete docs or blobs (only soft-trash)
-- publish private docs to the web
-
-Rotate `MCP_EXT_HTTP_TOKEN` (stack env) whenever you suspect leakage — it
-grants everything the `AFFINE_MCP_EMAIL` account can do in the workspace.
-That is also why the service account should be a dedicated, least-privileged
-member rather than your own admin account.
-
-### How writes work
-
-`mcp-ext` uses Yjs directly (no `@blocksuite/*` dependency, so it's not
-coupled to a particular AFFiNE image version):
-
-1. `GET /api/workspaces/:wsId/docs/:guid` returns the current Yjs binary.
-2. The proxy loads it into an in-memory `Y.Doc`, mutates the block tree
-   using AFFiNE's on-disk schema (`sys:flavour`, `sys:children`, `prop:text`
-   as `Y.Text` deltas with `reference` attributes for doc links, …).
-3. The diff vs. the pre-mutation state vector is pushed via the GraphQL
-   `applyDocUpdates` mutation.
-
-For `create_doc`, a fresh `Y.Doc` (`page` → `surface` + `note`) is
-constructed and the new doc id is also registered in the workspace root
-doc's `meta.pages` array.
-
-## AFFiNE 0.27 authentication
-
-AFFiNE 0.27 removed legacy personal access tokens (`ut_…`, the
-`generateUserAccessToken` mutation and the `access_tokens` table). GraphQL now
-only accepts a cookie session (email/password sign-in) or a JWT session, and
-the native workspace MCP endpoint `/api/workspaces/<id>/mcp` only accepts
-workspace-scoped, expiring **MCP credentials** (`aff_mcp_v1.…`). The MCP
-services therefore no longer forward a client-supplied AFFiNE token:
-
-| Hop | Credential |
-|---|---|
-| client → `mcp_ext` | `Authorization: Bearer <MCP_EXT_HTTP_TOKEN>` — checked in constant time, never forwarded |
-| `mcp_ext` → AFFiNE GraphQL / blob upload / Socket.IO sync | its own cookie session from `POST /api/auth/sign-in` with `AFFINE_MCP_EMAIL` / `AFFINE_MCP_PASSWORD` (kept in memory, re-login + one retry on 401/expiry) |
-| `mcp_ext` → native MCP (`read_document`, search) | an MCP credential it creates with `createMcpCredential` (READ_ONLY, 30 days); re-created 3 days before `expiresAt` and on 401 (one retry); the replaced credential and leftovers named `affine-mcp-ext` from earlier container runs are revoked |
-| client → `mcp_server` | `Authorization: Bearer <AFFINE_MCP_HTTP_TOKEN>` |
-| `mcp_server` → AFFiNE | upstream email/password sign-in (`AFFINE_EMAIL`/`AFFINE_PASSWORD` ← `AFFINE_MCP_EMAIL`/`AFFINE_MCP_PASSWORD`), renewed before cookie expiry |
-
-Notes:
-
-- **Service account.** Use a dedicated account that is a member (editor) of
-  the workspace. Every `mcp_ext` tool works with that role; AFFiNE 0.27 only
-  lets workspace admins use the `docs` listing, so for members
-  `list_documents` / `get_document_info` transparently use
-  `recentlyUpdatedDocs` (same fields, ordered by last update instead of
-  creation). Make the account a workspace Admin if you need the old order.
-- **AI must be enabled** (Admin panel → Settings → AI, `copilot.enabled`):
-  AFFiNE serves the native MCP endpoint and `createMcpCredential` only while
-  copilot is on. Without it the three native-forward tools fail with a clear
-  message; everything else keeps working.
-- **Stable AFFiNE issues READ_ONLY MCP credentials only** — fine, the
-  forwarded native tools are read-only; writes go through Yjs.
-- Revoked credentials stay visible (status `REVOKED`) in the account's MCP
-  credential list; each `mcp_ext` restart creates one new credential and
-  revokes the previous one. `MCP_EXT_CREDENTIAL_NAME` (optional) changes the
-  managed name — give each `mcp_ext` instance sharing one account its own.
-- **Password change / "sign out everywhere"** on the service account:
-  `mcp_ext` signs in again by itself; `mcp_server` 3.10.1 does not recover
-  from a server-side session revocation — restart `affine_mcp_server`.
-- `mcp_server` is the upstream image `ghcr.io/dawncr0w/affine-mcp-server`
-  ([DAWNCR0W/affine-mcp-server](https://github.com/DAWNCR0W/affine-mcp-server)),
-  pinned in `compose.yaml`; nothing is vendored in this repo any more. It
-  talks plain HTTP to `http://affine:3010` inside the Docker network, hence
-  `AFFINE_ALLOW_INSECURE_HTTP=true`.
-
-Claude Code (or any other client) talking to `mcp_ext` over Tailscale needs
-its header updated to the new secret, e.g. in `.mcp.json`:
-
-```json
-{ "type": "http", "url": "http://<tailscale-host>:3100/",
-  "headers": { "Authorization": "Bearer <MCP_EXT_HTTP_TOKEN>" } }
-```
+If someone revokes the service account's sessions (password change, "sign out
+everywhere"), restart both servers: `docker restart affine_mcp_server affine_mcp_internal`.
 
 ## Ingest Service
 
 Python/FastAPI sidecar that captures URLs from the iOS share extension
-and files them into AFFiNE under `Sources/`. Runs alongside `mcp_ext` +
-`mcp_agent` in the same stack. Ports `${INGEST_PORT:-3200}` on the host.
+and files them into AFFiNE under `${INGEST_SOURCES_ROOT:-Sources}/`. Talks to
+AFFiNE through `mcp_internal`. Ports `${INGEST_PORT:-3200}` on the host.
 
 ### What it does
 
@@ -358,15 +183,16 @@ and files them into AFFiNE under `Sources/`. Runs alongside `mcp_ext` +
    - Extracts content (yt-dlp / markitdown / oEmbed / reddit JSON depending on URL host).
    - Classifies into a topic via Claude Haiku 4.5 with prompt caching.
    - Uses cosine-similarity on folder-name embeddings (OpenAI text-embedding-3-small) to dedup near-duplicate folders ("Cooking" → existing "Recipes").
-   - Moves the doc into the topic folder + appends the extracted body via `mcp_ext`.
-4. Weekly Sunday 03:00 UTC cron in `mcp_agent` (`sources-reorg`) sweeps `Sources/*` for over-15-doc leaf folders and proposes 2–5 sub-clusters via Claude Sonnet 4.6.
+   - Moves the doc into the topic folder + appends the extracted body via `mcp_internal`.
 
 ### Required environment variables
 
 | Variable | Purpose |
 |---|---|
 | `INGEST_API_TOKEN` | Bearer token iOS sends. Generate: `openssl rand -hex 32`. |
-| `ANTHROPIC_API_KEY` | Classifier (Haiku 4.5) + reorganizer (Sonnet 4.6). |
+| `ANTHROPIC_API_KEY` | Classifier (Haiku 4.5) + renderer (Sonnet 4.6). |
+| `AFFINE_MCP_HTTP_TOKEN` | Bearer secret of `mcp_internal`. |
+| `INGEST_SOURCES_ROOT` | Sidebar path of the platform folders (default `Sources`). |
 | `OPENAI_API_KEY` | Whisper API (audio transcription) + embeddings. |
 | `INGEST_PORT` | Host port (default 3200). |
 | `INGEST_BIND` | Bind interface (default 0.0.0.0; set 127.0.0.1 to restrict). |
@@ -610,7 +436,7 @@ toolbar badge + `Server: cookies missing` line.
 
 **Capture stuck at `queued`**
 - Worker not running. Check `/health` — `worker_alive` should be `true`. If false, restart `affine_ingest`.
-- `mcp_ext` unhealthy. Check `docker compose ps mcp_ext`.
+- `mcp_internal` unhealthy. Check `docker compose ps mcp_internal` and `GET /health/deep` on ingest.
 
 **Capture stuck at `failed`**
 - Look at `error` field in the capture detail. Common causes:
@@ -620,13 +446,7 @@ toolbar badge + `Server: cookies missing` line.
 - After 3 retries (60s, 5min, 30min backoff) the row stays at `failed` until you `POST /captures/{id}/retry` manually.
 
 **Doc landed in `Sources/<platform>/` root instead of a topic folder**
-- Classifier returned `confidence < 0.6`. Check `classifier_reasoning` in the detail. The weekly reorganizer (Sunday 03:00 UTC) revisits these.
-
-**Reorganizer didn't run**
-- Check `mcp_agent` logs for the `Sources Reorg` cron entry on Sunday. Manual trigger:
-  ```bash
-  docker exec -it affine_mcp_agent npx tsx src/automations/sources-reorg.ts
-  ```
+- Classifier returned `confidence < 0.6`. Check `classifier_reasoning` in the detail and move the doc by hand (or with an MCP client).
 
 **Same URL captured twice**
 - Should not happen — `url_hash` is UNIQUE. The second POST returns the existing capture. If you see duplicates, check that URL normalization (`utm_*` strip, lowercase host) is working: `python -c "from src.models import normalized_url; print(normalized_url('https://...'))"` inside the container.
@@ -644,9 +464,5 @@ deployments, put it behind Caddy/Traefik/nginx, terminate TLS there, and set
 ## Updating
 
 1. `git pull` the stack repo (or re-upload).
-2. Re-run `./prepare.sh` if `affine-mcp-agent` changed. Note that
-   `mcp-agent/src/config.ts` in this repo reads `MCP_EXT_HTTP_TOKEN` (AFFiNE
-   0.27 auth); port that change to `../affine-mcp-agent` first, or
-   `prepare.sh` will copy the old `AFFINE_ACCESS_TOKEN` variant back in.
-3. In Portainer, **Pull and redeploy** (enable "Re-pull image" for the AFFiNE
-   image; enable "Re-build" to pick up agent code changes).
+2. In Portainer, **Pull and redeploy** (enable "Re-pull image" for the AFFiNE
+   and MCP images; `ingest` is rebuilt from source).

@@ -74,8 +74,15 @@ class Settings(BaseSettings):
     frame_blackness_threshold: float = 20.0   # mean grayscale pixel value 0-255; below = "too dark"
     frame_dedup_hamming_distance: int = 5     # imagehash pHash distance 0-64; below-or-equal = "duplicate"
     frame_entropy_threshold: float = 4.0      # Shannon entropy of grayscale histogram, bits 0-8; below = "too uniform"
+    # Sidebar folder path the platform folders live under ("/"-separated),
+    # e.g. "Agenti/Sources". Folders are resolved by name from the root.
+    ingest_sources_root: str = "Sources"
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore", case_sensitive=False)
+
+    def sources_root_path(self) -> list[str]:
+        """`ingest_sources_root` as path segments; empty falls back to ["Sources"]."""
+        return [s.strip() for s in self.ingest_sources_root.split("/") if s.strip()] or ["Sources"]
 
 
 settings = Settings()

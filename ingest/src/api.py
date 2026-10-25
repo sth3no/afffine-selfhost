@@ -67,6 +67,11 @@ class AppState:
 app_state = AppState()
 
 
+def _mcp_url() -> str:
+    """Streamable-HTTP endpoint of the AFFiNE MCP server (bearer instance)."""
+    return os.environ.get("AFFINE_MCP_URL", "http://mcp_internal:3000/mcp")
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     """Startup: load topics, open DB pool, prepare MCP client + filer.
@@ -78,21 +83,21 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     topics = load_topics()
     app_state.router = PlatformRouter(topics)
 
-    # MCP client to mcp_ext (lazy connect — no network call here).
-    mcp_url = os.environ.get("MCP_EXT_URL", "http://mcp_ext:3100")
-    # mcp_ext's shared client secret (it authenticates to AFFiNE itself —
-    # AFFiNE 0.27 removed the `ut_…` access tokens this used to forward).
-    mcp_token = os.environ.get("MCP_EXT_HTTP_TOKEN", "").strip()
+    # MCP client to mcp_internal (lazy connect — no network call here).
+    # Its shared bearer secret; the server authenticates to AFFiNE itself.
+    mcp_token = os.environ.get("AFFINE_MCP_HTTP_TOKEN", "").strip()
     # Fail loudly when the token is missing rather than booting and 5xx-ing
     # on every /capture. Symptom seen in prod: `httpx.LocalProtocolError:
     # Illegal header value b'Bearer '` on each outbound MCP call.
     if not mcp_token:
         raise RuntimeError(
-            "MCP_EXT_HTTP_TOKEN is empty. Set it in the stack env (the same "
-            "value mcp_ext is started with) and redeploy. Without it, every "
-            "/capture fails on the synchronous mcp_ext call."
+            "AFFINE_MCP_HTTP_TOKEN is empty. Set it in the stack env (the same "
+            "value mcp_internal is started with) and redeploy. Without it, every "
+            "/capture fails on the synchronous MCP call."
         )
-    app_state.mcp = await MCPClient(mcp_url, mcp_token).__aenter__()
+    app_state.mcp = await MCPClient(
+        _mcp_url(), mcp_token, workspace_id=settings.affine_workspace_id
+    ).__aenter__()
 
     # asyncpg pool (skipped when DATABASE_URL points at the placeholder used
     # by `pip install` smoke tests on developer machines).
@@ -283,7 +288,7 @@ async def health_deep() -> JSONResponse:
 
     Shallow /health is fine for `docker healthcheck` — it stays green as long
     as the process is up and the DB pool is alive. /health/deep additionally
-    probes mcp_ext (TCP + /health) and AFFiNE-via-mcp_ext (a cheap MCP call),
+    probes the MCP server (TCP + /healthz) and AFFiNE-via-MCP (a cheap MCP call),
     because /capture fails when either of those is broken even though the
     worker is "alive".
 
@@ -309,32 +314,32 @@ async def health_deep() -> JSONResponse:
             checks["db"] = {"ok": False, "error": f"{type(e).__name__}: {e}"}
             overall_ok = False
 
-    # 2. mcp_ext liveness — TCP + /health.
-    mcp_url = os.environ.get("MCP_EXT_URL", "http://mcp_ext:3100").rstrip("/")
+    # 2. MCP server liveness — TCP + /healthz next to the /mcp endpoint.
+    health_url = _mcp_url().rstrip("/").removesuffix("/mcp") + "/healthz"
     t0 = time.monotonic()
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
-            resp = await client.get(f"{mcp_url}/health")
+            resp = await client.get(health_url)
         if resp.status_code == 200:
-            checks["mcp_ext"] = {
+            checks["mcp"] = {
                 "ok": True,
                 "latency_ms": int((time.monotonic() - t0) * 1000),
             }
         else:
-            checks["mcp_ext"] = {
+            checks["mcp"] = {
                 "ok": False,
                 "status_code": resp.status_code,
                 "latency_ms": int((time.monotonic() - t0) * 1000),
             }
             overall_ok = False
     except Exception as e:
-        checks["mcp_ext"] = {"ok": False, "error": f"{type(e).__name__}: {e}"}
+        checks["mcp"] = {"ok": False, "error": f"{type(e).__name__}: {e}"}
         overall_ok = False
 
-    # 3. AFFiNE-via-mcp_ext — exercises MCP_EXT_HTTP_TOKEN + mcp_ext's
+    # 3. AFFiNE-via-MCP — exercises AFFINE_MCP_HTTP_TOKEN + the server's
     #    AFFiNE session + workspace.
-    #    Skipped automatically when mcp_ext probe is already red.
-    if checks.get("mcp_ext", {}).get("ok") and app_state.mcp is not None:
+    #    Skipped automatically when the MCP probe is already red.
+    if checks.get("mcp", {}).get("ok") and app_state.mcp is not None:
         t0 = time.monotonic()
         try:
             await app_state.mcp.list_folder_tree()
@@ -393,7 +398,7 @@ async def capture(
     initial_path = router.initial_path(platform)
 
     # 3. Resolve/create the platform folder, create stub doc. Best-effort:
-    #    when mcp_ext/AFFiNE is briefly down, the capture is still accepted
+    #    when the MCP server/AFFiNE is briefly down, the capture is still accepted
     #    (the iOS share would otherwise 5xx and the URL would be LOST) and
     #    the worker creates the doc when it picks the row up.
     doc_id: str | None = None

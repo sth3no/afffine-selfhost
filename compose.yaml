@@ -19,7 +19,7 @@ services:
       affine_migration:
         condition: service_completed_successfully
     # Wait for the HTTP server to actually be listening on :3010 before
-    # dependents (mcp_agent) start. Plain "service_started" only waits for
+    # dependents (the MCP servers) start. Plain "service_started" only waits for
     # the container, not for the app inside to bind the port — AFFiNE takes
     # ~30–60s to boot. Uses node (already in the image) for a TCP probe.
     healthcheck:
@@ -139,72 +139,14 @@ services:
     networks:
       - affine_net
 
-  # MCP extension proxy. Serves as the SINGLE MCP endpoint clients use
-  # (mcp_agent, ingest, n8n, Claude Code/Desktop, etc.). Internally:
-  #   - For tools AFFiNE already has (read_document, doc_search — exposed
-  #     as read_document / keyword_search / semantic_search), forwards to
-  #     AFFiNE's built-in MCP at /api/workspaces/<id>/mcp.
-  #   - For missing tools (list_documents, get_workspace_info, list_comments,
-  #     list_workspace_members, list_document_history, get_document_info),
-  #     implements them via AFFiNE's GraphQL API; writes go through Yjs.
-  # See ./mcp-ext/src/tools.ts for the full list.
-  #
-  # Auth (AFFiNE 0.27+ removed `ut_...` personal access tokens):
-  #   - Clients -> mcp_ext: `Authorization: Bearer <MCP_EXT_HTTP_TOKEN>` on
-  #     every request. Only checked here, never forwarded to AFFiNE.
-  #   - mcp_ext -> AFFiNE: its own cookie session, signed in with
-  #     AFFINE_MCP_EMAIL / AFFINE_MCP_PASSWORD (re-login on expiry), plus an
-  #     MCP credential it creates via `createMcpCredential` for the native
-  #     MCP endpoint (re-created before expiry, replaced ones revoked). The
-  #     native endpoint needs AI (copilot) enabled on the AFFiNE server.
-  mcp_ext:
-    build:
-      context: ./mcp-ext
-      dockerfile: Dockerfile
-    image: affine-mcp-ext:local
-    pull_policy: build
-    container_name: affine_mcp_ext
-    depends_on:
-      affine:
-        condition: service_healthy
-    # Publishing this port makes the extended MCP reachable from outside
-    # the Docker host — needed for Claude Desktop, Cursor, or any other
-    # MCP-capable client running on your laptop. To restrict to localhost
-    # only, set MCP_EXT_BIND=127.0.0.1 in the stack env.
-    ports:
-      - '${MCP_EXT_BIND:-0.0.0.0}:${MCP_EXT_PORT:-3100}:3100'
-    environment:
-      - AFFINE_BASE_URL=http://affine:3010
-      - AFFINE_WORKSPACE_ID=${AFFINE_WORKSPACE_ID:-}
-      # REQUIRED (the proxy refuses to start without these three).
-      # Shared secret clients must send; generate with `openssl rand -hex 32`.
-      - MCP_EXT_HTTP_TOKEN=${MCP_EXT_HTTP_TOKEN:-}
-      # Dedicated AFFiNE account (member/editor of the workspace) the proxy
-      # signs in as. Kept in memory only; never logged.
-      - AFFINE_MCP_EMAIL=${AFFINE_MCP_EMAIL:-}
-      - AFFINE_MCP_PASSWORD=${AFFINE_MCP_PASSWORD:-}
-      - PORT=3100
-      - TZ=${TZ:-UTC}
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "node", "-e", "require('http').get('http://localhost:3100/health', r => process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"]
-      interval: 15s
-      timeout: 5s
-      retries: 10
-      start_period: 20s
-    networks:
-      - affine_net
-      - shared_net  # so n8n (and other stacks) can reach the proxy too
-
   # Full AFFiNE MCP server — upstream DAWNCR0W/affine-mcp-server, run from
   # its official image (https://github.com/DAWNCR0W/affine-mcp-server).
   # Pinned tag; bump deliberately after reading the upstream release notes.
   #
   # This is the COMPREHENSIVE surface — ~107 tools across docs, edgeless
-  # canvas, databases, templates, tags, collections, workspace. It runs
-  # ALONGSIDE mcp_ext (the lean custom proxy), not as a replacement —
-  # mcp_agent and ingest still talk to mcp_ext. Point each client at
-  # whichever endpoint it needs.
+  # canvas, databases, templates, tags, collections, workspace — and the
+  # only MCP server of the stack (public via OAuth, internal via
+  # mcp_internal).
   #
   # OAuth mode (public endpoint, e.g. claude.ai / ChatGPT connectors, Claude
   # Code, Codex): callers bring a JWT access token from AFFINE_OAUTH_ISSUER_URL
@@ -221,12 +163,12 @@ services:
     depends_on:
       affine:
         condition: service_healthy
-    # Host port for the MCP HTTP endpoint. 3100 is mcp_ext, 3200 is ingest —
+    # Host port for the MCP HTTP endpoint. 3200 is ingest, 3301 mcp_internal —
     # this one uses 3300. Set MCP_SERVER_BIND=127.0.0.1 to restrict to localhost.
     ports:
       - '${MCP_SERVER_BIND:-0.0.0.0}:${MCP_SERVER_PORT:-3300}:3000'
     environment:
-      # Transport — HTTP, so it's reachable like mcp_ext. The image runs as
+      # Transport — streamable HTTP at /mcp. The image runs as
       # the non-root `affine` user and listens on 0.0.0.0:3000.
       - MCP_TRANSPORT=http
       - AFFINE_MCP_HTTP_HOST=0.0.0.0
@@ -237,7 +179,7 @@ services:
       - AFFINE_BASE_URL=http://affine:3010
       - AFFINE_ALLOW_INSECURE_HTTP=true
       - AFFINE_WORKSPACE_ID=${AFFINE_WORKSPACE_ID:-}
-      # Email/password sign-in (same dedicated account as mcp_ext).
+      # Email/password sign-in (dedicated service account, shared with mcp_internal).
       - AFFINE_EMAIL=${AFFINE_MCP_EMAIL:-}
       - AFFINE_PASSWORD=${AFFINE_MCP_PASSWORD:-}
       # OAuth — REQUIRED: AFFINE_MCP_PUBLIC_BASE_URL (https URL this server is
@@ -306,34 +248,6 @@ services:
     networks:
       - affine_net
 
-  mcp_agent:
-    build:
-      context: ./mcp-agent
-      dockerfile: Dockerfile
-    image: affine-mcp-agent:local
-    # Never try to pull this image from a registry — it's built locally.
-    # Without this, Portainer's "Pull and redeploy" fails because
-    # affine-mcp-agent:local doesn't exist in any registry.
-    pull_policy: build
-    container_name: affine_mcp_agent
-    depends_on:
-      mcp_ext:
-        condition: service_healthy
-    environment:
-      # Agent now talks to the extension proxy, not AFFiNE directly.
-      # AFFINE_MCP_ENDPOINT overrides the URL built from base+workspace.
-      - AFFINE_BASE_URL=http://mcp_ext:3100
-      - AFFINE_MCP_ENDPOINT=http://mcp_ext:3100/
-      - AFFINE_WORKSPACE_ID=${AFFINE_WORKSPACE_ID:-}
-      # mcp_ext's client secret (sent as Authorization: Bearer).
-      - MCP_EXT_HTTP_TOKEN=${MCP_EXT_HTTP_TOKEN:-}
-      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
-      - REORG_THRESHOLD=${REORG_THRESHOLD_DEFAULT:-15}
-      - TZ=${TZ:-UTC}
-    restart: unless-stopped
-    networks:
-      - affine_net
-
   # imputnet/cobalt — media downloader API. Replaces direct yt-dlp use
   # for platforms that aggressively bot-detect (YouTube, Instagram,
   # TikTok, X). The cobalt project tracks the platform-fight upstream
@@ -371,7 +285,7 @@ services:
       # tunneled through the residential gateway.
       - HTTP_PROXY=${RESIDENTIAL_PROXY_URL:-}
       - HTTPS_PROXY=${RESIDENTIAL_PROXY_URL:-}
-      - NO_PROXY=cobalt,ingest,mcp_ext,mcp_agent,postgres,redis,yt_session_server,yt_session_adapter,localhost,127.0.0.1
+      - NO_PROXY=cobalt,ingest,mcp_internal,postgres,redis,yt_session_server,yt_session_adapter,localhost,127.0.0.1
     volumes:
       - yt_cookies:/cookies:ro
     depends_on:
@@ -413,7 +327,7 @@ services:
       # and BotGuard completes → poToken is minted → cobalt has it.
       - HTTP_PROXY=${RESIDENTIAL_PROXY_URL:-}
       - HTTPS_PROXY=${RESIDENTIAL_PROXY_URL:-}
-      - NO_PROXY=cobalt,ingest,mcp_ext,mcp_agent,postgres,redis,yt_session_server,yt_session_adapter,localhost,127.0.0.1
+      - NO_PROXY=cobalt,ingest,mcp_internal,postgres,redis,yt_session_server,yt_session_adapter,localhost,127.0.0.1
     restart: unless-stopped
     networks:
       - affine_net
@@ -530,7 +444,7 @@ services:
       - affine_net
 
   # Python ingest service. Single container runs FastAPI + asyncio worker
-  # in one process. All AFFiNE writes route through mcp_ext:3100. All
+  # in one process. All AFFiNE writes route through mcp_internal:3000. All
   # GPU-bound inference (LLM, transcription) hits hosted APIs.
   ingest:
     build:
@@ -542,7 +456,7 @@ services:
     depends_on:
       ingest_migration:
         condition: service_completed_successfully
-      mcp_ext:
+      mcp_internal:
         condition: service_healthy
       postgres:
         condition: service_healthy
@@ -554,14 +468,16 @@ services:
       - PORT=3200
       - INGEST_API_TOKEN=${INGEST_API_TOKEN:-}
       - DATABASE_URL=postgresql://${DB_USERNAME}:${DB_PASSWORD}@postgres:5432/affine_ingest
-      - MCP_EXT_URL=http://mcp_ext:3100
+      - AFFINE_MCP_URL=http://mcp_internal:3000/mcp
       - COBALT_API_URL=${COBALT_API_URL:-http://cobalt:9000}
-      # MCP client to mcp_ext authenticates with mcp_ext's client secret.
+      # MCP client to mcp_internal authenticates with its bearer secret.
       # Without it the service refuses to start (otherwise every /capture
-      # would fail on the synchronous mcp_ext call). The workspace id +
-      # external URL are used by _build_web_url to construct the doc link
-      # returned to the iOS client.
-      - MCP_EXT_HTTP_TOKEN=${MCP_EXT_HTTP_TOKEN:-}
+      # would fail on the synchronous MCP call). The workspace id (also
+      # needed for blob uploads) + external URL are used by _build_web_url
+      # to construct the doc link returned to the iOS client.
+      - AFFINE_MCP_HTTP_TOKEN=${AFFINE_MCP_HTTP_TOKEN:-}
+      # Sidebar path the platform folders live under ("/"-separated).
+      - INGEST_SOURCES_ROOT=${INGEST_SOURCES_ROOT:-Sources}
       - AFFINE_WORKSPACE_ID=${AFFINE_WORKSPACE_ID:-}
       - AFFINE_SERVER_EXTERNAL_URL=${AFFINE_SERVER_EXTERNAL_URL:-http://localhost:3010}
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
@@ -582,7 +498,7 @@ services:
       # go direct — proxying them via residential is wasteful).
       - HTTP_PROXY=${RESIDENTIAL_PROXY_URL:-}
       - HTTPS_PROXY=${RESIDENTIAL_PROXY_URL:-}
-      - NO_PROXY=cobalt,ingest,mcp_ext,mcp_agent,postgres,redis,yt_session_server,yt_session_adapter,localhost,127.0.0.1,api.anthropic.com,api.openai.com
+      - NO_PROXY=cobalt,ingest,mcp_internal,postgres,redis,yt_session_server,yt_session_adapter,localhost,127.0.0.1,api.anthropic.com,api.openai.com
     tmpfs:
       - /tmp/ingest:size=2g
     volumes:

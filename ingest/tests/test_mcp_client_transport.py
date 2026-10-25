@@ -17,7 +17,7 @@ def test_mcp_client_rejects_empty_token(bad_token: str):
     b'Bearer '` on every outbound /capture call.
     """
     with pytest.raises(ValueError, match="non-empty bearer token"):
-        MCPClient("http://mcp_ext:3100", bad_token)
+        MCPClient("http://mcp_internal:3000/mcp", bad_token)
 
 
 def _rpc_response(req_id: Any, result: Any) -> httpx.Response:
@@ -37,18 +37,74 @@ def _rpc_error_response(req_id: Any, code: int, message: str) -> httpx.Response:
 
 
 class _FakeTransport:
-    """Records POST bodies and returns canned responses in order."""
+    """Records POST bodies and returns canned responses in order.
+
+    Notifications (no `id`) are answered with 202 and recorded separately,
+    so the canned responses line up with real requests only."""
 
     def __init__(self, responses: list[httpx.Response]) -> None:
         self._responses = list(responses)
         self.requests: list[dict] = []
+        self.notifications: list[dict] = []
+        self.session_headers: list[str | None] = []
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
         body = json.loads(request.content.decode())
+        if "id" not in body:
+            self.notifications.append(body)
+            return httpx.Response(202)
         self.requests.append(body)
+        self.session_headers.append(request.headers.get("mcp-session-id"))
         if not self._responses:
             raise AssertionError(f"Unexpected request: {body}")
         return self._responses.pop(0)
+
+
+def _sse_response(req_id: Any, result: Any, session: str | None = None) -> httpx.Response:
+    headers = {"Content-Type": "text/event-stream"}
+    if session:
+        headers["mcp-session-id"] = session
+    data = json.dumps({"jsonrpc": "2.0", "id": req_id, "result": result})
+    return httpx.Response(200, content=f"event: message\ndata: {data}\n\n".encode(), headers=headers)
+
+
+@pytest.mark.asyncio
+async def test_sse_responses_and_session_id_are_handled():
+    """DAWNCR0W answers with text/event-stream and hands out an mcp-session-id
+    on initialize that every later request must echo back."""
+    transport = _FakeTransport(
+        [
+            _sse_response(1, {"protocolVersion": "2025-03-26", "capabilities": {"tools": {}}}, session="s-1"),
+            _sse_response(2, {"content": [{"type": "text", "text": json.dumps({"ok": True})}]}),
+        ]
+    )
+    async with MCPClient("http://mcp_internal:3000/mcp", "t", _transport=httpx.MockTransport(transport)) as client:
+        result = await client.call_tool("current_user", {})
+
+    assert result == {"ok": True}
+    assert transport.session_headers == [None, "s-1"]
+    assert [n["method"] for n in transport.notifications] == ["notifications/initialized"]
+
+
+@pytest.mark.asyncio
+async def test_expired_session_reinitializes_and_retries_once():
+    """After the server's idle timeout the session is gone (404). The client
+    must start a new session and replay the call instead of failing."""
+    transport = _FakeTransport(
+        [
+            _sse_response(1, {"protocolVersion": "2025-03-26"}, session="old"),
+            httpx.Response(404, json={"jsonrpc": "2.0", "error": {"code": -32001, "message": "Session not found"}, "id": None}),
+            _sse_response(3, {"protocolVersion": "2025-03-26"}, session="new"),
+            _sse_response(4, {"content": [{"type": "text", "text": "\"done\""}]}),
+        ]
+    )
+    async with MCPClient("http://mcp_internal:3000/mcp", "t", _transport=httpx.MockTransport(transport)) as client:
+        await client.initialize()
+        result = await client.call_tool("current_user", {})
+
+    assert result == "done"
+    assert [r["method"] for r in transport.requests] == ["initialize", "tools/call", "initialize", "tools/call"]
+    assert transport.session_headers == [None, "old", None, "new"]
 
 
 @pytest.mark.asyncio
@@ -63,7 +119,7 @@ async def test_initialize_then_call_tool_unwraps_text_content():
         ]
     )
     async with MCPClient(
-        base_url="http://mcp_ext:3100",
+        base_url="http://mcp_internal:3000/mcp",
         token="test-token",
         _transport=httpx.MockTransport(transport),
     ) as client:
@@ -89,7 +145,7 @@ async def test_call_tool_raises_mcp_tool_error_on_isError():
         ]
     )
     async with MCPClient(
-        base_url="http://mcp_ext:3100",
+        base_url="http://mcp_internal:3000/mcp",
         token="test-token",
         _transport=httpx.MockTransport(transport),
     ) as client:
@@ -107,7 +163,7 @@ async def test_call_tool_raises_mcp_error_on_jsonrpc_error():
         ]
     )
     async with MCPClient(
-        base_url="http://mcp_ext:3100",
+        base_url="http://mcp_internal:3000/mcp",
         token="test-token",
         _transport=httpx.MockTransport(transport),
     ) as client:
@@ -129,10 +185,12 @@ async def test_authorization_header_sent():
     def capture(request: httpx.Request) -> httpx.Response:
         seen_headers.update(dict(request.headers))
         body = json.loads(request.content.decode())
+        if "id" not in body:  # notifications/initialized
+            return httpx.Response(202)
         return _rpc_response(body["id"], {"protocolVersion": "2025-03-26", "capabilities": {"tools": {}}})
 
     async with MCPClient(
-        base_url="http://mcp_ext:3100",
+        base_url="http://mcp_internal:3000/mcp",
         token="ut_secret",
         _transport=httpx.MockTransport(capture),
     ) as client:
@@ -151,7 +209,7 @@ async def test_http_5xx_propagates_as_httpx_error():
         return httpx.Response(503, json={"error": "upstream unavailable"})
 
     async with MCPClient(
-        base_url="http://mcp_ext:3100",
+        base_url="http://mcp_internal:3000/mcp",
         token="t",
         _transport=httpx.MockTransport(handler),
     ) as client:
@@ -169,7 +227,7 @@ async def test_string_text_passes_through_when_not_json():
         ]
     )
     async with MCPClient(
-        base_url="http://mcp_ext:3100",
+        base_url="http://mcp_internal:3000/mcp",
         token="t",
         _transport=httpx.MockTransport(transport),
     ) as client:

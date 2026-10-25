@@ -1,23 +1,32 @@
-"""Async MCP client for talking to mcp_ext over JSON-RPC 2.0 over HTTP.
+"""Async MCP client for the AFFiNE MCP server (DAWNCR0W `affine-mcp-server`).
 
-Speaks the streamable-HTTP transport (single POST / per request), which is
-what mcp_ext exposes. The MCP `initialize` handshake is performed lazily on
-the first tool call.
+Talks to the internal bearer-mode instance (`mcp_internal`) over the
+streamable-HTTP transport: one POST per JSON-RPC message to the `/mcp`
+endpoint, answered as JSON or as a server-sent event. The server hands out
+an `mcp-session-id` on `initialize`; every later request echoes it, and when
+the session has expired (HTTP 404) the client starts a new one and replays
+the call once. The handshake is performed lazily on the first tool call.
 
-Tool results from mcp_ext are wrapped as {content: [{type:"text", text:str}]}.
-The text payload is itself JSON-encoded for structured tools (every tool we
-care about is structured) — this client tries `json.loads` first and falls
-back to the raw string if that fails. Tool errors arrive with `isError: true`
+Tool results are wrapped as {content: [{type:"text", text:str}]}. The text
+payload is JSON for structured tools — this client tries `json.loads` first
+and falls back to the raw string. Tool errors arrive with `isError: true`
 and become MCPToolError. JSON-RPC errors become MCPError.
+
+The typed methods keep the interface the pipeline was written against
+(folder tree with names, `folderId` / `docId` / `sourceId` results, block
+specs from `markdown_render`) and translate it to DAWNCR0W's tools.
 """
 
 from __future__ import annotations
 
+import base64
 import json
 from itertools import count
 from typing import Any
 
 import httpx
+
+from src.dawn_blocks import to_append_block_args
 
 PROTOCOL_VERSION = "2025-03-26"
 DEFAULT_TIMEOUT = httpx.Timeout(connect=5.0, read=30.0, write=10.0, pool=5.0)
@@ -41,6 +50,10 @@ class MCPToolError(Exception):
         self.message = message
 
 
+class _SessionExpired(Exception):
+    """The server no longer knows our mcp-session-id (idle timeout, restart)."""
+
+
 class MCPClient:
     """Async client. Use as `async with MCPClient(...) as c: await c.call_tool(...)`."""
 
@@ -50,6 +63,7 @@ class MCPClient:
         token: str,
         timeout: httpx.Timeout = DEFAULT_TIMEOUT,
         *,
+        workspace_id: str | None = None,
         _transport: httpx.AsyncBaseTransport | httpx.MockTransport | None = None,
     ) -> None:
         # Reject empty/whitespace tokens at construction. Otherwise the
@@ -61,24 +75,25 @@ class MCPClient:
         if not token:
             raise ValueError(
                 "MCPClient requires a non-empty bearer token "
-                "(check MCP_EXT_HTTP_TOKEN env var)."
+                "(check AFFINE_MCP_HTTP_TOKEN env var)."
             )
-        self._base_url = base_url.rstrip("/")
+        self._url = base_url
         self._token = token
         self._timeout = timeout
+        self._workspace_id = workspace_id or None
         self._transport = _transport
         self._client: httpx.AsyncClient | None = None
         self._initialized = False
+        self._session_id: str | None = None
         self._counter = count(1)
 
     async def __aenter__(self) -> "MCPClient":
         kwargs: dict[str, Any] = {
-            "base_url": self._base_url,
             "timeout": self._timeout,
             "headers": {
                 "Authorization": f"Bearer {self._token}",
                 "Content-Type": "application/json",
-                "Accept": "application/json",
+                "Accept": "application/json, text/event-stream",
             },
         }
         if self._transport is not None:
@@ -95,14 +110,16 @@ class MCPClient:
         """Perform the MCP initialize handshake. Idempotent."""
         if self._initialized:
             return {}
+        self._session_id = None
         result = await self._rpc(
             "initialize",
             {
                 "protocolVersion": PROTOCOL_VERSION,
                 "capabilities": {"tools": {}},
-                "clientInfo": {"name": "affine-ingest", "version": "0.1.0"},
+                "clientInfo": {"name": "affine-ingest", "version": "0.2.0"},
             },
         )
+        await self._notify("notifications/initialized")
         self._initialized = True
         return result
 
@@ -110,7 +127,13 @@ class MCPClient:
         """Call an MCP tool. Returns the parsed JSON payload, or the raw text
         if the tool returned a non-JSON string."""
         await self.initialize()
-        result = await self._rpc("tools/call", {"name": name, "arguments": arguments})
+        params = {"name": name, "arguments": arguments}
+        try:
+            result = await self._rpc("tools/call", params)
+        except _SessionExpired:
+            self._initialized = False
+            await self.initialize()
+            result = await self._rpc("tools/call", params)
 
         content = result.get("content", [])
         is_error = bool(result.get("isError"))
@@ -128,14 +151,24 @@ class MCPClient:
         except (json.JSONDecodeError, ValueError):
             return text
 
-    async def _rpc(self, method: str, params: dict[str, Any]) -> Any:
+    async def _post(self, payload: dict[str, Any]) -> httpx.Response:
         if self._client is None:
             raise RuntimeError("MCPClient must be used inside `async with`")
-        req_id = next(self._counter)
-        payload = {"jsonrpc": "2.0", "id": req_id, "method": method, "params": params}
-        response = await self._client.post("/", json=payload)
+        headers = {"mcp-session-id": self._session_id} if self._session_id else {}
+        response = await self._client.post(self._url, json=payload, headers=headers)
+        if response.status_code == 404 and self._session_id:
+            raise _SessionExpired()
         response.raise_for_status()
-        body = response.json()
+        return response
+
+    async def _notify(self, method: str) -> None:
+        await self._post({"jsonrpc": "2.0", "method": method})
+
+    async def _rpc(self, method: str, params: dict[str, Any]) -> Any:
+        req_id = next(self._counter)
+        response = await self._post({"jsonrpc": "2.0", "id": req_id, "method": method, "params": params})
+        self._session_id = response.headers.get("mcp-session-id") or self._session_id
+        body = _parse_body(response, req_id)
         if "error" in body:
             err = body["error"]
             raise MCPError(int(err.get("code", -1)), str(err.get("message", "")))
@@ -144,7 +177,22 @@ class MCPClient:
     # ── Typed tool methods ────────────────────────────────────────────
 
     async def list_folder_tree(self) -> dict:
-        return await self.call_tool("list_folder_tree", {})
+        """Organize sidebar as a tree: folders `{id, type, name, children}`,
+        doc links `{id, type: "doc", docId, children: []}`, siblings in
+        sidebar order."""
+        data = await self.call_tool("list_organize_nodes", {})
+        nodes = data.get("nodes", [])
+        built: dict[str, dict] = {}
+        for node in nodes:
+            if node.get("type") == "folder":
+                built[node["id"]] = {"id": node["id"], "type": "folder", "name": node.get("data"), "children": []}
+            else:
+                built[node["id"]] = {"id": node["id"], "type": node.get("type"), "docId": node.get("data"), "children": []}
+        roots: list[dict] = []
+        for node in sorted(nodes, key=lambda n: n.get("index") or ""):
+            parent = built.get(node.get("parentId") or "")
+            (parent["children"] if parent else roots).append(built[node["id"]])
+        return {"totalNodes": len(nodes), "tree": roots}
 
     async def find_doc_by_title(
         self,
@@ -155,22 +203,24 @@ class MCPClient:
     ) -> dict:
         args: dict[str, Any] = {"title": title}
         if fuzzy:
-            args["fuzzy"] = True
-        if include_trash:
-            args["includeTrash"] = True
-        return await self.call_tool("find_doc_by_title", args)
+            args["caseInsensitive"] = True
+        result = await self.call_tool("find_doc_by_title", args)
+        if not include_trash and isinstance(result, dict):
+            result = {**result, "matches": [m for m in result.get("matches", []) if not m.get("inTrash")]}
+        return result
 
     async def create_folder(self, name: str, *, parent_folder_id: str | None = None) -> dict:
         args: dict[str, Any] = {"name": name}
         if parent_folder_id is not None:
-            args["parentFolderId"] = parent_folder_id
-        return await self.call_tool("create_folder", args)
+            args["parentId"] = parent_folder_id
+        node = await self.call_tool("create_folder", args)
+        return {**node, "folderId": node["id"]}
 
     async def create_doc(self, title: str, *, initial_blocks: list[dict] | None = None) -> dict:
-        args: dict[str, Any] = {"title": title}
+        created = await self.call_tool("create_doc", {"title": title})
         if initial_blocks:
-            args["initialBlocks"] = initial_blocks
-        return await self.call_tool("create_doc", args)
+            await self.append_blocks(created["docId"], initial_blocks)
+        return created
 
     async def append_blocks(
         self,
@@ -180,27 +230,55 @@ class MCPClient:
         after_heading: str | None = None,
         after_block_id: str | None = None,
     ) -> dict:
-        args: dict[str, Any] = {"docId": doc_id, "blocks": blocks}
+        """Append block specs in order, one `append_block` call each. With an
+        anchor (a block id, or the text of a heading), the blocks go right
+        after it, chained so they keep their order."""
+        anchor = after_block_id
         if after_heading is not None:
-            args["afterHeading"] = after_heading
-        if after_block_id is not None:
-            args["afterBlockId"] = after_block_id
-        return await self.call_tool("append_blocks", args)
+            anchor = await self._find_heading(doc_id, after_heading)
+        block_ids: list[str] = []
+        for spec in blocks:
+            args = {"docId": doc_id, **to_append_block_args(spec)}
+            if anchor:
+                args["placement"] = {"afterBlockId": anchor}
+            result = await self.call_tool("append_block", args)
+            block_ids.append(result.get("blockId"))
+            if anchor:
+                anchor = result.get("blockId") or anchor
+        return {"appended": len(block_ids), "blockIds": block_ids}
+
+    async def _find_heading(self, doc_id: str, heading: str) -> str:
+        listing = await self.call_tool("read_doc", {"docId": doc_id})
+        for block in listing.get("blocks", []):
+            if (
+                block.get("flavour") == "affine:paragraph"
+                and str(block.get("type") or "").startswith("h")
+                and (block.get("text") or "").strip() == heading
+            ):
+                return block["id"]
+        raise LookupError(f"heading {heading!r} not found in doc {doc_id}")
 
     async def move_document(self, doc_id: str, *, folder_id: str | None = None) -> dict:
-        args: dict[str, Any] = {"docId": doc_id}
-        if folder_id is not None:
-            args["folderId"] = folder_id
-        return await self.call_tool("move_document", args)
+        """File the doc into exactly one folder (or none when folder_id is
+        None): link it to the target, then drop its other sidebar links."""
+        data = await self.call_tool("list_organize_nodes", {})
+        links = [n for n in data.get("nodes", []) if n.get("type") == "doc" and n.get("data") == doc_id]
+        if folder_id is not None and not any(n.get("parentId") == folder_id for n in links):
+            await self.call_tool("add_organize_link", {"folderId": folder_id, "type": "doc", "targetId": doc_id})
+        for link in links:
+            if link.get("parentId") != folder_id:
+                await self.call_tool("delete_organize_link", {"nodeId": link["id"]})
+        return {"docId": doc_id, "folderId": folder_id, "ok": True}
 
     async def delete_doc(self, doc_id: str) -> dict:
-        return await self.call_tool("delete_doc", {"docId": doc_id})
+        return await self.call_tool("delete_doc", {"docId": doc_id, "confirmDocId": doc_id})
 
     async def set_doc_title(self, doc_id: str, title: str) -> dict:
-        return await self.call_tool("set_doc_title", {"docId": doc_id, "title": title})
+        return await self.call_tool("update_doc_title", {"docId": doc_id, "title": title})
 
     async def list_doc_blocks(self, doc_id: str) -> dict:
-        return await self.call_tool("list_doc_blocks", {"docId": doc_id})
+        """`{blocks: [{id, flavour, type, text, ...}]}` via `read_doc`."""
+        return await self.call_tool("read_doc", {"docId": doc_id})
 
     async def delete_block(self, doc_id: str, block_id: str) -> dict:
         return await self.call_tool("delete_block", {"docId": doc_id, "blockId": block_id})
@@ -214,17 +292,33 @@ class MCPClient:
     ) -> dict:
         """Upload binary bytes to AFFiNE workspace blob storage.
 
-        Returns `{sourceId, byteCount, ok}`. The `sourceId` is the value
-        you pass as `prop:sourceId` on an `affine:image` block.
-        """
-        import base64
-
-        b64 = base64.b64encode(data).decode("ascii")
-        return await self.call_tool(
+        Returns `{sourceId, byteCount, ok}`. The `sourceId` (the blob key,
+        which is the filename) is what an `image` block references, so
+        filenames must be unique per workspace."""
+        if not self._workspace_id:
+            raise ValueError("upload_blob needs the AFFiNE workspace id (AFFINE_WORKSPACE_ID)")
+        result = await self.call_tool(
             "upload_blob",
             {
+                "workspaceId": self._workspace_id,
+                "content": base64.b64encode(data).decode("ascii"),
+                "encoding": "base64",
                 "filename": filename,
                 "contentType": content_type,
-                "base64": b64,
             },
         )
+        return {"sourceId": result.get("key") or result.get("id"), "byteCount": result.get("size"), "ok": True}
+
+
+def _parse_body(response: httpx.Response, req_id: int) -> dict:
+    """JSON-RPC message from a JSON body or from the matching SSE `data:` line."""
+    if not response.headers.get("content-type", "").startswith("text/event-stream"):
+        return response.json()
+    last: dict = {}
+    for line in response.text.splitlines():
+        if line.startswith("data:"):
+            message = json.loads(line[5:].strip())
+            if message.get("id") == req_id:
+                return message
+            last = message
+    return last

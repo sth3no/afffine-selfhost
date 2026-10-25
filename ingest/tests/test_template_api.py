@@ -40,7 +40,7 @@ def client(monkeypatch):
     # monkeypatch.setenv alone is too late).
     monkeypatch.setattr(settings, "ingest_api_token", "test-token")
     # Swap the lifespan with a no-op so TestClient doesn't fail on missing
-    # MCP_EXT_HTTP_TOKEN / DATABASE_URL during startup.
+    # AFFINE_MCP_HTTP_TOKEN / DATABASE_URL during startup.
     monkeypatch.setattr(app.router, "lifespan_context", _noop_lifespan)
     with TestClient(app) as c:
         yield c, repo

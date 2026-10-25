@@ -1,9 +1,9 @@
-"""Integration test against a live mcp_ext + AFFiNE stack.
+"""Integration test against a live AFFiNE MCP server (mcp_internal) + AFFiNE.
 
 Skipped unless INTEGRATION=1 in the environment. Required env vars when running:
     INTEGRATION=1
-    MCP_EXT_URL=http://localhost:3100   # or http://mcp_ext:3100 inside the docker network
-    MCP_EXT_HTTP_TOKEN=<the stack's MCP_EXT_HTTP_TOKEN>
+    AFFINE_MCP_URL=http://localhost:3301/mcp   # or http://mcp_internal:3000/mcp inside the docker network
+    AFFINE_MCP_HTTP_TOKEN=<the stack's AFFINE_MCP_HTTP_TOKEN>
 
 Acceptance: creates a doc under Sources/Test/Phase2 with a unique title,
 re-running creates a second doc but reuses the folders. The test cleans up
@@ -32,14 +32,14 @@ pytestmark = [
 
 @pytest.fixture
 def mcp_url() -> str:
-    return os.environ.get("MCP_EXT_URL") or "http://localhost:3100"
+    return os.environ.get("AFFINE_MCP_URL") or "http://localhost:3301/mcp"
 
 
 @pytest.fixture
 def access_token() -> str:
-    token = os.environ.get("MCP_EXT_HTTP_TOKEN")
+    token = os.environ.get("AFFINE_MCP_HTTP_TOKEN")
     if not token:
-        pytest.skip("MCP_EXT_HTTP_TOKEN not set")
+        pytest.skip("AFFINE_MCP_HTTP_TOKEN not set")
     return token
 
 

@@ -21,6 +21,7 @@ from src.pipeline.classification import ClassificationResult
 from src.pipeline.extracted import Extracted, from_snapshot, to_snapshot
 from src.pipeline.filer import Filer
 from src.pipeline.markdown_render import count_keyframe_refs, markdown_to_blocks
+from src.pipeline.router import PlatformRouter
 from src.pipeline.chunked_render import chunked_render
 from src.pipeline.templated_render import TemplatedOutput, fallback_title, render as templated_render
 from src.pipeline.template_synth import synthesize_template
@@ -57,11 +58,11 @@ async def process_capture(
     synth_fn = synth_fn or synthesize_template
 
     # Deferred stub creation: POST /capture accepts rows even when
-    # mcp_ext/AFFiNE is down (doc_id=NULL). Create the doc now — every
+    # the MCP server/AFFiNE is down (doc_id=NULL). Create the doc now — every
     # later step (title, move, body) needs it.
     if not row.doc_id:
         platform_folder = await filer.resolve_or_create_folder(
-            ["Sources", platform.group, platform.folder_name],
+            PlatformRouter.initial_path(platform),
         )
         created = await filer._mcp.create_doc(
             row.shared_title or row.url or "captured note",
@@ -207,7 +208,7 @@ async def process_capture(
         log.warning("set_doc_title failed (continuing): %s", e)
 
     # ── File (move + append body) ──────────────────────────────────────
-    platform_path = ["Sources", platform.group, platform.folder_name]
+    platform_path = PlatformRouter.initial_path(platform)
     folder_id = await filer.move_to_topic_folder(
         platform_path=platform_path, result=result,
     )
@@ -437,10 +438,10 @@ def url_embed_block(url: str) -> dict[str, Any]:
 
 
 async def _list_existing_siblings(filer: Filer, platform: Platform) -> list[str]:
-    """Return immediate child folder names under Sources/<group>/<platform>/."""
+    """Return immediate child folder names under <sources root>/<group>/<platform>/."""
     tree = await filer._mcp.list_folder_tree()
     siblings = tree.get("tree", [])
-    for segment in ("Sources", platform.group, platform.folder_name):
+    for segment in PlatformRouter.initial_path(platform):
         match = next((n for n in siblings if n.get("name") == segment), None)
         if match is None:
             return []
