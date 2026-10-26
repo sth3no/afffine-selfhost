@@ -18,11 +18,14 @@ RUN apt-get update \
 # `npm ci` (no --omit=dev) is intentional: TypeScript is in devDependencies
 # and `npx tsc` needs it to compile. We prune devDeps + npm cache after
 # the build to keep the image lean.
+# `npm update proxy-addr`: the lockfile pins proxy-addr 2.0.7 (via express), which has
+# CVE-2026-90711; 2.0.8 is inside express's ~2.0.7 range.
 ARG BGUTIL_VERSION=1.3.1
 RUN git clone --depth 1 --branch ${BGUTIL_VERSION} \
         https://github.com/Brainicism/bgutil-ytdlp-pot-provider /opt/bgutil-pot \
     && cd /opt/bgutil-pot/server \
     && npm ci \
+    && npm update proxy-addr \
     && npx tsc \
     && npm prune --omit=dev \
     && rm -rf /root/.npm
